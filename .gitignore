@@ -1,0 +1,47 @@
+# 操作系统
+.DS_Store
+**/.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# 编辑器 / IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# npm run build
+lib/
+
+# npm run toolchain
+.tooling/
+
+# Harness - npm run contract:extract
+# DeepSeek Harness
+.tooling/conformance/
+
+# 依赖
+node_modules/
+
+# Rust
+# Cargo 的产物与本地覆盖
+quorfloat/target/
+**/*.rs.bk
+Cargo.lock.orig
+
+# --- 开发期运行数据 ---
+# peer-probe / mock-quorfloat
+/tmp-quorfloat-*.json
+quorfloat-probe*.json
+*-probe.json
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# local
+*.local
+*.local.*
+.dev.vars
+.env
+.env.*
