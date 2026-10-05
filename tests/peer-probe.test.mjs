@@ -238,3 +238,30 @@ test('a hint with no reported surface says so instead of guessing', async () => 
     cleanupDir(dir)
   }
 })
+
+
+test('a pinned workspace that is not registered stops the probe with a clear message', async () => {
+  // The scenario runner pins a workspace so a throwaway home is deterministic; a
+  // typo there must fail loudly rather than silently probing the wrong place.
+  const dir = scratchDir()
+  const reportPath = join(dir, 'report.json')
+  const peer = startPeer({
+    mode: 'auto',
+    reportPath,
+    env: { DSH_QUORFLOAT_PEER_WORKSPACE: 'not-a-workspace' },
+  })
+  try {
+    const hello = await waitForRequest(peer, 'hello')
+    peer.send({ jsonrpc: '2.0', id: hello.message.id, result: { protocol: 'quorfloat/1' } })
+    // Answer the probe's first two calls so it reaches the workspace check.
+    const list = await waitForRequest(peer, 'workspaces/list')
+    peer.send({ jsonrpc: '2.0', id: list.message.id, result: { items: [{ workspaceId: 'w1', path: '/tmp/ws', title: 'ws' }] } })
+    const sessions = await waitForRequest(peer, 'sessions/list')
+    peer.send({ jsonrpc: '2.0', id: sessions.message.id, result: { items: [] } })
+    await waitFor('the rejection message', async () => peer.text().includes('is not registered'))
+    assert.ok(!peer.text().includes('created session'), 'nothing was created in the wrong workspace')
+  } finally {
+    await peer.close()
+    cleanupDir(dir)
+  }
+})

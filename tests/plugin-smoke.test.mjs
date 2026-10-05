@@ -244,12 +244,12 @@ test('a presence report from the browser half reaches the plugin authority', asy
     const before = await router.handle('diag/snapshot', {})
     assert.equal(before.authority.authority, 'none', 'nothing reported yet, and the panel is not visible')
 
-    const accepted = await router.handle('ui/reportPresence', { surface: 'web', visible: true, focused: true, seq: 1 })
+    const accepted = await router.handle('presence/report', { surface: 'web', visible: true, focused: true, seq: 1 })
     assert.deepEqual(accepted, { accepted: true })
     const after = await router.handle('diag/snapshot', {})
     assert.equal(after.authority.authority, 'harness', 'a focused visible page owns the next decision')
 
-    const stale = await router.handle('ui/reportPresence', { surface: 'web', visible: false, focused: false, seq: 1 })
+    const stale = await router.handle('presence/report', { surface: 'web', visible: false, focused: false, seq: 1 })
     assert.equal(stale.accepted, false, 'a replayed sequence number is refused')
     assert.equal(stale.reason, 'stale-sequence')
     const settled = await router.handle('diag/snapshot', {})
@@ -267,7 +267,7 @@ test('a malformed presence report is rejected as a bad request', async () => {
     // `focused` is required: visibility alone cannot tell "occluded on Windows"
     // from "in front of the user", so a half report must not be accepted.
     await assert.rejects(
-      () => router.handle('ui/reportPresence', { surface: 'web', visible: true, seq: 1 }),
+      () => router.handle('presence/report', { surface: 'web', visible: true, seq: 1 }),
       error => {
         assert.equal(error.code, 'unavailable')
         assert.match(error.message, /focused must be a boolean/)
