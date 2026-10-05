@@ -188,9 +188,12 @@ export class HostRouter {
         )
       case 'session/cancel':
         return await this.#host.cancel(requireString(params, 'sessionId', 'session/cancel'))
-      case 'ui/reportPresence':
+      case 'presence/report':
+        // The stdio route exists for tests and for a peer that reports the panel's
+        // own presence. The browser half uses the gateway service instead, because
+        // window visibility only exists in the page.
         return await this.#host.reportPresence(
-          requireString(params, 'surface', 'ui/reportPresence'),
+          requireString(params, 'surface', 'presence/report'),
           readPresenceReport(params),
         )
       case 'interaction/answer':
@@ -291,21 +294,21 @@ export class HostRouter {
  */
 function readPresenceReport(params: unknown): { visible: boolean; focused: boolean; seq: number; at?: number } {
   if (typeof params !== 'object' || params === null) {
-    throw new ChannelError('unavailable', 'ui/reportPresence: params must be an object')
+    throw new ChannelError('unavailable', 'presence/report: params must be an object')
   }
   const record = params as Record<string, unknown>
   if (typeof record['visible'] !== 'boolean') {
-    throw new ChannelError('unavailable', 'ui/reportPresence: visible must be a boolean')
+    throw new ChannelError('unavailable', 'presence/report: visible must be a boolean')
   }
   if (typeof record['focused'] !== 'boolean') {
-    throw new ChannelError('unavailable', 'ui/reportPresence: focused must be a boolean')
+    throw new ChannelError('unavailable', 'presence/report: focused must be a boolean')
   }
   if (!Number.isInteger(record['seq'])) {
-    throw new ChannelError('unavailable', 'ui/reportPresence: seq must be an integer')
+    throw new ChannelError('unavailable', 'presence/report: seq must be an integer')
   }
   const at = record['at']
   if (at !== undefined && !Number.isFinite(at)) {
-    throw new ChannelError('unavailable', 'ui/reportPresence: at must be a finite number when present')
+    throw new ChannelError('unavailable', 'presence/report: at must be a finite number when present')
   }
   return at === undefined
     ? { visible: record['visible'], focused: record['focused'], seq: record['seq'] as number }

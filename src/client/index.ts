@@ -83,6 +83,8 @@ export function apply(ctx: ClientContext): void {
     try {
       const { visible, focused } = read()
       seq += 1
+      // The arguments are spread: the gateway matches `args` keys against the
+      // host method's parameter names one for one.
       const result = await ctx.connection.rpc.call(CHANNEL, ENDPOINT, {
         args: { surface, visible, focused, seq, at: Date.now() },
       })

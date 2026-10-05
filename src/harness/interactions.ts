@@ -456,6 +456,12 @@ export class Interactions {
     }
     const verdict = this.#deps.authority()
     this.#counters.authorityChecks += 1
+    this.#deps.log.debug('authority verdict for an interaction', {
+      kind,
+      authority: verdict.authority,
+      reason: verdict.reason,
+      fresh: verdict.fresh,
+    })
     if (verdict.authority === 'panel') {
       this.#counters.claimed += 1
       // A hint is advisory, but it is the only way the panel learns *what kind*

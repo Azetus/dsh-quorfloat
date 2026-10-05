@@ -123,9 +123,21 @@ export function registerPresenceGateway(deps: PresenceGatewayDeps): () => void {
     enumerable: false,
   })
 
-  const method = function reportPresence(this: unknown, payload: unknown): { accepted: boolean; reason?: string } {
-    const report = validatePresenceReport(payload)
-    return sink(report)
+  // One parameter per wire field, deliberately. The gateway's source-mode
+  // descriptor reads parameter names off this signature and then requires the
+  // request's `args` keys to match them exactly (`assertExactArguments`), so a
+  // single `payload` parameter would make the browser send
+  // `args: { payload: {...} }` — and sending the report's own fields, which is
+  // what a reader expects, is rejected with `gateway/arguments-invalid`.
+  const method = function reportPresence(
+    this: unknown,
+    surface: unknown,
+    visible: unknown,
+    focused: unknown,
+    seq: unknown,
+    at?: unknown,
+  ): { accepted: boolean; reason?: string } {
+    return sink(validatePresenceReport({ surface, visible, focused, seq, ...(at === undefined ? {} : { at }) }))
   }
   // `remoteMethods` reads the descriptor off `Object.getPrototypeOf(service)`
   // and the implementation off the same object, so one plain prototype carries

@@ -672,6 +672,7 @@ function routerMethods(router: HostRouter): Map<string, (params: unknown, method
     'session/prompt',
     'session/cancel',
     'interaction/answer',
+    'presence/report',
     'diag/snapshot',
   ]
   const map = new Map<string, (params: unknown, method: string) => Promise<unknown>>()

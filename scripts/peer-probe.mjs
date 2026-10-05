@@ -50,6 +50,8 @@ const observed = {
   interactions: [],
   /** Requests that belong to the Harness window; no answer is expected. */
   hints: [],
+  /** Presence this run announced, for the verification record. */
+  announced: { panelVisible: null, surfaces: [] },
   answered: [],
   stderr: [],
 }
@@ -85,6 +87,11 @@ function call(method, params, timeoutMs = 15000) {
   })
   send(params === undefined ? { jsonrpc: '2.0', id, method } : { jsonrpc: '2.0', id, method, params })
   return answer
+}
+
+/** Send a notification (no response expected). */
+function notify(method, params) {
+  send({ jsonrpc: '2.0', method, params })
 }
 
 /** Answer one host request. */
@@ -153,6 +160,12 @@ function handleNotification(message) {
       observed.events.push({ kind: 'event', seq: params.seq, type: params.type })
       sessionEvents.push(params)
       note(`event #${params.seq} ${params.type}`)
+      // Tool calls are the only place a scenario can go wrong in a way the event
+      // list does not explain: the model may simply not request escalation, or it
+      // may send the escalation fields unpaired (which the sandbox layer rejects).
+      // Recording the arguments turns "no approval appeared" into an answer.
+      if (params.type === 'tool/call') note('    tool/call:', summarizeToolCall(params.data))
+      if (params.type === 'tool/result') note('    tool/result:', summarizeToolResult(params.data))
       return
     }
     case 'session/stream':
@@ -238,6 +251,67 @@ async function onInteraction(params) {
   note('answered the questions ->', JSON.stringify(result))
 }
 
+/**
+ * Reduce a run to the few facts a scenario is judged on.
+ *
+ * A scenario is decided by *who* answered and *how the turn ended*, and the raw
+ * event list hides both: "the panel said nothing" looks identical whether the
+ * panel deferred to the Harness window or the request never reached anyone.
+ * Recording the turn's terminal reason and the approval outcomes separates them.
+ *
+ * @returns the conclusion block written into the report.
+ */
+function conclude() {
+  const terminal = [...sessionEvents].reverse().find(event => event.type === 'turn/end')
+  return {
+    /** Why the turn stopped, e.g. `{kind:'completed'}` or an abort. */
+    turnEnd: terminal?.data?.reason ?? null,
+    /** Outcomes reached for approvals, in order; empty means none was decided. */
+    approvalOutcomes: sessionEvents
+      .filter(event => event.type === 'approval/decided')
+      .map(event => event.data?.outcome ?? event.data?.decision ?? null),
+    /** How many requests the panel answered. */
+    panelAnswered: observed.answered.length,
+    /** Requests the panel was told belong to the Harness window. */
+    hints: observed.hints,
+  }
+}
+
+/**
+ * Summarize a tool call just enough to answer "did it ask to escalate?".
+ *
+ * @param data - the `tool/call` event payload.
+ * @returns a one-line description.
+ */
+function summarizeToolCall(data) {
+  const call = data?.call ?? data
+  const args = call?.arguments ?? call?.args ?? data?.arguments
+  const name = call?.name ?? data?.toolName ?? data?.name ?? '?'
+  let parsed = args
+  if (typeof args === 'string') {
+    try { parsed = JSON.parse(args) } catch { parsed = undefined }
+  }
+  if (parsed === undefined || parsed === null) return `${String(name)} (arguments not readable)`
+  const keys = Object.keys(parsed)
+  const escalation = keys.includes('sandbox_permissions') || keys.includes('justification')
+    ? ` sandbox_permissions=${JSON.stringify(parsed.sandbox_permissions)} justification=${parsed.justification === undefined ? '(missing)' : 'present'}`
+    : ' (no escalation fields)'
+  const command = typeof parsed.command === 'string' ? ` command=${JSON.stringify(parsed.command.slice(0, 60))}` : ''
+  return `${String(name)}${command}${escalation}`
+}
+
+/**
+ * Summarize a tool result enough to tell a refusal from an execution.
+ *
+ * @param data - the `tool/result` event payload.
+ * @returns a one-line description.
+ */
+function summarizeToolResult(data) {
+  const text = JSON.stringify(data ?? {})
+  const failure = /error|denied|rejected|forbidden|unavailable|refus/i.test(text)
+  return `${failure ? 'FAILED' : 'ok'} ${text.slice(0, 200)}`
+}
+
 /** Sleep for a number of milliseconds. */
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -261,6 +335,45 @@ async function waitForEvent(predicate, timeoutMs, description) {
   }
 }
 
+/**
+ * Announce the presence assumptions this run wants the host to hold.
+ *
+ * Two knobs, both defaulting to "nothing is looking at anything":
+ *
+ * - `DSH_QUORFLOAT_PEER_PANEL_VISIBLE=1` sends the protocol notification a real
+ *   panel would send when the user has the floating window on screen. Without it
+ *   the host correctly assumes an unseen panel is not visible.
+ * - `DSH_QUORFLOAT_PEER_UI=<surface>[:visible|:hidden][:focused|:unfocused]`
+ *   stands in for the browser half, which is the real source of this fact but
+ *   cannot be driven from here. It reports over stdio, the same entry the router
+ *   exposes for tests; the browser path through the gateway is a separate leg
+ *   that needs a real page.
+ *
+ * @returns nothing; failures are narrated rather than thrown, because a missing
+ *   announcement should show up as an unexpected authority verdict, not as a
+ *   crashed peer.
+ */
+async function announcePresence() {
+  if (process.env['DSH_QUORFLOAT_PEER_PANEL_VISIBLE'] === '1') {
+    observed.announced.panelVisible = true
+    notify('window/visibility', { visible: true })
+    note('announced: the panel is visible')
+  }
+  const spec = process.env['DSH_QUORFLOAT_PEER_UI']
+  if (spec === undefined || spec === '') return
+  const [surface, ...flags] = spec.split(':')
+  const visible = !flags.includes('hidden')
+  const focused = flags.includes('focused')
+  observed.announced.surfaces.push({ surface, visible, focused })
+  try {
+    const result = await call('presence/report', { surface, visible, focused, seq: 1, at: Date.now() })
+    note(`announced: ${surface} visible=${String(visible)} focused=${String(focused)} ->`, JSON.stringify(result))
+  } catch (error) {
+    observed.announced.error = error?.message ?? String(error)
+    note('could not announce interface presence:', observed.announced.error)
+  }
+}
+
 /** The scripted probe: everything the host plugin must be able to do. */
 async function probe() {
   // 1. Workspaces.
@@ -273,9 +386,16 @@ async function probe() {
   const sessions = await call('sessions/list', {})
   note(`sessions: ${sessions.items?.length ?? 0}`)
 
-  const workspaceId = workspaces.items?.[0]?.workspaceId
+  // `DSH_QUORFLOAT_PEER_WORKSPACE` pins the workspace by id, so a scenario can run
+  // in a throwaway home without depending on which workspace happens to be first.
+  const pinned = process.env['DSH_QUORFLOAT_PEER_WORKSPACE']
+  const workspaceId = pinned !== undefined && pinned !== '' ? pinned : workspaces.items?.[0]?.workspaceId
   if (workspaceId === undefined) {
-    note('no workspace is registered; create one in dsh first, then re-run')
+    note('no workspace is registered; create one in dsh first, or set DSH_QUORFLOAT_PEER_WORKSPACE')
+    return
+  }
+  if (!(workspaces.items ?? []).some(item => item.workspaceId === workspaceId)) {
+    note(`pinned workspace ${workspaceId} is not registered; known: ${(workspaces.items ?? []).map(i => i.workspaceId).join(', ') || '(none)'}`)
     return
   }
 
@@ -329,7 +449,12 @@ async function probe() {
 /** Write the report and exit. */
 function finish(code) {
   try {
-    writeFileSync(REPORT, JSON.stringify({ ...observed, exitCode: code, endedAt: Date.now() }, null, 2))
+    writeFileSync(REPORT, JSON.stringify({
+      ...observed,
+      conclusion: conclude(),
+      exitCode: code,
+      endedAt: Date.now(),
+    }, null, 2))
     note(`report written to ${REPORT}`)
   } catch (error) {
     note('could not write the report:', error?.message ?? String(error))
@@ -403,6 +528,7 @@ async function main() {
   note('handshake answered:', JSON.stringify(handshake))
   ready = true
   for (const message of queued.splice(0)) handle(message)
+  await announcePresence()
   if (MODE === 'handshake' || MODE === 'hold') {
     note(`mode ${MODE}: staying alive without probing`)
     return
