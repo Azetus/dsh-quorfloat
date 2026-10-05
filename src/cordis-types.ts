@@ -62,6 +62,17 @@ export interface PluginContext {
   emit(name: string, ...args: unknown[]): void
   /** Create a named child logger. */
   logger(name?: string): Logger
+  /**
+   * The reflection layer backing the context proxy.
+   *
+   * `provide` is how a service becomes visible to the rest of the composition —
+   * it is the only registration step Cordis' own `Service` base performs, and
+   * the Typert gateway discovers remotely-callable services through it.
+   */
+  reflect: {
+    /** Register `value` under `name` for this fiber; returns a disposer. */
+    provide(name: string, value?: unknown, check?: () => boolean): Disposer
+  }
 }
 
 /** A schema accepted as plugin `Config` (Standard Schema v1, synchronous only). */

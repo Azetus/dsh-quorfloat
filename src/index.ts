@@ -22,6 +22,7 @@ import type { ChannelError } from './bridge/errors.js'
 import { HostRouter } from './bridge/router.js'
 import { QuorfloatSupervisor, type SupervisorEvent, type SupervisorSnapshot } from './host/supervisor.js'
 import { resolveQuorfloatBinary, type ResolvedBinary } from './host/binary.js'
+import { registerPresenceGateway, type InboundPresenceReport } from './host/presence-gateway.js'
 import {
   createHarnessFromContext,
   HarnessError,
@@ -68,6 +69,8 @@ interface Activation {
   injection?: Disposer | undefined
   /** Reported presence of the Harness UI surfaces; read on every decision. */
   presence?: PresenceTracker | undefined
+  /** Disposer for the browser-facing presence service. */
+  presenceGateway?: Disposer | undefined
   stopped: boolean
 }
 
@@ -139,6 +142,33 @@ export function createPlugin(overrides: PluginOverrides = {}) {
       // subscription: both are sampled at the moment a request arrives.
       const presence = new PresenceTracker()
       activation.presence = presence
+      const acceptPresence = (report: InboundPresenceReport): { accepted: boolean; reason?: string } => {
+        const surface: PresenceSurface = report.surface === 'desktop' ? 'desktop' : 'web'
+        const rejection = presence.report(surface, {
+          visible: report.visible,
+          focused: report.focused,
+          seq: report.seq,
+          at: report.at ?? Date.now(),
+        })
+        if (rejection !== undefined) {
+          log.debug('ignored a presence report', { surface, rejection, seq: report.seq })
+          return { accepted: false, reason: rejection }
+        }
+        log.debug('presence reported', { surface, visible: report.visible, focused: report.focused })
+        overrides.onStateChange?.(state())
+        return { accepted: true }
+      }
+      // Registered before the process starts: the page reports on load, which can
+      // precede any stdio handshake, and a report nobody listens for is lost.
+      try {
+        activation.presenceGateway = registerPresenceGateway({ ctx, sink: acceptPresence, log })
+      } catch (error) {
+        // Without this the panel cannot know whether the user is looking at the
+        // Harness window, so approvals would default to whichever surface the
+        // authority rules pick for an unreported state. Say so rather than fail
+        // the whole plugin.
+        log.warn('could not register the presence gateway; browser halves cannot report visibility', error)
+      }
       const authority = (): AuthorityVerdict =>
         evaluateAuthority({
           desktop: presence.raw('desktop'),
@@ -205,25 +235,10 @@ export function createPlugin(overrides: PluginOverrides = {}) {
             prompt: async (sessionId, requestId, text) => await sessionLayer.prompt(sessionId, requestId, text),
             cancel: async sessionId => await sessionLayer.cancel(sessionId),
             answerInteraction: async (interactionId, answer) => interactions.answer(interactionId, answer),
-            reportPresence: async (surface, report) => {
-              // The client half is the only source of "is the user looking at the
-              // Harness window": the shell knows but does not expose it, and the
-              // host process has no window concept at all.
-              const surfaceName: PresenceSurface = surface === 'desktop' ? 'desktop' : 'web'
-              const rejection = presence.report(surfaceName, {
-                visible: report.visible,
-                focused: report.focused,
-                seq: report.seq,
-                at: report.at ?? Date.now(),
-              })
-              if (rejection !== undefined) {
-                log.debug('ignored a presence report', { surface: surfaceName, rejection, seq: report.seq })
-                return { accepted: false, reason: rejection }
-              }
-              log.debug('presence reported', { surface: surfaceName, visible: report.visible, focused: report.focused })
-              overrides.onStateChange?.(state())
-              return { accepted: true }
-            },
+            // The stdio path exists for tests and for a peer that reports the
+            // panel's own presence; the browser half goes through the gateway
+            // service instead. Both funnel into the same tracker.
+            reportPresence: async (surface, report) => acceptPresence({ ...report, surface }),
             diagnostics: () => ({
               hostVersion: hostVersion(),
               services: activation.probe?.presence ?? {},
@@ -435,6 +450,12 @@ function normalizeOrThrow(raw: unknown): QuorfloatConfig {
  */
 async function deactivate(activation: Activation, log: Logger): Promise<void> {
   activation.stopped = true
+  try {
+    activation.presenceGateway?.()
+  } catch {
+    // Unregistering the browser-facing service must not block the rest of teardown.
+  }
+  activation.presenceGateway = undefined
   try {
     activation.injection?.()
   } catch {

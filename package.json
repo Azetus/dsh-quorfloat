@@ -14,7 +14,7 @@
   ],
   "scripts": {
     "toolchain": "npm install --prefix .tooling --cache .tooling/.npm-cache --no-audit --no-fund typescript@5.9.3 @types/node@22",
-    "build": "npm run toolchain --silent && ./.tooling/node_modules/.bin/tsc -p tsconfig.json",
+    "build": "npm run toolchain --silent && ./.tooling/node_modules/.bin/tsc -p tsconfig.json && node scripts/build-client.mjs",
     "typecheck": "./.tooling/node_modules/.bin/tsc -p tsconfig.json --noEmit",
     "test": "npm run build --silent && node --test --test-timeout=30000 \"tests/*.test.mjs\"",
     "test:only": "node --test --test-timeout=30000 \"tests/*.test.mjs\"",
@@ -23,6 +23,22 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection"
+      ]
     }
+  },
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
   }
 }
