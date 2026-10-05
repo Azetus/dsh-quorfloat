@@ -713,6 +713,11 @@ function quorfloatEnvironment(config: QuorfloatConfig): NodeJS.ProcessEnv {
     DSH_QUORFLOAT_PLATFORM: `${process.platform}-${process.arch}`,
     DSH_QUORFLOAT_PARENT_PID: String(process.pid),
     DSH_QUORFLOAT_LOG_LEVEL: config.logLevel,
+    // The accelerator the user configured, so the child can attempt to register
+    // it without reading the host's config files. It reports back in `hello`
+    // whether the grab succeeded, which is how a conflict becomes visible in the
+    // settings surface instead of the key silently doing nothing.
+    DSH_QUORFLOAT_HOTKEY: config.hotkey,
   }
   for (const key of ['HOME', 'USER', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'XDG_RUNTIME_DIR', 'DISPLAY', 'WAYLAND_DISPLAY']) {
     const value = process.env[key]

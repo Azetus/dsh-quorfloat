@@ -1,0 +1,19 @@
+# rust
+# cargo 构建产物
+target/
+
+# 本地工具残留
+# rustfmt 改写文件前留下的备份。
+**/*.rs.bk
+
+# `cargo update` 失败时留下的旧锁文件。
+Cargo.lock.orig
+
+# 编辑器
+.rustfmt.toml.local
+rust-analyzer.json
+
+# 平台产物
+/dsh-quorfloat.exe
+/dsh-quorfloat.pdb
+

@@ -1,0 +1,30 @@
+[package]
+name = "dsh-quorfloat"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.88"
+description = "System-level floating conversation window for DeepSeek Harness"
+license = "MIT"
+publish = false
+
+# The host supervisor resolves this exact name inside the platform package
+# (`dsh-quorfloat-<platform>-<arch>`), so the package name and the binary name
+# are the same string on purpose.
+[[bin]]
+name = "dsh-quorfloat"
+path = "src/main.rs"
+
+[lib]
+name = "dsh_quorfloat"
+path = "src/lib.rs"
+
+[dependencies]
+# Only the protocol layer is needed so far. The window, hotkey, and egui
+# dependencies arrive with P1; keeping them out now means `cargo test` stays fast
+# and the first milestone is judged purely on whether the host accepts us.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+strip = true
+lto = "thin"
