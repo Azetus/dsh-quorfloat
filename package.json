@@ -1,0 +1,28 @@
+{
+  "name": "dsh-quorfloat",
+  "version": "0.0.1",
+  "private": true,
+  "description": "System-level floating conversation window for DeepSeek Harness (host plugin half)",
+  "type": "module",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "package.json"
+  ],
+  "scripts": {
+    "toolchain": "npm install --prefix .tooling --cache .tooling/.npm-cache --no-audit --no-fund typescript@5.9.3 @types/node@22",
+    "build": "npm run toolchain --silent && ./.tooling/node_modules/.bin/tsc -p tsconfig.json",
+    "typecheck": "./.tooling/node_modules/.bin/tsc -p tsconfig.json --noEmit",
+    "test": "npm run build --silent && node --test --test-timeout=30000 \"tests/*.test.mjs\"",
+    "test:only": "node --test --test-timeout=30000 \"tests/*.test.mjs\"",
+    "contract:extract": "node tests/fixtures/extract-harness-contract.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

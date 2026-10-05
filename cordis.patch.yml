@@ -1,0 +1,34 @@
+# The dsh-quorfloat bundle patch.
+#
+# This repository ships as ONE dsh bundle that contributes ONE host plugin row.
+# The row is inserted with the plugin's own `id` so that a user (or a
+# higher-priority patch layer, e.g. `$DSH_HOME/cordis.patch.yml`) can override
+# this row's whole `config` by targeting `id: quorfloat`.
+#
+# Every field below restates the schema defaults in `src/config.ts` on purpose:
+# a patch replaces a row's entire `config` rather than merging into it, so the
+# row must spell out the complete configuration it wants.
+
+- insert:
+    - id: quorfloat
+      name: dsh-quorfloat
+      config:
+        enabled: true
+        hotkey: Alt+Space
+        quorfloatPath: ""
+        defaultWorkspaceId: ""
+        window:
+          width: 640
+          maxHeight: 560
+          anchor: top-center
+          alwaysOnTop: true
+          reduceMotion: false
+          theme: system
+        startupTimeoutMs: 8000
+        requestTimeoutMs: 10000
+        heartbeatMs: 5000
+        heartbeatMissLimit: 3
+        shutdownGraceMs: 1500
+        restartLimit: 3
+        restartWindowMs: 30000
+        logLevel: info
