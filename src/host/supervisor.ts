@@ -718,6 +718,14 @@ function quorfloatEnvironment(config: QuorfloatConfig): NodeJS.ProcessEnv {
     // whether the grab succeeded, which is how a conflict becomes visible in the
     // settings surface instead of the key silently doing nothing.
     DSH_QUORFLOAT_HOTKEY: config.hotkey,
+    // Window geometry at spawn time. The same values also arrive in the `ready`
+    // payload, but by then the first frame has already been drawn: without these
+    // the panel would appear at its built-in default and visibly resize a moment
+    // later, which is exactly the kind of flicker a summoned panel must not have.
+    DSH_QUORFLOAT_WINDOW_WIDTH: String(config.window.width),
+    DSH_QUORFLOAT_WINDOW_MAX_HEIGHT: String(config.window.maxHeight),
+    DSH_QUORFLOAT_WINDOW_ALWAYS_ON_TOP: String(config.window.alwaysOnTop),
+    DSH_QUORFLOAT_WINDOW_REDUCE_MOTION: String(config.window.reduceMotion),
   }
   for (const key of ['HOME', 'USER', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'XDG_RUNTIME_DIR', 'DISPLAY', 'WAYLAND_DISPLAY']) {
     const value = process.env[key]

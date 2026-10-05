@@ -9,7 +9,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::protocol::error_code;
+use crate::protocol::{CAPABILITIES, PROTOCOL_VERSION, error_code};
 
 /// One inbound message, classified the way JSON-RPC classifies it.
 #[derive(Debug, Clone, PartialEq)]
@@ -188,6 +188,16 @@ impl Router {
             // escalates to signals — and it records whether it had to escalate.
             // Answering and exiting promptly is the evidence it looks for.
             "shutdown" => Outcome::Accepted,
+            // The host answering *our* opening `hello`. Both sides implement this
+            // method because either may ask; in practice the peer speaks first, so
+            // this branch is the host's reply rather than an unsolicited request.
+            "hello" => Outcome::ok(json!({
+                "protocol": PROTOCOL_VERSION,
+                "quorfloatVersion": crate::VERSION,
+                "platform": crate::platform::host_platform(),
+                "arch": crate::platform::host_arch(),
+                "capabilities": CAPABILITIES,
+            })),
             _ => Outcome::unknown_method(method),
         }
     }

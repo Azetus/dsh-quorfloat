@@ -19,11 +19,18 @@ name = "dsh_quorfloat"
 path = "src/lib.rs"
 
 [dependencies]
-# Only the protocol layer is needed so far. The window, hotkey, and egui
-# dependencies arrive with P1; keeping them out now means `cargo test` stays fast
-# and the first milestone is judged purely on whether the host accepts us.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# The window. `default-features = false` drops the accessibility bridge (AccessKit)
+# and the default font set: neither is needed for a spotlight-style input panel,
+# and both are large. Features are re-added explicitly so an upstream default
+# change cannot silently pull them back in.
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+
+# Global hotkey. This is the only way to summon the panel while Harness itself is
+# not focused, so it cannot be a window-local key binding.
+global-hotkey = "0.8"
 
 [profile.release]
 strip = true

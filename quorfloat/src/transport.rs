@@ -132,6 +132,19 @@ impl StdinSource {
     }
 }
 
+impl StdinSource {
+    /// Block until the next frame arrives.
+    ///
+    /// The inherent method shadows the trait's for direct callers in this crate,
+    /// which keeps the reader thread from having to import the trait.
+    ///
+    /// @returns `None` when the host closed the stream.
+    #[must_use]
+    pub fn next_frame(&mut self) -> Option<Inbound> {
+        <Self as FrameSource>::next_frame(self)
+    }
+}
+
 impl FrameSource for StdinSource {
     fn next_frame(&mut self) -> Option<Inbound> {
         loop {

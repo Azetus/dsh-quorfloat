@@ -76,6 +76,10 @@ test('the real supervisor completes a handshake with the Rust binary', { skip },
     debug: () => {},
     error: (...args) => logLines.push(['error', ...args]),
   }
+  // A purposely unparseable accelerator, so the "not registered" assertion below
+  // tests this crate's reporting rather than whether the machine's Alt+Space
+  // happens to be free. A real registration is covered separately.
+  process.env['DSH_QUORFLOAT_HOTKEY'] = 'Alt+Banana'
   const supervisor = new QuorfloatSupervisor({
     config: () => effective,
     resolveBinary: () => ({ path: binary, args: [], source: 'config', attempts: [] }),
@@ -130,8 +134,11 @@ test('the real supervisor completes a handshake with the Rust binary', { skip },
     assert.equal(recorded.platform, process.platform, 'platform uses process.platform spelling')
     assert.equal(recorded.arch, process.arch, 'arch uses process.arch spelling')
     assert.deepEqual(recorded.capabilities, ['window', 'hotkey', 'egui'])
-    assert.equal(recorded.hotkey.registered, false, 'P1 has not registered a hotkey yet, and says so')
-    assert.equal(recorded.hotkey.requested, 'Alt+Space', 'the requested accelerator is reported, not the achieved one')
+    // The reported flag is the *real* outcome of the grab, which is what makes a
+    // conflict visible in the host's settings surface instead of leaving the user
+    // pressing a key that does nothing.
+    assert.equal(recorded.hotkey.registered, false, 'an unparseable accelerator cannot register')
+    assert.equal(recorded.hotkey.requested, 'Alt+Banana', 'the requested accelerator is reported verbatim')
 
     // Liveness is judged by `ping`, so surviving several heartbeats is the proof
     // that the Rust read loop is actually answering rather than merely alive.
@@ -170,4 +177,65 @@ test('the Rust binary exits on stdin EOF instead of lingering', { skip }, async 
   const { code, signal } = await exited
   assert.equal(signal, null, 'it exited on its own, not by signal')
   assert.equal(code, 0)
+})
+
+test('a real accelerator registers and the session stays healthy', { skip }, async () => {
+  // The positive half of the hotkey contract. An accelerator unlikely to be taken
+  // is chosen so the test measures this crate rather than the machine's luck, and
+  // the assertion is on the whole session: a registration that broke the event
+  // loop would be worse than one that failed.
+  process.env['DSH_QUORFLOAT_HOTKEY'] = 'Control+Alt+Shift+F13'
+  const { QuorfloatSupervisor } = await import(new URL('../lib/host/supervisor.js', import.meta.url))
+  const { HostRouter } = await import(new URL('../lib/bridge/router.js', import.meta.url))
+  const { DEFAULT_CONFIG } = await import(new URL('../lib/config.js', import.meta.url))
+  const effective = {
+    ...DEFAULT_CONFIG,
+    heartbeatMs: 200,
+    heartbeatMissLimit: 3,
+    startupTimeoutMs: 8000,
+    shutdownGraceMs: 1000,
+    logLevel: 'debug',
+  }
+  let recorded
+  const supervisor = new QuorfloatSupervisor({
+    config: () => effective,
+    resolveBinary: () => ({ path: binary, args: [], source: 'config', attempts: [] }),
+    createRouter: channelSessionId =>
+      new HostRouter({
+        config: () => effective,
+        channelSessionId: () => channelSessionId,
+        hostVersion: () => 'cross-language-test',
+        listWorkspaces: async () => ({ items: [] }),
+        listSessions: async () => ({ items: [] }),
+        createSession: async () => ({ sessionId: 's' }),
+        attachSession: async sessionId => ({ sessionId }),
+        readHistory: async () => ({ records: [], hasMore: false }),
+        prompt: async () => ({ accepted: true }),
+        cancel: async () => ({ accepted: true }),
+        answerInteraction: async () => ({ accepted: true }),
+        reportPresence: async () => ({ accepted: true }),
+        diagnostics: () => ({}),
+      }),
+    log: { info: () => {}, warn: () => {}, debug: () => {}, error: () => {} },
+    onEvent: () => {},
+  })
+  try {
+    await supervisor.start()
+    await waitFor('running', async () => supervisor.snapshot().state === 'running', { timeoutMs: 10000 })
+    const handshake = supervisor.snapshot().hotkey
+    assert.ok(handshake !== null, 'the host recorded a hotkey report')
+    assert.equal(handshake.requested, 'Control+Alt+Shift+F13')
+    recorded = handshake.registered
+    await sleep(700)
+    assert.equal(supervisor.snapshot().state, 'running', 'registration did not disturb the loop')
+    assert.equal(supervisor.snapshot().consecutiveMissedHeartbeats, 0, 'pings are still answered')
+  } finally {
+    delete process.env['DSH_QUORFLOAT_HOTKEY']
+    const result = await supervisor.stop()
+    assert.equal(result.exited, true)
+    assert.equal(result.escalated, false)
+    // Reported because a headless CI machine may legitimately have no window server,
+    // and failing there would say nothing about the code.
+    console.log(`hotkey registered on this machine: ${String(recorded)}`)
+  }
 })

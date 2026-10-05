@@ -170,7 +170,7 @@ impl Session {
                 sink.log("host closed the channel; exiting");
                 return SessionExit::PeerClosed;
             };
-            if let Some(exit) = self.handle(frame, sink) {
+            if let Some(exit) = self.on_frame(frame, sink) {
                 return exit;
             }
         }
@@ -203,10 +203,23 @@ impl Session {
         }
     }
 
+    /// Send the opening `hello` request, once.
+    ///
+    /// Public because the GUI owns the event loop: it must write the handshake
+    /// before the window exists, then keep servicing frames from inside its own
+    /// update callback rather than from a blocking loop.
+    ///
+    /// @param sink - where the frame goes.
+    pub fn start(&mut self, sink: &mut dyn FrameSink) {
+        self.send_hello(sink);
+    }
+
     /// Handle one inbound frame.
     ///
+    /// @param frame - a classified frame from the transport.
+    /// @param sink - where answers go.
     /// @returns `Some(exit)` when the session is over.
-    fn handle(&mut self, frame: Inbound, sink: &mut dyn FrameSink) -> Option<SessionExit> {
+    pub fn on_frame(&mut self, frame: Inbound, sink: &mut dyn FrameSink) -> Option<SessionExit> {
         match frame {
             Inbound::Request { id, method, params } => {
                 let outcome = self.router.handle(&method, params.as_ref());
@@ -260,7 +273,17 @@ impl Session {
             // heartbeats back would add traffic without adding evidence.
             "host/heartbeat" => {}
             "host/config" => {
-                sink.log(&format!("host pushed configuration: {}", params.unwrap_or(Value::Null)));
+                // The same shape as `ready`'s `config`, for changes that do not
+                // need a restart. Applied through the same path so there is one
+                // interpretation of it rather than two that drift.
+                self.absorb_config(params.as_ref());
+                sink.log("host pushed configuration");
+            }
+            "ready" => {
+                // The post-handshake payload: the effective configuration. It
+                // arrives as a notification, so nothing is expected back.
+                self.absorb_config(params.as_ref().and_then(|value| value.get("config")));
+                sink.log("host sent the effective configuration");
             }
             // The request this session cannot yet satisfy. Answering `Ok` would
             // claim a display capability this process does not have, and the host
@@ -312,6 +335,33 @@ impl Session {
                 }
             }
         }
+    }
+
+    /// Report whether the panel is on screen.
+    ///
+    /// The host routes approvals by which surface the user is looking at, and this
+    /// notification is how it learns that the panel is one of them. It is sent on
+    /// every change including the first (hidden), because a panel that never
+    /// reports is indistinguishable from one that is not running.
+    ///
+    /// @param visible - whether the window is currently shown.
+    /// @param sink - where the notification goes.
+    pub fn report_visibility(&self, visible: bool, sink: &mut dyn FrameSink) {
+        if let Err(error) = sink.send(&rpc::notification("window/visibility", json!({ "visible": visible }))) {
+            sink.log(&format!("could not report window visibility: {error}"));
+        }
+    }
+
+    /// Fold the host's configuration into the stored view.
+    fn absorb_config(&mut self, config: Option<&Value>) {
+        let Some(config) = config else { return };
+        self.host.window = config.get("window").cloned().or(self.host.window.take());
+        self.host.hotkey = config
+            .get("hotkey")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or(self.host.hotkey.take());
+        self.host.heartbeat_ms = config.get("heartbeatMs").and_then(Value::as_i64).or(self.host.heartbeat_ms);
     }
 
     /// Allocate the next request id.
@@ -548,6 +598,61 @@ mod tests {
         let joined = sink.logs.join("\n");
         assert!(joined.contains("interaction arrived before the window exists"));
         assert!(joined.contains("\"kind\":\"approval\""), "the request itself is preserved in the log");
+    }
+
+    #[test]
+    fn ready_carries_the_effective_configuration() {
+        // The host's answer to `hello` says what it accepted; `ready` says what it
+        // wants this process to look like. Reading it is what makes the window the
+        // configured size on its first frame rather than after a resize.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        let mut source = ScriptedSource::new(vec![notification(
+            "ready",
+            json!({"protocol": "quorfloat/1", "config": {
+                "window": {"width": 480, "maxHeight": 300},
+                "hotkey": "Alt+Space",
+                "heartbeatMs": 5000,
+            }}),
+        )]);
+        session.run(&mut source, &mut sink);
+        let config = session.host_config();
+        assert_eq!(config.window.as_ref().unwrap()["width"], 480);
+        assert_eq!(config.hotkey.as_deref(), Some("Alt+Space"));
+        assert_eq!(config.heartbeat_ms, Some(5000));
+    }
+
+    #[test]
+    fn a_config_push_changes_only_the_fields_it_carries() {
+        // A partial push must not wipe the fields it omits, or a later heartbeat
+        // interval would silently reset the window geometry to nothing.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        let mut source = ScriptedSource::new(vec![
+            notification("ready", json!({"config": {"window": {"width": 480}, "heartbeatMs": 5000}})),
+            notification("host/config", json!({"hotkey": "Cmd+Shift+K"})),
+        ]);
+        session.run(&mut source, &mut sink);
+        let config = session.host_config();
+        assert_eq!(config.hotkey.as_deref(), Some("Cmd+Shift+K"));
+        assert_eq!(config.window.as_ref().unwrap()["width"], 480, "the window config survived");
+        assert_eq!(config.heartbeat_ms, Some(5000), "and so did the heartbeat interval");
+    }
+
+    #[test]
+    fn panel_visibility_is_reported_as_a_notification() {
+        // A notification, not a request: the host handles it in its notification
+        // path and the peer has nothing to wait for. It must also be sent when the
+        // panel is hidden, since "hidden" is a fact the host routes on.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        session.report_visibility(false, &mut sink);
+        session.report_visibility(true, &mut sink);
+        assert_eq!(sink.frames.len(), 2);
+        assert_eq!(sink.frames[0]["method"], "window/visibility");
+        assert_eq!(sink.frames[0]["params"]["visible"], false);
+        assert!(sink.frames[0].get("id").is_none(), "a notification carries no id");
+        assert_eq!(sink.frames[1]["params"]["visible"], true);
     }
 
     #[test]
