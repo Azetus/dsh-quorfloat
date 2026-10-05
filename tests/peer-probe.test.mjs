@@ -170,3 +170,71 @@ test('a malformed host frame does not break the peer', async () => {
     await peer.close()
   }
 })
+
+
+test('a hint is recorded and does not block the probe', async () => {
+  // A hint means the Harness window owns the request, so there is no
+  // `interactionId` and nothing to answer. Treating it as an unanswered request
+  // would make the probe sit still through the V3 scenario.
+  const dir = scratchDir()
+  const reportPath = join(dir, 'report.json')
+  const peer = startPeer({ mode: 'handshake', reportPath })
+  try {
+    const hello = await waitForRequest(peer, 'hello')
+    peer.send({ jsonrpc: '2.0', id: hello.message.id, result: { protocol: 'quorfloat/1' } })
+    peer.send({
+      jsonrpc: '2.0',
+      method: 'interaction/hint',
+      params: {
+        sessionId: 'session-1',
+        kind: 'approval',
+        reason: 'harness-open-but-idle',
+        surfaces: ['desktop'],
+      },
+    })
+    await waitFor('the hint to be noted', async () => peer.text().includes('belongs to the Harness window'))
+    assert.match(peer.text(), /switch to it to answer/, 'the open-but-unfocused case tells the user what to do')
+
+    // It must still be serving frames: a hint is not a stopping condition.
+    peer.send({ jsonrpc: '2.0', id: 9101, method: 'ping', params: {} })
+    await waitFor('a pong after the hint', async () =>
+      peer.frames.find(frame => frame.ok && frame.kind === 'success' && frame.message.id === 9101))
+  } finally {
+    const result = await peer.close()
+    assert.equal(result.code, 0)
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'))
+    assert.equal(report.hints.length, 1)
+    assert.deepEqual(report.hints[0], {
+      sessionId: 'session-1',
+      kind: 'approval',
+      reason: 'harness-open-but-idle',
+      surfaces: ['desktop'],
+    })
+    assert.deepEqual(report.interactions, [], 'a hint is not an answerable request')
+    assert.deepEqual(report.answered, [], 'and nothing was answered')
+    cleanupDir(dir)
+  }
+})
+
+test('a hint with no reported surface says so instead of guessing', async () => {
+  const dir = scratchDir()
+  const reportPath = join(dir, 'report.json')
+  const peer = startPeer({ mode: 'handshake', reportPath })
+  try {
+    const hello = await waitForRequest(peer, 'hello')
+    peer.send({ jsonrpc: '2.0', id: hello.message.id, result: { protocol: 'quorfloat/1' } })
+    peer.send({
+      jsonrpc: '2.0',
+      method: 'interaction/hint',
+      params: { sessionId: 's', kind: 'question', reason: 'harness-visible', surfaces: [] },
+    })
+    await waitFor('the hint to be noted', async () => peer.text().includes('belongs to the Harness window'))
+    assert.ok(!peer.text().includes('switch to it to answer'),
+      'a focused window needs no instruction')
+  } finally {
+    await peer.close()
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'))
+    assert.equal(report.hints[0].reason, 'harness-visible')
+    cleanupDir(dir)
+  }
+})

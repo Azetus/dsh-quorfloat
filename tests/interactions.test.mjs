@@ -534,3 +534,44 @@ async function waitForNotification(notifications, method) {
   }
   throw new Error(`the ${method} notification was never published`)
 }
+
+
+test('a claimed question is announced even while the window is hidden', async () => {
+  // The panel has to know it is holding a *question*: that answer shape has no
+  // "cancelled" member, so a question which times out is handed to the next
+  // answerer instead of being settled — the panel should send the user to the
+  // Harness window to type while there is still time.
+  const { ctx, notifications } = buildWithAuthority({
+    authority: 'panel',
+    reason: 'harness-not-visible',
+    fresh: [],
+  })
+  const pending = ctx.dispatch(
+    'user-questions/request',
+    { agent: { id: 'session-owned' }, questions: [{ id: 'q1', question: 'which?' }] },
+  )
+  const hint = await waitForNotification(notifications, 'interaction/hint')
+  assert.equal(hint.params.kind, 'question')
+  assert.equal(hint.params.reason, 'harness-not-visible')
+  const open = await waitForNotification(notifications, 'interaction/open')
+  interactionsAnswer(ctx, open.params.interactionId, {
+    kind: 'question',
+    answers: [{ id: 'q1', selected: ['a'] }],
+  })
+  assert.deepEqual(await pending, { answers: [{ id: 'q1', selected: ['a'] }] })
+})
+
+test('a claimed approval stays silent while the window is hidden', async () => {
+  // Nothing to point at, and the card is in front of the user: a hint would only
+  // add noise.
+  const { ctx, notifications } = buildWithAuthority({
+    authority: 'panel',
+    reason: 'harness-not-visible',
+    fresh: [],
+  })
+  const pending = ctx.dispatch('approval/request', { agent: { id: 'session-owned' }, toolName: 'bash' })
+  const open = await waitForNotification(notifications, 'interaction/open')
+  assert.equal(notifications.filter(entry => entry.method === 'interaction/hint').length, 0)
+  interactionsAnswer(ctx, open.params.interactionId, { kind: 'approval', outcome: 'allowed-once' })
+  assert.equal(await pending, 'allowed-once')
+})

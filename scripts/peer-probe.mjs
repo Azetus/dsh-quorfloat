@@ -48,6 +48,8 @@ const observed = {
   events: [],
   streams: 0,
   interactions: [],
+  /** Requests that belong to the Harness window; no answer is expected. */
+  hints: [],
   answered: [],
   stderr: [],
 }
@@ -159,11 +161,42 @@ function handleNotification(message) {
     case 'session/resync':
       note('*** host asked for a resync:', JSON.stringify(params))
       return
+    case 'interaction/hint':
+      onHint(params)
+      return
     case 'interaction/open':
       void onInteraction(params)
       return
     default:
       note('unhandled notification', message.method)
+  }
+}
+
+/**
+ * Accept a hint that an interaction belongs to the Harness window.
+ *
+ * A hint is deliberately **not** an `interaction/open`: there is no
+ * `interactionId` and `interaction/answer` would be refused, because the
+ * authority decided the Harness window owns this request. The panel's job is to
+ * point the user at that window — a non-actionable notice — so the probe records
+ * it and keeps waiting rather than treating it as an unanswered request.
+ *
+ * @param params - `sessionId`, `kind`, the authority reason, and the surfaces
+ *   whose reports were fresh when the decision was made.
+ */
+function onHint(params) {
+  observed.hints.push({
+    sessionId: params?.sessionId,
+    kind: params?.kind,
+    reason: params?.reason,
+    surfaces: params?.surfaces,
+  })
+  const where = Array.isArray(params?.surfaces) && params.surfaces.length > 0
+    ? `visible surface: ${params.surfaces.join(', ')}`
+    : 'no surface reported'
+  note(`*** ${params?.kind} belongs to the Harness window (${params?.reason}; ${where}) — no answer here`)
+  if (params?.reason === 'harness-open-but-idle') {
+    note('    the window is open but unfocused: switch to it to answer')
   }
 }
 

@@ -458,10 +458,16 @@ export class Interactions {
     this.#counters.authorityChecks += 1
     if (verdict.authority === 'panel') {
       this.#counters.claimed += 1
-      if (verdict.reason === 'harness-open-but-idle') {
-        // The window is open but not focused, so we answer — but the user is one
-        // keystroke away from the window and must be told where the request is,
-        // otherwise the panel looks like it invented an approval.
+      // A hint is advisory, but it is the only way the panel learns *what kind*
+      // of interaction it is holding, and that matters for questions: their
+      // answer shape has no "cancelled" member, so a question that times out is
+      // handed back rather than settled. Without the kind the panel cannot say
+      // "go type this into the Harness window" while there is still time.
+      //
+      // For approvals a hint when the window is hidden would only be noise —
+      // there is nothing to point at and the card is right there — so that case
+      // stays silent.
+      if (kind === 'question' || verdict.reason === 'harness-open-but-idle') {
         await this.#announceHandoff(sessionId, kind, verdict)
       }
       return 'claim'
