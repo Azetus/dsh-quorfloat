@@ -184,10 +184,13 @@ async function onInteraction(params) {
       note('leaving it for the human (DSH_QUORFLOAT_PEER_ANSWER=manual)')
       return
     }
-    const answer = { kind: 'approval', outcome: 'allowed-once' }
+    // `DSH_QUORFLOAT_PEER_APPROVAL=reject` exercises the other branch: a refused
+    // escalation must let the turn continue, not abort it.
+    const outcome = process.env['DSH_QUORFLOAT_PEER_APPROVAL'] === 'reject' ? 'rejected' : 'allowed-once'
+    const answer = { kind: 'approval', outcome }
     const result = await call('interaction/answer', { interactionId: params.interactionId, answer })
     observed.answered.push({ interactionId: params.interactionId, answer, result })
-    note('answered the approval with allowed-once ->', JSON.stringify(result))
+    note(`answered the approval with ${outcome} ->`, JSON.stringify(result))
     return
   }
   const questions = params.payload?.questions ?? []

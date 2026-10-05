@@ -45,8 +45,19 @@ export interface PluginContext {
   inject(services: string[], callback: (ctx: PluginContext) => EffectResult): Disposer
   /** Read one optional service without declaring a hard dependency. */
   get(name: string): unknown
-  /** Subscribe to one host event (used for approval / user-question waterfalls). */
-  on(name: string, listener: (...args: any[]) => unknown): Disposer
+  /**
+   * Subscribe to one host event (used for approval / user-question waterfalls).
+   *
+   * `options.prepend` runs this listener before the ones already registered for
+   * the same event, which is the supported way to be reached ahead of a listener
+   * that never delegates (`dsh-api-remotes` forwards to the browser and does not
+   * call `next()`); `options.global` bypasses context-filter checks.
+   */
+  on(
+    name: string,
+    listener: (...args: any[]) => unknown,
+    options?: { prepend?: boolean; global?: boolean },
+  ): Disposer
   /** Emit one host event. */
   emit(name: string, ...args: unknown[]): void
   /** Create a named child logger. */

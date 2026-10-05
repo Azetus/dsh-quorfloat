@@ -14,7 +14,11 @@ import { loadModule, recordingLogger } from './helpers.mjs'
 
 const { Interactions } = await loadModule('harness/interactions.js')
 
-/** A minimal Cordis-like context that records listeners and can dispatch them. */
+/**
+ * A minimal Cordis-like context that models the two properties this file's
+ * ordering test depends on: listeners for one event form an ordered *list*, and
+ * `{ prepend: true }` inserts at the front.
+ */
 function fakeContext() {
   const listeners = new Map()
   const disposers = []
@@ -23,21 +27,41 @@ function fakeContext() {
     effect: () => () => {},
     inject: () => () => {},
     get: () => undefined,
-    on(name, listener) {
-      listeners.set(name, listener)
-      const dispose = () => listeners.delete(name)
+    on(name, listener, options) {
+      const list = listeners.get(name) ?? []
+      if (options?.prepend === true) list.unshift(listener)
+      else list.push(listener)
+      listeners.set(name, list)
+      const dispose = () => {
+        const current = listeners.get(name) ?? []
+        const index = current.indexOf(listener)
+        if (index >= 0) current.splice(index, 1)
+      }
       disposers.push(dispose)
       return dispose
     },
     emit: () => {},
     logger: () => recordingLogger(),
     dispatch(name, ...args) {
-      const listener = listeners.get(name)
-      if (listener === undefined) throw new Error(`no listener for ${name}`)
-      return listener(...args)
+      // Waterfall semantics: each listener receives `next`, which continues the
+      // chain. A listener that never calls it ends the chain, exactly like the
+      // browser forwarder measured on a real dsh.
+      const list = listeners.get(name) ?? []
+      // An empty chain is not an error: a real waterfall falls through to the
+      // fallback its caller supplied, which is how `unavailable` is produced.
+      const step = index => (...args2) => {
+        const next = () => Promise.resolve(step(index + 1)(...args2))
+        const listener = list[index]
+        if (listener === undefined) return Promise.resolve('unavailable')
+        return listener(...args2, next)
+      }
+      return step(0)(...args)
     },
     has(name) {
-      return listeners.has(name)
+      return (listeners.get(name)?.length ?? 0) > 0
+    },
+    count(name) {
+      return listeners.get(name)?.length ?? 0
     },
   }
 }
@@ -57,6 +81,7 @@ function build({ owned = ['session-owned'], notify } = {}) {
     log: recordingLogger(),
   })
   interactions.register()
+  lastInteractions = interactions
   return { ctx, interactions, notifications, ownerSet }
 }
 
@@ -207,4 +232,159 @@ test('a question for a session owned elsewhere is delegated', async () => {
     next,
   )
   assert.equal(outcome, delegated)
+})
+
+
+/**
+ * A listener that behaves like the browser forwarder measured on a real dsh:
+ * it takes the request, hands it to a client that may not exist, and never calls
+ * `next()`. Reaching it means the turn hangs.
+ */
+function blockingForwarder(hits) {
+  return function forwarder() {
+    hits.push('forwarder')
+    return new Promise(() => {})
+  }
+}
+
+test('an answerer registered later still runs first (prepend)', async () => {
+  // The defect measured on a real dsh: `dsh-api-remotes` registers this event
+  // first and never delegates, so a plugin that registers afterwards is never
+  // reached — the approval is logged as asked and never decided. `prepend` is
+  // what puts this plugin in front.
+  const ctx = fakeContext()
+  const notifications = []
+  const hits = []
+  ctx.on('approval/request', blockingForwarder(hits), {})
+  const interactions = new Interactions({
+    ctx,
+    ownedSessionIds: () => ['session-owned'],
+    notify: async (method, params) => {
+      notifications.push({ method, params })
+    },
+    log: recordingLogger(),
+  })
+  assert.equal(interactions.register(), true)
+
+  const pending = ctx.dispatch('approval/request', { agent: { id: 'session-owned' }, toolName: 'bash' })
+  const open = await waitForOpen(notifications)
+  assert.equal(interactions.answer(open.params.interactionId, { kind: 'approval', outcome: 'allowed-once' }).accepted, true)
+  const outcome = await Promise.race([
+    pending,
+    new Promise(resolve => setTimeout(() => resolve('HUNG'), 500)),
+  ])
+  assert.equal(outcome, 'allowed-once')
+  assert.deepEqual(hits, [], 'the non-delegating forwarder must never be reached')
+})
+
+test('a listener placed after ours is not reached either', async () => {
+  const { ctx, notifications } = build()
+  const hits = []
+  ctx.on('approval/request', blockingForwarder(hits), {})
+  const pending = ctx.dispatch('approval/request', { agent: { id: 'session-owned' }, toolName: 'bash' })
+  const open = await waitForOpen(notifications)
+  interactionsAnswer(ctx, open.params.interactionId, { kind: 'approval', outcome: 'rejected' })
+  const outcome = await Promise.race([pending, new Promise(resolve => setTimeout(() => resolve('HUNG'), 500))])
+  assert.equal(outcome, 'rejected')
+  assert.deepEqual(hits, [])
+})
+
+/** Wait for the peer-facing `interaction/open` notification. */
+async function waitForOpen(notifications) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const found = notifications.find(entry => entry.method === 'interaction/open')
+    if (found !== undefined) return found
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  throw new Error('the interaction was never published to the peer')
+}
+
+/**
+ * Answer through the interactions instance the dispatching test built.
+ *
+ * The instance is reachable from the context because `build()` keeps the
+ * listener closures alive; this indirection only exists to keep the two ordering
+ * tests readable.
+ */
+let lastInteractions
+function interactionsAnswer(ctx, interactionId, answer) {
+  assert.ok(lastInteractions !== undefined, 'no interactions instance was recorded')
+  return lastInteractions.answer(interactionId, answer)
+}
+
+test('an unanswered claim settles instead of holding the turn forever', async () => {
+  // A claim excludes every other answerer, so the wait has to be bounded: an
+  // abandoned panel must not reproduce the hang this plugin exists to avoid.
+  const ctx = fakeContext()
+  const notifications = []
+  const interactions = new Interactions(
+    {
+      ctx,
+      ownedSessionIds: () => ['session-owned'],
+      notify: async (method, params) => {
+        notifications.push({ method, params })
+      },
+      log: recordingLogger(),
+    },
+    { deadlineMs: 80 },
+  )
+  interactions.register()
+  const outcome = await ctx.dispatch('approval/request', { agent: { id: 'session-owned' }, toolName: 'bash' })
+  assert.equal(outcome, 'cancelled', 'an expired claim fails closed as cancelled')
+  assert.equal(notifications.filter(entry => entry.method === 'interaction/open').length, 1)
+})
+
+test('an answer arriving after the deadline is refused, not applied', async () => {
+  const ctx = fakeContext()
+  const notifications = []
+  const interactions = new Interactions(
+    {
+      ctx,
+      ownedSessionIds: () => ['session-owned'],
+      notify: async (method, params) => {
+        notifications.push({ method, params })
+      },
+      log: recordingLogger(),
+    },
+    { deadlineMs: 60 },
+  )
+  interactions.register()
+  await ctx.dispatch('approval/request', { agent: { id: 'session-owned' }, toolName: 'bash' })
+  const interactionId = notifications.find(entry => entry.method === 'interaction/open').params.interactionId
+  const late = interactions.answer(interactionId, { kind: 'approval', outcome: 'allowed-once' })
+  assert.equal(late.accepted, false, 'a late approval must never grant elevated permissions')
+})
+
+
+test('unregister removes both listeners so nothing outlives the plugin', () => {
+  // A prepended listener that survived unload would keep claiming requests for a
+  // panel that no longer exists — worse than the original hang, because nothing
+  // would ever answer.
+  const ctx = fakeContext()
+  const interactions = new Interactions({
+    ctx,
+    ownedSessionIds: () => ['session-owned'],
+    notify: async () => {},
+    log: recordingLogger(),
+  })
+  interactions.register()
+  assert.equal(ctx.count('approval/request'), 1)
+  assert.equal(ctx.count('user-questions/request'), 1)
+  interactions.unregister()
+  assert.equal(ctx.count('approval/request'), 0)
+  assert.equal(ctx.count('user-questions/request'), 0)
+})
+
+test('an unregistered plugin never claims, and nothing hangs on its behalf', async () => {
+  const ctx = fakeContext()
+  const interactions = new Interactions({
+    ctx,
+    ownedSessionIds: () => ['session-owned'],
+    notify: async () => {},
+    log: recordingLogger(),
+  })
+  interactions.register()
+  interactions.unregister()
+  const outcome = await ctx.dispatch('approval/request', { agent: { id: 'session-owned' }, toolName: 'bash' })
+  assert.equal(outcome, 'unavailable', 'with no listeners the waterfall falls through to its default')
 })

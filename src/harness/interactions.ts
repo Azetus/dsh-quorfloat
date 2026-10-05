@@ -94,6 +94,17 @@ export interface AnswerResult {
   readonly reason?: string
 }
 
+/**
+ * How long a claimed interaction may wait for the peer before giving up.
+ *
+ * Claiming means the browser forwarder never sees the request, so this deadline
+ * is what keeps "the panel is the only answerer" from becoming "the turn hangs
+ * forever". The value is deliberately generous: a human deciding whether to
+ * grant elevated permissions should not be rushed, but an abandoned panel must
+ * not hold a turn open indefinitely.
+ */
+const CLAIM_DEADLINE_MS = 10 * 60 * 1000
+
 let counter = 0
 
 /** Allocate a process-unique interaction id. */
@@ -117,12 +128,16 @@ export class Interactions {
     registrationFailures: 0,
   }
   #registered = false
+  readonly #deadlineMs: number
 
   /**
    * @param deps - context, ownership predicate, sender, and logger.
+   * @param options.deadlineMs - override for how long a claimed interaction may
+   *   wait; tests shorten it, production uses {@link CLAIM_DEADLINE_MS}.
    */
-  constructor(deps: InteractionsDeps) {
+  constructor(deps: InteractionsDeps, options: { deadlineMs?: number } = {}) {
     this.#deps = deps
+    this.#deadlineMs = options.deadlineMs ?? CLAIM_DEADLINE_MS
   }
 
   /** True when both answerers were registered. */
@@ -157,7 +172,18 @@ export class Interactions {
     let failures = 0
     const attempt = (event: string, listener: (...args: any[]) => unknown): void => {
       try {
-        const dispose = this.#deps.ctx.on(event, listener)
+        // `prepend` is not an optimisation here, it is the whole mechanism.
+        //
+        // Measured on a real dsh 0.2.0-rc.2: `dsh-api-remotes` registers a
+        // forwarding listener for this same event that hands the request to the
+        // connected browser client and **never calls `next()`**. Because
+        // waterfall listeners run in registration order, our listener was never
+        // reached at all — the request simply hung until the turn was killed.
+        //
+        // Verified against the real framework: `prepend` from this plugin's own
+        // (child) context runs before that earlier root-registered listener, so
+        // no root-context access is needed.
+        const dispose = this.#deps.ctx.on(event, listener, { prepend: true })
         this.#disposers.push(dispose)
       } catch (error) {
         failures += 1
@@ -306,9 +332,15 @@ export class Interactions {
   /**
    * Publish one request to the peer and wait for its answer.
    *
+   * Claiming a waterfall listener means nobody else can answer, so the wait must
+   * be bounded: without a deadline, an unanswered claim reproduces exactly the
+   * hang this plugin was built to avoid — just with us as the blocker instead of
+   * the browser forwarder. On expiry the request settles as withdrawn, which the
+   * callers below translate into the fail-closed outcome.
+   *
    * @param request - identity, session, kind, and payload.
    * @param signal - upstream cancellation lifetime.
-   * @returns the peer's answer, or `undefined` when the request was withdrawn.
+   * @returns the peer's answer, or `undefined` when withdrawn or timed out.
    */
   async #await(
     request: { interactionId: string; sessionId: string; kind: 'approval' | 'question'; payload: unknown },
@@ -344,10 +376,26 @@ export class Interactions {
       // waterfall is not left waiting on a request nobody can answer.
       settled.resolve(undefined as unknown as PeerAnswer)
     }
+    const onDeadline = (): void => {
+      if (finished) return
+      this.#pending.delete(request.interactionId)
+      finished = true
+      cleanup()
+      // Nobody answered in time. Settling as withdrawn makes the caller apply its
+      // fail-closed outcome instead of leaving the request pending forever.
+      this.#deps.log.warn('an interaction was not answered before the deadline', {
+        interactionId: request.interactionId,
+        deadlineMs: this.#deadlineMs,
+      })
+      settled.resolve(undefined as unknown as PeerAnswer)
+    }
     const cleanup = (): void => {
       signal?.removeEventListener('abort', onAbort)
+      clearTimeout(deadline)
     }
     signal?.addEventListener('abort', onAbort, { once: true })
+    const deadline = setTimeout(onDeadline, this.#deadlineMs)
+    deadline.unref?.()
     this.#pending.set(request.interactionId, pending)
     this.#deps.onStateChange?.(request.sessionId, 'interaction-open', {
       interactionId: request.interactionId,
