@@ -90,9 +90,11 @@ async function activate({ withController = true } = {}) {
   process.env['DSH_QUORFLOAT_MOCK_REPORT'] = reportPath
   process.env['DSH_QUORFLOAT_MOCK_PIDFILE'] = pidFile
 
+  const routers = []
   const plugin = pluginModule.createPlugin({
     logger,
     onStateChange: state => states.push(state),
+    onRouter: router => routers.push(router),
     // The mock is a Node script rather than a native binary, so it is launched
     // through the interpreter; the spawn path itself is unchanged.
     resolveBinary: () => ({ path: process.execPath, args: [mockPath], source: 'config', attempts: [] }),
@@ -133,6 +135,8 @@ async function activate({ withController = true } = {}) {
       ),
     reportPath,
     pidFile,
+    /** The routers created so far; the last one belongs to the live channel. */
+    routers,
     async dispose() {
       await fiber.dispose()
       restoreEnv(saved)
@@ -224,6 +228,55 @@ test('the peer is asked to stop before a signal is used', async () => {
   const report = JSON.parse(readFileSync(reportPath, 'utf8'))
   assert.equal(report.shutdownReceived, true, 'the shutdown request reached the peer')
   assert.equal(report.signalled, null, 'no signal was needed for a cooperative peer')
+})
+
+test('a presence report from the browser half reaches the plugin authority', async () => {
+  // The browser half is the only source of "is the user looking at the Harness
+  // window", so its entry point is exercised against the real framework. The
+  // handshake is not required first: presence is reported as soon as the page
+  // loads, which can precede a peer handshake.
+  const app = await activate()
+  try {
+    await app.waitForRunning()
+    const router = app.routers.at(-1)
+    assert.ok(router !== undefined, 'a router was created for the live channel')
+
+    const before = await router.handle('diag/snapshot', {})
+    assert.equal(before.authority.authority, 'none', 'nothing reported yet, and the panel is not visible')
+
+    const accepted = await router.handle('ui/reportPresence', { surface: 'web', visible: true, focused: true, seq: 1 })
+    assert.deepEqual(accepted, { accepted: true })
+    const after = await router.handle('diag/snapshot', {})
+    assert.equal(after.authority.authority, 'harness', 'a focused visible page owns the next decision')
+
+    const stale = await router.handle('ui/reportPresence', { surface: 'web', visible: false, focused: false, seq: 1 })
+    assert.equal(stale.accepted, false, 'a replayed sequence number is refused')
+    assert.equal(stale.reason, 'stale-sequence')
+    const settled = await router.handle('diag/snapshot', {})
+    assert.equal(settled.authority.authority, 'harness', 'the refused report changed nothing')
+  } finally {
+    await app.dispose()
+  }
+})
+
+test('a malformed presence report is rejected as a bad request', async () => {
+  const app = await activate()
+  try {
+    await app.waitForRunning()
+    const router = app.routers.at(-1)
+    // `focused` is required: visibility alone cannot tell "occluded on Windows"
+    // from "in front of the user", so a half report must not be accepted.
+    await assert.rejects(
+      () => router.handle('ui/reportPresence', { surface: 'web', visible: true, seq: 1 }),
+      error => {
+        assert.equal(error.code, 'unavailable')
+        assert.match(error.message, /focused must be a boolean/)
+        return true
+      },
+    )
+  } finally {
+    await app.dispose()
+  }
 })
 
 /** True while a process with that pid exists. */

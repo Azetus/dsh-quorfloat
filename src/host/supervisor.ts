@@ -50,6 +50,14 @@ export interface SupervisorSnapshot {
   readonly lastError: { readonly code: string; readonly message: string } | undefined
   /** True when automatic restarts are exhausted and a manual retry is required. */
   readonly restartExhausted: boolean
+  /**
+   * Whether the panel last reported itself visible.
+   *
+   * `false` before the first report and after a restart: an unseen panel must
+   * never be assumed visible, because that would make the plugin defer approvals
+   * to a window nobody is looking at.
+   */
+  readonly panelVisible: boolean
 }
 
 /** Event delivered to listeners on every meaningful supervision change. */
@@ -113,6 +121,8 @@ export class QuorfloatSupervisor {
   #generation = 0
   /** Peer stderr lines already forwarded for the current channel. */
   #stderrDelivered = 0
+  /** Last visibility the panel reported; `false` until it says otherwise. */
+  #panelVisible = false
   /** True while a stop was requested, so the exit handler must not restart. */
   #stopping = false
 
@@ -140,6 +150,7 @@ export class QuorfloatSupervisor {
       lastFrameAt: Math.max(this.#lastFrameAt, channel?.lastFrameAt ?? 0),
       lastError: this.#lastError,
       restartExhausted: this.#restartExhausted,
+      panelVisible: this.#panelVisible,
     }
   }
 
@@ -291,6 +302,8 @@ export class QuorfloatSupervisor {
     this.#generation += 1
     const generation = this.#generation
     this.#stderrDelivered = 0
+    // A fresh process has not reported anything yet.
+    this.#panelVisible = false
     // A new attempt invalidates the previous failure reason: keeping it would
     // make a live process report the error that ended its predecessor.
     this.#lastError = undefined
@@ -574,8 +587,14 @@ export class QuorfloatSupervisor {
   #onNotification(method: string, params: unknown): void {
     switch (method) {
       case 'window/visibility': {
-        this.#deps.log.debug('quorfloat visibility changed', params)
-        this.#emit({ kind: 'state', snapshot: this.snapshot(), detail: { visibility: params } })
+        // The panel reports whether it is on screen. It is a peer-emitted fact, so
+        // it is carried in the snapshot rather than only passed to one observer:
+        // the approval authority reads it on every decision, not just when the
+        // notification happens to arrive.
+        const visible = (params as { visible?: unknown } | null)?.visible === true
+        this.#deps.log.debug('quorfloat visibility changed', { visible })
+        this.#panelVisible = visible
+        this.#emit({ kind: 'state', snapshot: this.snapshot(), detail: { visible } })
         return
       }
       default: {

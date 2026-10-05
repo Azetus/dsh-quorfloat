@@ -86,6 +86,7 @@ test('the shipped patch declares every field the schema knows', async () => {
     'requestTimeoutMs',
     'heartbeatMs',
     'heartbeatMissLimit',
+    'presenceMaxAgeMs',
     'shutdownGraceMs',
     'restartLimit',
     'restartWindowMs',

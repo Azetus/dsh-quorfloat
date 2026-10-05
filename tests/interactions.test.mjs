@@ -67,13 +67,22 @@ function fakeContext() {
 }
 
 /** Build interactions with a fixed ownership set and a captured notification log. */
-function build({ owned = ['session-owned'], notify } = {}) {
+/**
+ * Authority used by the behaviour tests: the panel decides, silently.
+ *
+ * Routing is covered separately in `presence.test.mjs` and by the ordering tests
+ * below; these tests are about what happens *after* a claim.
+ */
+const PANEL_DECIDES = { authority: 'panel', reason: 'harness-not-visible', fresh: [] }
+
+function build({ owned = ['session-owned'], notify, authority = () => PANEL_DECIDES } = {}) {
   const ctx = fakeContext()
   const notifications = []
   const ownerSet = new Set(owned)
   const interactions = new Interactions({
     ctx,
     ownedSessionIds: () => [...ownerSet],
+    authority,
     notify: async (method, params) => {
       notifications.push({ method, params })
       await notify?.(method, params)
@@ -259,6 +268,7 @@ test('an answerer registered later still runs first (prepend)', async () => {
   const interactions = new Interactions({
     ctx,
     ownedSessionIds: () => ['session-owned'],
+    authority: () => PANEL_DECIDES,
     notify: async (method, params) => {
       notifications.push({ method, params })
     },
@@ -321,6 +331,7 @@ test('an unanswered claim settles instead of holding the turn forever', async ()
     {
       ctx,
       ownedSessionIds: () => ['session-owned'],
+      authority: () => PANEL_DECIDES,
       notify: async (method, params) => {
         notifications.push({ method, params })
       },
@@ -341,6 +352,7 @@ test('an answer arriving after the deadline is refused, not applied', async () =
     {
       ctx,
       ownedSessionIds: () => ['session-owned'],
+      authority: () => PANEL_DECIDES,
       notify: async (method, params) => {
         notifications.push({ method, params })
       },
@@ -364,6 +376,7 @@ test('unregister removes both listeners so nothing outlives the plugin', () => {
   const interactions = new Interactions({
     ctx,
     ownedSessionIds: () => ['session-owned'],
+    authority: () => PANEL_DECIDES,
     notify: async () => {},
     log: recordingLogger(),
   })
@@ -380,6 +393,7 @@ test('an unregistered plugin never claims, and nothing hangs on its behalf', asy
   const interactions = new Interactions({
     ctx,
     ownedSessionIds: () => ['session-owned'],
+    authority: () => PANEL_DECIDES,
     notify: async () => {},
     log: recordingLogger(),
   })
@@ -388,3 +402,135 @@ test('an unregistered plugin never claims, and nothing hangs on its behalf', asy
   const outcome = await ctx.dispatch('approval/request', { agent: { id: 'session-owned' }, toolName: 'bash' })
   assert.equal(outcome, 'unavailable', 'with no listeners the waterfall falls through to its default')
 })
+
+
+/** Build interactions with a fixed authority verdict, for routing tests. */
+function buildWithAuthority(verdict) {
+  const ctx = fakeContext()
+  const notifications = []
+  const interactions = new Interactions({
+    ctx,
+    ownedSessionIds: () => ['session-owned'],
+    authority: () => verdict,
+    notify: async (method, params) => {
+      notifications.push({ method, params })
+    },
+    log: recordingLogger(),
+  })
+  interactions.register()
+  lastInteractions = interactions
+  return { ctx, interactions, notifications }
+}
+
+test('a visible Harness window keeps the decision, and the panel only gets a hint', async () => {
+  // Claiming here would hide the approval from the window the user is looking at.
+  const { ctx, notifications } = buildWithAuthority({
+    authority: 'harness',
+    reason: 'harness-visible',
+    fresh: ['desktop'],
+  })
+  const outcome = await ctx.dispatch('approval/request', { agent: { id: 'session-owned' }, toolName: 'bash' })
+  assert.equal(outcome, 'unavailable', 'the request was passed on, not claimed')
+  assert.deepEqual(notifications, [], 'a focused window needs no hint: it shows the card itself')
+})
+
+test('an open but unfocused window hands over and tells the panel where the request is', async () => {
+  const { ctx, notifications } = buildWithAuthority({
+    authority: 'panel',
+    reason: 'harness-open-but-idle',
+    fresh: ['desktop'],
+  })
+  const pending = ctx.dispatch('approval/request', { agent: { id: 'session-owned' }, toolName: 'bash' })
+  const hint = await waitForNotification(notifications, 'interaction/hint')
+  assert.equal(hint.params.reason, 'harness-open-but-idle')
+  assert.equal(hint.params.kind, 'approval')
+  assert.deepEqual(hint.params.surfaces, ['desktop'], 'the hint names the surface holding the request')
+
+  const open = await waitForNotification(notifications, 'interaction/open')
+  assert.equal(interactionsAnswer(ctx, open.params.interactionId, { kind: 'approval', outcome: 'allowed-once' }).accepted, true)
+  assert.equal(await pending, 'allowed-once')
+})
+
+test('a hidden window hands over without a hint', async () => {
+  const { ctx, notifications } = buildWithAuthority({
+    authority: 'panel',
+    reason: 'harness-not-visible',
+    fresh: [],
+  })
+  const pending = ctx.dispatch('approval/request', { agent: { id: 'session-owned' }, toolName: 'bash' })
+  const open = await waitForNotification(notifications, 'interaction/open')
+  assert.equal(notifications.filter(entry => entry.method === 'interaction/hint').length, 0,
+    'nothing to point at when the window is hidden')
+  interactionsAnswer(ctx, open.params.interactionId, { kind: 'approval', outcome: 'rejected' })
+  assert.equal(await pending, 'rejected')
+})
+
+test('when no surface can answer, the request is deferred rather than held', async () => {
+  // Claiming with nobody able to answer would keep the turn open for the whole
+  // deadline and then fail anyway, so the plugin passes it on immediately.
+  const { ctx, notifications } = buildWithAuthority({
+    authority: 'none',
+    reason: 'nobody-looking',
+    fresh: [],
+  })
+  const outcome = await ctx.dispatch('approval/request', { agent: { id: 'session-owned' }, toolName: 'bash' })
+  assert.equal(outcome, 'unavailable')
+  assert.deepEqual(notifications, [])
+})
+
+test('the authority is consulted for questions too, not just approvals', async () => {
+  const { ctx, notifications } = buildWithAuthority({
+    authority: 'harness',
+    reason: 'harness-visible',
+    fresh: ['web'],
+  })
+  const outcome = await ctx.dispatch(
+    'user-questions/request',
+    { agent: { id: 'session-owned' }, questions: [{ id: 'q1', question: 'x' }] },
+  )
+  assert.equal(outcome, 'unavailable')
+  assert.deepEqual(notifications, [])
+})
+
+test('a session this host does not own is deferred regardless of the authority', async () => {
+  // Ownership is checked first: the authority must not widen what the panel claims.
+  const { ctx, notifications } = buildWithAuthority({
+    authority: 'panel',
+    reason: 'harness-not-visible',
+    fresh: [],
+  })
+  const outcome = await ctx.dispatch('approval/request', { agent: { id: 'session-other' }, toolName: 'bash' })
+  assert.equal(outcome, 'unavailable')
+  assert.deepEqual(notifications, [])
+})
+
+test('a failed hint does not fail the request', async () => {
+  const ctx = fakeContext()
+  const notifications = []
+  const interactions = new Interactions({
+    ctx,
+    ownedSessionIds: () => ['session-owned'],
+    authority: () => ({ authority: 'panel', reason: 'harness-open-but-idle', fresh: ['desktop'] }),
+    notify: async (method, params) => {
+      if (method === 'interaction/hint') throw new Error('peer went away')
+      notifications.push({ method, params })
+    },
+    log: recordingLogger(),
+  })
+  interactions.register()
+  lastInteractions = interactions
+  const pending = ctx.dispatch('approval/request', { agent: { id: 'session-owned' }, toolName: 'bash' })
+  const open = await waitForNotification(notifications, 'interaction/open')
+  interactionsAnswer(ctx, open.params.interactionId, { kind: 'approval', outcome: 'allowed-once' })
+  assert.equal(await pending, 'allowed-once', 'the window still owns the request; the hint is advisory')
+})
+
+/** Wait for one protocol notification to reach the peer. */
+async function waitForNotification(notifications, method) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const found = notifications.find(entry => entry.method === method)
+    if (found !== undefined) return found
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  throw new Error(`the ${method} notification was never published`)
+}

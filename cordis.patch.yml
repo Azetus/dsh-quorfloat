@@ -28,6 +28,7 @@
         requestTimeoutMs: 10000
         heartbeatMs: 5000
         heartbeatMissLimit: 3
+        presenceMaxAgeMs: 30000
         shutdownGraceMs: 1500
         restartLimit: 3
         restartWindowMs: 30000

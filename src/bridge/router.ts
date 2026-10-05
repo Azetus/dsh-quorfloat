@@ -84,6 +84,16 @@ export interface RouterHost {
   cancel(sessionId: string): Promise<{ accepted: true }>
   /** Answer one pending interaction owned by this host. */
   answerInteraction(interactionId: string, answer: unknown): Promise<{ accepted: boolean }>
+  /**
+   * Record one UI surface's presence report.
+   *
+   * Called from the browser half only; the panel's own visibility arrives over
+   * the stdio protocol instead.
+   */
+  reportPresence(
+    surface: string,
+    report: { visible: boolean; focused: boolean; seq: number; at?: number },
+  ): Promise<{ accepted: boolean; reason?: string }>
   /** Free-form diagnostics for the settings/status surface. */
   diagnostics(): Record<string, unknown>
 }
@@ -178,6 +188,11 @@ export class HostRouter {
         )
       case 'session/cancel':
         return await this.#host.cancel(requireString(params, 'sessionId', 'session/cancel'))
+      case 'ui/reportPresence':
+        return await this.#host.reportPresence(
+          requireString(params, 'surface', 'ui/reportPresence'),
+          readPresenceReport(params),
+        )
       case 'interaction/answer':
         return await this.#host.answerInteraction(
           requireString(params, 'interactionId', 'interaction/answer'),
@@ -261,6 +276,40 @@ export class HostRouter {
     const value = (params as Record<string, unknown>)[field]
     return typeof value === 'string' ? value : undefined
   }
+}
+
+/**
+ * Read and validate one presence report from a browser surface.
+ *
+ * Both facts are required together: `visible` alone cannot distinguish "occluded
+ * on Windows" from "in front of the user", and `focused` alone is true for a
+ * window the user has on another display without looking at it.
+ *
+ * @param params - the raw request parameters.
+ * @returns the validated report.
+ * @throws {ChannelError} when a required field is missing or mistyped.
+ */
+function readPresenceReport(params: unknown): { visible: boolean; focused: boolean; seq: number; at?: number } {
+  if (typeof params !== 'object' || params === null) {
+    throw new ChannelError('unavailable', 'ui/reportPresence: params must be an object')
+  }
+  const record = params as Record<string, unknown>
+  if (typeof record['visible'] !== 'boolean') {
+    throw new ChannelError('unavailable', 'ui/reportPresence: visible must be a boolean')
+  }
+  if (typeof record['focused'] !== 'boolean') {
+    throw new ChannelError('unavailable', 'ui/reportPresence: focused must be a boolean')
+  }
+  if (!Number.isInteger(record['seq'])) {
+    throw new ChannelError('unavailable', 'ui/reportPresence: seq must be an integer')
+  }
+  const at = record['at']
+  if (at !== undefined && !Number.isFinite(at)) {
+    throw new ChannelError('unavailable', 'ui/reportPresence: at must be a finite number when present')
+  }
+  return at === undefined
+    ? { visible: record['visible'], focused: record['focused'], seq: record['seq'] as number }
+    : { visible: record['visible'], focused: record['focused'], seq: record['seq'] as number, at: at as number }
 }
 
 /**

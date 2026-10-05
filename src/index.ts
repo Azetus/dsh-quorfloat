@@ -30,6 +30,7 @@ import {
   type QuorfloatHarness,
 } from './harness/adapter.js'
 import { SessionLayer } from './harness/session-layer.js'
+import { evaluateAuthority, PresenceTracker, type AuthorityVerdict, type PresenceSurface } from './harness/presence.js'
 import { Interactions } from './harness/interactions.js'
 import type { Disposer, EffectResult, Logger, PluginContext } from './cordis-types.js'
 
@@ -65,6 +66,8 @@ interface Activation {
   harness?: QuorfloatHarness | undefined
   /** Disposer for the deferred activation registered with `ctx.inject`. */
   injection?: Disposer | undefined
+  /** Reported presence of the Harness UI surfaces; read on every decision. */
+  presence?: PresenceTracker | undefined
   stopped: boolean
 }
 
@@ -131,6 +134,20 @@ export function createPlugin(overrides: PluginOverrides = {}) {
       if (harness === undefined) return
       log.info('harness services are ready', harness.describe())
 
+      // Presence is read on every interaction decision, and the panel's own
+      // visibility comes from the supervision snapshot, so neither needs its own
+      // subscription: both are sampled at the moment a request arrives.
+      const presence = new PresenceTracker()
+      activation.presence = presence
+      const authority = (): AuthorityVerdict =>
+        evaluateAuthority({
+          desktop: presence.raw('desktop'),
+          web: presence.raw('web'),
+          panelVisible: activation.supervisor?.snapshot().panelVisible === true,
+          maxAgeMs: config.presenceMaxAgeMs,
+          now: Date.now(),
+        })
+
       const sessionLayer = new SessionLayer({
         harness,
         defaultWorkspaceId: () => config.defaultWorkspaceId,
@@ -151,6 +168,7 @@ export function createPlugin(overrides: PluginOverrides = {}) {
       const interactions = new Interactions({
         ctx,
         ownedSessionIds: () => sessionLayer.ownedSessionIds(),
+        authority,
         notify: async (method, params) => {
           const supervisor = activation.supervisor
           if (supervisor === undefined) return
@@ -172,8 +190,8 @@ export function createPlugin(overrides: PluginOverrides = {}) {
         config: () => config,
         resolveBinary: () =>
           overrides.resolveBinary?.(config.quorfloatPath) ?? resolveQuorfloatBinary({ configuredPath: config.quorfloatPath }),
-        createRouter: channelSessionId =>
-          new HostRouter({
+        createRouter: channelSessionId => {
+          const router = new HostRouter({
             config: () => config,
             hostVersion: () => hostVersion(),
             channelSessionId: () => channelSessionId,
@@ -187,13 +205,36 @@ export function createPlugin(overrides: PluginOverrides = {}) {
             prompt: async (sessionId, requestId, text) => await sessionLayer.prompt(sessionId, requestId, text),
             cancel: async sessionId => await sessionLayer.cancel(sessionId),
             answerInteraction: async (interactionId, answer) => interactions.answer(interactionId, answer),
+            reportPresence: async (surface, report) => {
+              // The client half is the only source of "is the user looking at the
+              // Harness window": the shell knows but does not expose it, and the
+              // host process has no window concept at all.
+              const surfaceName: PresenceSurface = surface === 'desktop' ? 'desktop' : 'web'
+              const rejection = presence.report(surfaceName, {
+                visible: report.visible,
+                focused: report.focused,
+                seq: report.seq,
+                at: report.at ?? Date.now(),
+              })
+              if (rejection !== undefined) {
+                log.debug('ignored a presence report', { surface: surfaceName, rejection, seq: report.seq })
+                return { accepted: false, reason: rejection }
+              }
+              log.debug('presence reported', { surface: surfaceName, visible: report.visible, focused: report.focused })
+              overrides.onStateChange?.(state())
+              return { accepted: true }
+            },
             diagnostics: () => ({
               hostVersion: hostVersion(),
               services: activation.probe?.presence ?? {},
               sessions: sessionLayer.describe(),
               interactions: interactions.describe(),
+              authority: authority(),
             }),
-          }),
+          })
+          overrides.onRouter?.(router)
+          return router
+        },
         log,
         // Supervision narration is deliberately visible at the default level.
         // A plugin whose only symptom is "nothing happens" is undiagnosable: the
@@ -348,6 +389,14 @@ export interface PluginOverrides {
   readonly injectServices?: readonly string[]
   /** Report a fixed set of missing services, bypassing the probe (tests only). */
   readonly missingServices?: () => readonly string[]
+  /**
+   * Observe each router as it is created (tests only).
+   *
+   * The router is the plugin's whole inbound protocol surface, so a test that can
+   * hold it drives the same entry points a real peer and a real browser half use,
+   * instead of reaching into internals.
+   */
+  readonly onRouter?: (router: HostRouter) => void
 }
 
 /**

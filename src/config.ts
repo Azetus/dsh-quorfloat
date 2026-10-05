@@ -68,6 +68,17 @@ export interface QuorfloatConfig {
   readonly heartbeatMs: number
   /** Consecutive missed heartbeats (no frame at all) tolerated before degraded. */
   readonly heartbeatMissLimit: number
+  /**
+   * How long a client presence report stays valid.
+   *
+   * A safety net, not the primary signal: the browser half reports on every
+   * `visibilitychange` / `focus` / `blur`, which are event-driven and still
+   * delivered to a backgrounded page. The age only matters when a page dies
+   * without reporting — and a stale report is treated as "not looking", so a
+   * shorter value fails towards the panel rather than towards a window nobody
+   * is watching.
+   */
+  readonly presenceMaxAgeMs: number
   /** Grace period between the shutdown request and escalating signals. */
   readonly shutdownGraceMs: number
   /** Automatic restarts allowed inside {@link restartWindowMs}. */
@@ -106,6 +117,7 @@ const SPEC = {
   requestTimeoutMs: { kind: 'int', def: 10000, min: 500, max: 120000 },
   heartbeatMs: { kind: 'int', def: 5000, min: 0, max: 60000 },
   heartbeatMissLimit: { kind: 'int', def: 3, min: 1, max: 30 },
+  presenceMaxAgeMs: { kind: 'int', def: 30000, min: 1000, max: 600000 },
   shutdownGraceMs: { kind: 'int', def: 1500, min: 100, max: 10000 },
   restartLimit: { kind: 'int', def: 3, min: 0, max: 20 },
   restartWindowMs: { kind: 'int', def: 30000, min: 1000, max: 600000 },

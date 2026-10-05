@@ -108,6 +108,7 @@ export async function buildSupervisor({ mode = 'normal', config = {}, reportPath
     prompt: async () => ({ accepted: true }),
     cancel: async () => ({ accepted: true }),
     answerInteraction: async () => ({ accepted: true }),
+    reportPresence: async () => ({ accepted: true }),
     diagnostics: () => ({ channelSessionId: 'test-channel' }),
     ...deps.routerHost,
   }

@@ -17,6 +17,7 @@
  * keeps working exactly as before.
  */
 
+import type { AuthorityVerdict } from './presence.js'
 import type { Disposer, Logger, PluginContext } from '../cordis-types.js'
 
 /** Approval outcomes accepted by the upstream waterfall. */
@@ -81,6 +82,14 @@ export interface InteractionsDeps {
   ctx: PluginContext
   /** Session ids this host currently tracks; the ownership predicate. */
   ownedSessionIds(): readonly string[]
+  /**
+   * Decide who may answer the next interaction.
+   *
+   * A session being owned is necessary but not sufficient: the request must also
+   * belong to the surface the user is looking at. See `presence.ts` for the rules
+   * and `docs/prototype.md` §18 for the measurements behind them.
+   */
+  authority(): AuthorityVerdict
   /** Send one notification to the peer. */
   notify(method: string, params: unknown): Promise<void>
   /** Publish a status change for the status/settings surface. */
@@ -126,6 +135,8 @@ export class Interactions {
     refused: 0,
     aborted: 0,
     registrationFailures: 0,
+    authorityChecks: 0,
+    deferredByAuthority: 0,
   }
   #registered = false
   readonly #deadlineMs: number
@@ -259,16 +270,15 @@ export class Interactions {
   #approvalAnswerer(): (request: ApprovalRequestEvent, next: () => Promise<ApprovalOutcome>) => Promise<ApprovalOutcome> {
     return async (request, next) => {
       const sessionId = sessionOf(request)
-      if (sessionId === undefined || !this.#owns(sessionId)) {
+      if ((await this.#decide(sessionId, 'approval')) === 'defer') {
         this.#counters.delegated += 1
         return await next()
       }
-      this.#counters.claimed += 1
       const interactionId = nextInteractionId('approval')
       const outcome = await this.#await(
         {
           interactionId,
-          sessionId,
+          sessionId: sessionId as string,
           kind: 'approval',
           payload: {
             toolName: typeof request.toolName === 'string' ? request.toolName : 'unknown',
@@ -295,7 +305,7 @@ export class Interactions {
   #questionAnswerer(): (request: QuestionsRequestEvent, next: () => Promise<QuestionsAnswer>) => Promise<QuestionsAnswer> {
     return async (request, next) => {
       const sessionId = sessionOf(request)
-      if (sessionId === undefined || !this.#owns(sessionId)) {
+      if ((await this.#decide(sessionId, 'question')) === 'defer') {
         this.#counters.delegated += 1
         return await next()
       }
@@ -305,12 +315,11 @@ export class Interactions {
         this.#counters.delegated += 1
         return await next()
       }
-      this.#counters.claimed += 1
       const interactionId = nextInteractionId('question')
       const outcome = await this.#await(
         {
           interactionId,
-          sessionId,
+          sessionId: sessionId as string,
           kind: 'question',
           payload: { questions },
         },
@@ -430,6 +439,65 @@ export class Interactions {
    */
   #owns(sessionId: string): boolean {
     return this.#deps.ownedSessionIds().includes(sessionId)
+  }
+
+  /**
+   * Apply ownership and visibility together, announcing a hand-off when the
+   * Harness window — not the panel — is the surface the user is looking at.
+   *
+   * @param sessionId - session identity from the request.
+   * @param kind - which waterfall the request came from.
+   * @returns `claim` to answer here, `defer` to pass to the next listener.
+   */
+  async #decide(sessionId: string | undefined, kind: 'approval' | 'question'): Promise<'claim' | 'defer'> {
+    if (sessionId === undefined || !this.#owns(sessionId)) {
+      // Not our session at all. The browser forwarder decides what happens next.
+      return 'defer'
+    }
+    const verdict = this.#deps.authority()
+    this.#counters.authorityChecks += 1
+    if (verdict.authority === 'panel') {
+      this.#counters.claimed += 1
+      if (verdict.reason === 'harness-open-but-idle') {
+        // The window is open but not focused, so we answer — but the user is one
+        // keystroke away from the window and must be told where the request is,
+        // otherwise the panel looks like it invented an approval.
+        await this.#announceHandoff(sessionId, kind, verdict)
+      }
+      return 'claim'
+    }
+    this.#counters.deferredByAuthority += 1
+    if (verdict.authority === 'none') {
+      // Nobody is looking at either surface. Claiming would hold the turn until
+      // the deadline for no benefit, so pass it on and let whatever else is
+      // composed decide; upstream fails closed when nothing answers.
+      this.#deps.log.warn('no surface can answer an interaction; deferring', {
+        kind,
+        authority: verdict.reason,
+      })
+    }
+    return 'defer'
+  }
+
+  /**
+   * Tell the peer that the Harness window owns this request.
+   *
+   * @param sessionId - session the request belongs to.
+   * @param kind - which waterfall the request came from.
+   * @param verdict - the authority verdict that produced the hand-off.
+   */
+  async #announceHandoff(sessionId: string, kind: 'approval' | 'question', verdict: AuthorityVerdict): Promise<void> {
+    try {
+      await this.#deps.notify('interaction/hint', {
+        sessionId,
+        kind,
+        reason: verdict.reason,
+        surfaces: verdict.fresh,
+      })
+    } catch (error) {
+      // A failed hint must not turn into a failed request: the window still owns it.
+      this.#deps.log.warn('could not deliver an interaction hint to the peer', error)
+    }
   }
 }
 
