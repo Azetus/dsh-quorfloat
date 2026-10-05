@@ -48,6 +48,23 @@ const CHANNEL = '/api'
 /** Endpoint: `<service key>/<method>` of the presence gateway on the host. */
 const ENDPOINT = 'quorfloat/reportPresence'
 
+/**
+ * Delay before a focus or visibility change is reported.
+ *
+ * Focus and visibility settle in pairs — switching windows fires `blur` and
+ * `visibilitychange` together — so this collapses a burst into one report
+ * without making the host wait noticeably. Tuning it toward zero makes the
+ * hand-off feel instant at the cost of more requests; toward the high end it
+ * adds a perceptible lag before the approval authority moves.
+ *
+ * Deliberately not configurable yet: the host's config reaches quorfloat over
+ * stdio, and this half is not on that channel, so exposing it means either
+ * baking a default in at build time or adding a settings fetch to the gateway.
+ * Both are more moving parts than one timing constant justifies; see the config
+ * candidates in `docs/prototype.md` §21.
+ */
+const HINT_DEBOUNCE_MS = 50
+
 /** Which surface this page is. The desktop shell and a plain browser share code. */
 function surfaceOf(): 'desktop' | 'web' {
   return typeof (globalThis as { dshDesktop?: unknown }).dshDesktop === 'undefined' ? 'web' : 'desktop'
@@ -107,12 +124,10 @@ export function apply(ctx: ClientContext): void {
 
   const schedule = (): void => {
     if (pending !== undefined) clearTimeout(pending)
-    // Focus and visibility settle in pairs; the delay collapses a burst into one
-    // report without making the host wait noticeably.
     pending = setTimeout(() => {
       pending = undefined
       void send()
-    }, 50)
+    }, HINT_DEBOUNCE_MS)
   }
 
   document.addEventListener('visibilitychange', schedule)

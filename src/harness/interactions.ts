@@ -160,6 +160,8 @@ export class Interactions {
   describe(): Record<string, unknown> {
     return {
       registered: this.#registered,
+      /** The configured budget, so a caller can tell a wiring bug from a wait. */
+      deadlineMs: this.#deadlineMs,
       pending: [...this.#pending.values()].map(entry => ({
         interactionId: entry.interactionId,
         sessionId: entry.sessionId,

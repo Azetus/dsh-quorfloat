@@ -95,8 +95,6 @@ export interface SupervisorDeps {
 }
 
 /** How many peer stderr lines are forwarded before suppression kicks in. */
-const MAX_STDERR_LINES = 200
-
 /** Exponential-ish backoff for automatic restarts: 0.5s, 1s, 2s, capped at the window. */
 function backoffMs(attempt: number, windowMs: number): number {
   return Math.min(500 * 2 ** Math.max(0, attempt - 1), Math.max(500, Math.floor(windowMs / 4)))
@@ -332,6 +330,7 @@ export class QuorfloatSupervisor {
     const router = this.#deps.createRouter(channelSessionId)
     const channel = new QuorfloatChannel(child, {
       requestTimeoutMs: config.requestTimeoutMs,
+      maxWriteBufferBytes: config.maxWriteBufferBytes,
       onNotification: (method, params) => {
         if (method === '$stderr') {
           // The peer's own narration is the only window into what it is doing,
@@ -339,11 +338,12 @@ export class QuorfloatSupervisor {
           // reports its failures there. Losing it would make a stalled handshake
           // indistinguishable from a process that never started.
           const line = typeof params === 'string' ? params : String(params)
-          if (this.#stderrDelivered < MAX_STDERR_LINES) {
+          const limit = this.#deps.config().maxStderrLines
+          if (this.#stderrDelivered < limit) {
             this.#deps.log.info('quorfloat:', line)
             this.#stderrDelivered += 1
-          } else if (this.#stderrDelivered === MAX_STDERR_LINES) {
-            this.#deps.log.info('quorfloat: (further stderr lines are suppressed)')
+          } else if (this.#stderrDelivered === limit) {
+            this.#deps.log.info('quorfloat: (further stderr lines are suppressed)', { limit })
             this.#stderrDelivered += 1
           }
           this.#emit({ kind: 'stderr', snapshot: this.snapshot(), detail: line })

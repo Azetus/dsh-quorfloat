@@ -15,7 +15,7 @@ import { join } from 'node:path'
 
 import { loadModule, repoRoot } from './helpers.mjs'
 
-const { Config } = await loadModule('config.js')
+const { Config, DEFAULT_CONFIG } = await loadModule('config.js')
 
 /** Parse the shipped patch with the real YAML parser. */
 async function loadPatch() {
@@ -72,32 +72,15 @@ test('the shipped patch passes the plugin configuration schema', async () => {
   assert.equal(result.value.logLevel, 'info')
 })
 
-test('the shipped patch declares every field the schema knows', async () => {
+test('the shipped patch declares exactly the fields the schema knows', async () => {
   const { document } = await loadPatch()
-  const config = document[0].insert[0].config
-  const declared = new Set(Object.keys(config))
-  const expected = [
-    'enabled',
-    'hotkey',
-    'quorfloatPath',
-    'defaultWorkspaceId',
-    'window',
-    'startupTimeoutMs',
-    'requestTimeoutMs',
-    'heartbeatMs',
-    'heartbeatMissLimit',
-    'presenceMaxAgeMs',
-    'shutdownGraceMs',
-    'restartLimit',
-    'restartWindowMs',
-    'logLevel',
-  ]
-  for (const field of expected) {
-    assert.ok(declared.has(field), `the shipped patch omits ${field}`)
-  }
-  // And nothing extra: an unknown key is rejected by the schema, so an omission
-  // here would be caught by the schema test — this one catches a rename.
-  assert.deepEqual([...declared].sort(), [...expected].sort())
+  const declared = Object.keys(document[0].insert[0].config).sort()
+  // Derived from the schema rather than listed here: a patch *replaces* the whole
+  // config, so a field the schema knows but the patch omits silently falls back
+  // to its default in every real install — a wording bug that no other test
+  // would catch. Deriving keeps adding a field a one-file change.
+  const known = Object.keys(DEFAULT_CONFIG).sort()
+  assert.deepEqual(declared, known)
 })
 
 test('the package manifest points the loader at the patch and the built entry', async () => {

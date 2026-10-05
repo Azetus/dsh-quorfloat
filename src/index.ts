@@ -208,7 +208,7 @@ export function createPlugin(overrides: PluginOverrides = {}) {
           log.debug('interaction state change', { sessionId, reason, detail })
         },
         log,
-      })
+      }, { deadlineMs: config.claimDeadlineMs })
       activation.interactions = interactions
       if (!interactions.register()) {
         // Not fatal: the text path stays usable, and the status surface reports

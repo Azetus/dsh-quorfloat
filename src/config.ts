@@ -69,6 +69,31 @@ export interface QuorfloatConfig {
   /** Consecutive missed heartbeats (no frame at all) tolerated before degraded. */
   readonly heartbeatMissLimit: number
   /**
+   * How long a claimed interaction may wait for the panel before giving up.
+   *
+   * Claiming means no other answerer ever sees the request, so this is what
+   * keeps "the panel owns the decision" from becoming "the turn hangs forever".
+   * It is a human-patience budget, not a transport timeout: granting elevated
+   * permissions deserves deliberation, but an abandoned panel must not hold a
+   * turn open indefinitely.
+   */
+  readonly claimDeadlineMs: number
+  /**
+   * Bytes buffered for the peer before writes are considered stalled.
+   *
+   * The peer consumes a stream of session events; when it falls far enough
+   * behind, continuing to buffer would trade a visible stall for unbounded
+   * memory. Exceeding this aborts the subscription and asks for a resync.
+   */
+  readonly maxWriteBufferBytes: number
+  /**
+   * Peer stderr lines forwarded to the host log per channel generation.
+   *
+   * The peer's narration is the only window into what it is doing, so it is
+   * forwarded; the cap keeps a chatty or looping peer from flooding the log.
+   */
+  readonly maxStderrLines: number
+  /**
    * How long a client presence report stays valid.
    *
    * A safety net, not the primary signal: the browser half reports on every
@@ -117,6 +142,9 @@ const SPEC = {
   requestTimeoutMs: { kind: 'int', def: 10000, min: 500, max: 120000 },
   heartbeatMs: { kind: 'int', def: 5000, min: 0, max: 60000 },
   heartbeatMissLimit: { kind: 'int', def: 3, min: 1, max: 30 },
+  claimDeadlineMs: { kind: 'int', def: 600000, min: 1000, max: 3600000 },
+  maxWriteBufferBytes: { kind: 'int', def: 4194304, min: 65536, max: 268435456 },
+  maxStderrLines: { kind: 'int', def: 200, min: 0, max: 100000 },
   presenceMaxAgeMs: { kind: 'int', def: 30000, min: 1000, max: 600000 },
   shutdownGraceMs: { kind: 'int', def: 1500, min: 100, max: 10000 },
   restartLimit: { kind: 'int', def: 3, min: 0, max: 20 },

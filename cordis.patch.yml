@@ -28,6 +28,9 @@
         requestTimeoutMs: 10000
         heartbeatMs: 5000
         heartbeatMissLimit: 3
+        claimDeadlineMs: 600000
+        maxWriteBufferBytes: 4194304
+        maxStderrLines: 200
         presenceMaxAgeMs: 30000
         shutdownGraceMs: 1500
         restartLimit: 3

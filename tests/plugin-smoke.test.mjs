@@ -71,7 +71,7 @@ function fakeWorkspaceRegistry() {
  * @param options.withController - plant `sessionController`; `false` simulates a
  *   profile that does not compose the Web/API services.
  */
-async function activate({ withController = true } = {}) {
+async function activate({ withController = true, ...overrides } = {}) {
   const dir = scratchDir()
   const reportPath = join(dir, 'report.json')
   const pidFile = join(dir, 'pid.json')
@@ -105,6 +105,7 @@ async function activate({ withController = true } = {}) {
     requestTimeoutMs: 2000,
     shutdownGraceMs: 800,
     logLevel: 'debug',
+    ...overrides,
   })
   await fiber
 
@@ -273,6 +274,34 @@ test('a malformed presence report is rejected as a bad request', async () => {
         assert.match(error.message, /focused must be a boolean/)
         return true
       },
+    )
+  } finally {
+    await app.dispose()
+  }
+})
+
+test('the interaction limits reach the objects that enforce them', async () => {
+  // A config field nobody passes on is a silent bug: the schema accepts it, the
+  // settings page offers it, and nothing changes. These are the ends the plugin
+  // wires by hand, so they are asserted through the real composition rather than
+  // by constructing the layers directly.
+  const app = await activate({
+    claimDeadlineMs: 12345,
+    maxStderrLines: 7,
+    maxWriteBufferBytes: 131072,
+  })
+  try {
+    await app.waitForRunning()
+    const router = app.routers.at(-1)
+    assert.ok(router !== undefined, 'a router was created')
+    const snapshot = await router.handle('diag/snapshot', {})
+    assert.equal(snapshot.config.claimDeadlineMs, 12345, 'the plugin accepted the override')
+    assert.equal(snapshot.config.maxStderrLines, 7)
+    assert.equal(snapshot.config.maxWriteBufferBytes, 131072)
+    assert.equal(
+      snapshot.interactions.deadlineMs,
+      12345,
+      'and the interaction layer was constructed with it, not with the default',
     )
   } finally {
     await app.dispose()
