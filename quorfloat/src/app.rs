@@ -1963,6 +1963,45 @@ mod tests {
         assert_eq!(crate::ui::soft_wrap_for_display("a short line"), "a short line");
     }
 
+    /// A conversation whose answer contains a table.
+    fn table_frame() -> Inbound {
+        Inbound::Notification {
+            method: "session/snapshot".to_owned(),
+            params: Some(serde_json::json!({
+                "sessionId": "session-1", "generation": 1, "cursor": 1, "hasMore": false,
+                "records": [
+                    {"type": "event", "event": {"type": "user/message", "seq": 0, "time": 1,
+                     "data": {"role": "user", "content": [{"type": "text", "text": "对比一下"}],
+                              "source": {"kind": "user"}}}},
+                    {"type": "event", "event": {"type": "assistant/message", "seq": 1, "time": 2,
+                     "data": {"message": {"role": "assistant", "content": [{"type": "text",
+                        "text": "两种做法：\n\n| 方案 | 做法 | 代价 |\n| --- | --- | --- |\n| A | 只给表格套滚动区 | 仍需手势滚动 |\n| B | 自绘表格，单元格内换行 | 需要自己实现 |\n"}]}}}},
+                ],
+            })),
+        }
+    }
+
+    /// The bug this work started from: a table painted past the panel's edge.
+    ///
+    /// The viewer draws tables as an `egui::Grid`, which measures its columns from the content,
+    /// so a wide cell asked for more width than the panel has. Read from the painted rectangles
+    /// rather than from the layout's opinion of itself.
+    #[test]
+    fn a_table_stays_inside_the_panel() {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        deliver(&session, &recorded, table_frame());
+        let size = egui::vec2(708.0, 620.0);
+
+        let drawn = drawn_text(&mut app, size);
+        let texts: Vec<&str> = drawn.iter().map(|(text, _)| text.as_str()).collect();
+        assert!(texts.iter().any(|text| text.contains("方案")), "the header: {texts:?}");
+        assert!(texts.iter().any(|text| text.contains("单元格内换行")), "and its cells: {texts:?}");
+        let widest = drawn.iter().map(|(_, rect)| rect.right()).fold(f32::MIN, f32::max);
+        let panel_right = size.x - f32::from(crate::ui::theme::SHADOW_ROOM_SIDE);
+        assert!(widest <= panel_right, "nothing paints past the panel: {widest} > {panel_right}");
+    }
+
     /// A card is built from the panel's own tokens, and its two actions are one shape.
     ///
     /// The design draws exactly one filled control per view and leaves the rest as surfaces

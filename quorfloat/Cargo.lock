@@ -444,6 +444,7 @@ dependencies = [
  "egui-phosphor",
  "egui_commonmark",
  "global-hotkey",
+ "pulldown-cmark",
  "serde",
  "serde_json",
 ]

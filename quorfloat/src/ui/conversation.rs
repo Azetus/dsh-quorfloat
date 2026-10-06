@@ -358,37 +358,17 @@ pub(super) fn entry_ui(
                             ui.push_id(answer_id(text), |ui| {
                                 let style = theme::markdown_style(ui.style());
                                 ui.style_mut().clone_from(&style);
-                                // Bounded, because a code block is a wall of unbreakable text: a
-                                // long JSON blob or URL inside one asked for more width than the
-                                // panel has, and the panel — whose width is fixed — drew it out
-                                // past its own edge. `default_width` is what the viewer measures
-                                // its blocks against; the scope's maximum keeps anything that
-                                // still asks for more inside the frame (see §40).
                                 let available = ui.available_width().max(1.0);
                                 ui.set_max_width(available);
-                                // Soft-wrapped for display only: the viewer builds its own
-                                // `LayoutJob` and never sets `break_anywhere`, and egui only does
-                                // that when truncating — so a long JSON blob, URL or base64 run
-                                // inside a code block is laid out at its full width and paints out
-                                // past the panel's edge. A zero-width space inside long runs gives
-                                // the layout somewhere to break; it is invisible, and the text a
-                                // copy takes is the untouched source (`answer_source`), so nothing
-                                // machine-readable is changed by it (see §40).
-                                let wrapped = soft_wrap_for_display(text);
-                                // Bounded horizontally, and bounded *here* rather than trusted to
-                                // the viewer: a table is an `egui::Grid`, which measures its columns
-                                // from the content and has no horizontal scroll of its own, so one
-                                // wide cell asks for more width than the panel has and paints past
-                                // its edge. A scroll area the width of the panel is a boundary the
-                                // viewer cannot cross, whatever it draws (§40).
-                                let scroll = egui::ScrollArea::horizontal()
-                                    .max_width(available)
-                                    .auto_shrink([false, true]);
-                                scroll.show(ui, |ui| {
-                                    egui_commonmark::CommonMarkViewer::new()
-                                        .default_width(Some(available as usize))
-                                        .show(ui, markdown, &wrapped);
-                                });
+                                // Tables are drawn by this panel (`super::table`), because the
+                                // viewer draws them as an `egui::Grid` — measured from its content,
+                                // with no scroll of its own — and one wide cell painted past the
+                                // panel's edge. Everything else goes to the viewer as one piece, so
+                                // prose is laid out exactly as it was before (see §40).
+                                // The viewer draws the answer, with the tables bounded: the
+                                // parser tells us where they are, and nothing else about the
+                                // Markdown is decided here (see `super::table`).
+                                super::table::draw(ui, markdown, text, available);
                             });
                         }
                     }

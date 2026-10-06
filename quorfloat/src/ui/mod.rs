@@ -20,6 +20,7 @@ mod composer;
 mod conversation;
 mod geometry;
 mod picker;
+mod table;
 
 /// The one thing the app needs from the picker: the id of the workspace menu, so a send that
 /// has no workspace to create in can open the menu that chooses one.
