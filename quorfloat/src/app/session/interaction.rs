@@ -12,7 +12,8 @@
 //!   reported and handed back to the Harness window (`docs/protocol.md` §6).
 //!
 //! The kind therefore travels on the wire instead of being inferred, and
-//! [`InteractionKind::can_answer`] is what the handshake advertises.
+//! [`InteractionKind::Approval`] is the one this build names in
+//! [`crate::ipc::protocol::CAPABILITIES`].
 
 use serde_json::Value;
 
@@ -201,9 +202,9 @@ impl Interaction {
         Some(truncate(reason))
     }
 
-    /// Up to [`MAX_QUESTIONS_SHOWN`] of the questions being asked, as display text.
+    /// Up to `MAX_QUESTIONS_SHOWN` of the questions being asked, as display text.
     ///
-    /// This build has no way to *answer* a question (see [`Session::answer_interaction`]),
+    /// This build has no way to *answer* a question (see [`super::Session::answer_interaction`]),
     /// but it can still tell the user enough to decide whether to switch to the
     /// Harness window — which is the entire reason the host announces questions to
     /// the panel instead of staying silent.

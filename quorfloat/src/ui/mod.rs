@@ -1,7 +1,7 @@
 //! What the panel draws, and nothing else.
 //!
-//! Separate from [`crate::app`] along one line: this module turns a [`PanelState`] into
-//! pixels and reports clicks as [`CardAction`]s, while `app` owns the state, the
+//! Separate from [`crate::app`] along one line: this module turns a `PanelState` into
+//! pixels and reports clicks as `CardAction`s, while `app` owns the state, the
 //! lifecycle, and the protocol. The separation is what makes "the panel showed the wrong
 //! thing" and "the panel knew the wrong thing" different questions — the first is here,
 //! the second is not.
@@ -12,7 +12,9 @@
 
 mod cards;
 mod conversation;
+pub mod fonts;
 mod theme;
+pub mod window;
 
 pub use cards::CardAction;
 /// The speaker label and the requested locale are asserted by tests in `app`, so they are

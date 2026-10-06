@@ -1166,7 +1166,7 @@ mod tests {
         // A notification, not a request: the host handles it in its notification
         // path and the peer has nothing to wait for. It must also be sent when the
         // panel is hidden, since "hidden" is a fact the host routes on.
-        let mut session = Session::new(identity());
+        let session = Session::new(identity());
         let mut sink = RecordingSink::default();
         session.report_visibility(false, &["window", "hotkey"], &mut sink);
         session.report_visibility(true, &["window", "hotkey"], &mut sink);
@@ -1182,7 +1182,7 @@ mod tests {
         // `hello` is written before a window exists, so a capability there is a
         // claim. This is the measurement, and it rides along with a notification the
         // host already parses — one field it ignores, no new method.
-        let mut session = Session::new(identity());
+        let session = Session::new(identity());
         let mut sink = RecordingSink::default();
         session.report_visibility(false, &["window", "hotkey"], &mut sink);
         assert_eq!(sink.frames[0]["params"]["capabilities"], json!(["window", "hotkey"]));

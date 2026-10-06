@@ -12,7 +12,7 @@
 //! - [`platform`] — how this process spells its platform and architecture to the host.
 //!
 //! Nothing here draws, owns state, or knows what a conversation is. The next layer in
-//! is [`crate::session`], which is the first thing that has an opinion about meaning.
+//! is [`crate::app::session`], which is the first thing that has an opinion about meaning.
 
 pub mod frame;
 pub mod platform;

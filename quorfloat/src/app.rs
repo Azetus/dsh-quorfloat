@@ -26,11 +26,12 @@ use eframe::egui;
 pub mod session;
 pub mod sink;
 
-use crate::fonts::{self, FontStatus};
+use crate::ui::fonts::{self, FontStatus};
 use crate::app::session::interaction::{Handoff, Interaction};
 use crate::app::sink::{BorrowedSink, SharedSink, Wake};
 use crate::app::session::{Session, SessionExit, WindowCommand};
-use crate::window::{Hotkey, WindowSettings};
+use crate::runtime::hotkey::Hotkey;
+use crate::ui::window::WindowSettings;
 
 
 
@@ -135,7 +136,7 @@ impl App {
     /// Called from eframe's app creator, before the first frame, so a missing font is
     /// visible in the very first paint rather than discovered by a user reading boxes.
     ///
-    /// @param status - what [`crate::fonts::install`] found and loaded.
+    /// @param status - what [`crate::ui::fonts::install`] found and loaded.
     pub fn note_fonts(&mut self, status: FontStatus) {
         self.sink.log(&status.describe());
         self.sink.mark(&status.describe());
@@ -546,7 +547,7 @@ impl App {
 ///
 /// One second, and deliberately not the follow layer's own interval: this is only a
 /// ceiling on how long clock-driven work can be delayed, while the policy (how often
-/// to look for a new conversation) lives in [`crate::follow`]. Waking a hidden panel
+/// to look for a new conversation) lives in [`crate::app::session::follow`]. Waking a hidden panel
 /// costs a pass that paints nothing.
 pub const CLOCK_INTERVAL_MS: u64 = 1000;
 
@@ -556,7 +557,7 @@ pub const CLOCK_INTERVAL_MS: u64 = 1000;
 /// is never called — and hidden is the state this panel spends its life in. Anything
 /// that comes due *by clock* rather than by event therefore needs something to wake
 /// the loop, and that is all this thread does. It is the same shape as
-/// [`crate::window::watch_hotkey`], and for the same reason: a poll inside the render
+/// [`crate::runtime::hotkey::watch_hotkey`], and for the same reason: a poll inside the render
 /// callback cannot run when there is no render callback.
 ///
 /// The interval is a ceiling, not a schedule: what is actually due is decided by
@@ -702,7 +703,7 @@ mod tests {
     fn the_window_state_carries_the_conversation() {
         // The window reads this every frame; if the plumbing dropped it, the panel would
         // show a conversation that never appears while the protocol looked perfect.
-        let (mut app, recorded, session, _wake) = app_and_session();
+        let (app, recorded, session, _wake) = app_and_session();
         deliver(&session, &recorded, conversation_frame());
 
         let state = app.state();
@@ -714,7 +715,7 @@ mod tests {
 
     #[test]
     fn a_stream_in_flight_is_offered_as_a_live_entry() {
-        let (mut app, recorded, session, _wake) = app_and_session();
+        let (app, recorded, session, _wake) = app_and_session();
         deliver(&session, &recorded, conversation_frame());
         deliver(
             &session,

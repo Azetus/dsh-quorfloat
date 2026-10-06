@@ -20,7 +20,8 @@ use dsh_quorfloat::app::{self, App};
 use dsh_quorfloat::runtime::diag::marker::Marker;
 use dsh_quorfloat::app::session::{FrameSink, HotkeyReport, Identity, Session, SessionExit};
 use dsh_quorfloat::ipc::transport::{StdinSource, StdioSink};
-use dsh_quorfloat::window::{self, Hotkey, WindowSettings};
+use dsh_quorfloat::runtime::hotkey::{self, Hotkey};
+use dsh_quorfloat::ui::window::{self, WindowSettings};
 use dsh_quorfloat::VERSION;
 use eframe::egui;
 
@@ -119,7 +120,7 @@ fn run() -> Result<SessionExit, String> {
     // callback: eframe repaints on demand, so an idle hidden panel performs no pass
     // and a poll would never run. See `window::watch_hotkey`.
     if hotkey.is_active() {
-        window::watch_hotkey(hotkey_wake, Arc::clone(&egui_slot), Arc::clone(&sink));
+        hotkey::watch_hotkey(hotkey_wake, Arc::clone(&egui_slot), Arc::clone(&sink));
     }
 
     // The same argument, for the other kind of idle work: the panel has to notice a
@@ -168,7 +169,7 @@ fn run() -> Result<SessionExit, String> {
             app.note_window_created();
             // Before the first frame: a font set installed later would lay text out
             // once with the old one and rebuild the atlas to correct it.
-            let fonts = dsh_quorfloat::fonts::install(&cc.egui_ctx);
+            let fonts = dsh_quorfloat::ui::fonts::install(&cc.egui_ctx);
             app.note_fonts(fonts);
             Ok(Box::new(EguiApp { inner: app, context: cc.egui_ctx.clone() }))
         }),
