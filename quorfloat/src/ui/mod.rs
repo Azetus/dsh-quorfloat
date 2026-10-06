@@ -21,6 +21,7 @@ mod conversation;
 mod geometry;
 pub mod fonts;
 pub mod icons;
+pub mod screenshot;
 pub mod theme;
 pub mod window;
 
@@ -115,9 +116,16 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PanelState, draft: &mut String, ac
                     cards(ui, state, action);
                     // The composer claimed its share by being drawn first; the footer is
                     // below the conversation and has to be predicted, or a long
-                    // conversation pushes the panel's own hints off the bottom.
+                    // conversation pushes the panel's own hints off the bottom. The thread's
+                    // own padding is part of that arithmetic — forgetting it is how the
+                    // first version drew prose against the panel's border.
                     let footer = footer_height(ui);
-                    conversation(ui, state, ui.available_height() - footer);
+                    let thread_padding =
+                        f32::from(theme::PAD_THREAD.top + theme::PAD_THREAD.bottom);
+                    let thread = (ui.available_height() - footer - thread_padding).max(0.0);
+                    egui::Frame::NONE.inner_margin(theme::PAD_THREAD).show(ui, |ui| {
+                        conversation(ui, state, thread);
+                    });
                     footer_bar(ui, state);
                 });
         });
@@ -161,7 +169,8 @@ fn top_bar(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
                     );
                     // The tools, pushed to the far end.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icon_button(ui, icons::Icon::Close, "收起面板").clicked()
+                        let hint = format!("收起面板（{}）", state.hotkey);
+                        if icon_button(ui, icons::Icon::Close, &hint).clicked()
                             || ui.input(|input| input.key_pressed(egui::Key::Escape))
                         {
                             *action = Some(Action::Hide);
@@ -193,13 +202,9 @@ fn icon_button(ui: &mut egui::Ui, icon: icons::Icon, tooltip: &str) -> egui::Res
     if response.hovered() {
         ui.painter().rect_filled(rect, egui::CornerRadius::same(theme::RADIUS_ICON_BUTTON), theme::soft());
     }
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        icon.chars(),
-        theme::font(ui.ctx(), theme::Weight::Regular, theme::ICON),
-        visuals.fg_stroke.color,
-    );
+    // The icon family, not the text one: a private-use codepoint laid out in a text font is
+    // a tofu box, which is exactly what the first look at this panel showed.
+    icons::paint(ui, rect.center(), icon, theme::ICON, visuals.fg_stroke.color);
     response.on_hover_text(tooltip)
 }
 
@@ -231,21 +236,28 @@ fn cards(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
 ///
 /// Predicted from the design's own padding and type, for the same reason the composer's
 /// height is: the conversation is given what is left, and a first frame that guessed would
-/// make the panel jump on the second.
+/// make the panel jump on the second. It is one line, and that is a promise the footer has
+/// to keep — the first version drew four lines into a prediction of one, and the last two
+/// were clipped off the bottom of the panel.
 ///
 /// @param ui - the frame, for the item spacing.
 /// @returns the strip's height.
 fn footer_height(ui: &egui::Ui) -> f32 {
-    theme::TEXT_SMALL + 6.0 + ui.spacing().item_spacing.y
+    theme::TEXT_SMALL + 4.0 + f32::from(theme::PAD_FOOTER.top + theme::PAD_FOOTER.bottom) + ui.spacing().item_spacing.y
 }
 
 /// The bottom bar: what the keys do, and what the panel is doing.
+///
+/// One row, always: the shortcut hints on the left, and whatever the panel has to report on
+/// the right. The keys are spelled out rather than drawn as `↵` and `⇧` because the bundled
+/// fonts have no glyphs for them — the first version showed two tofu boxes where the user
+/// was supposed to read a keyboard.
 fn footer_bar(ui: &mut egui::Ui, state: &PanelState) {
     let frame = egui::Frame::NONE.inner_margin(theme::PAD_FOOTER);
     frame.show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_TIGHT;
-            for (key, what) in [("↵", "发送"), ("⇧↵", "换行"), ("esc", "收起")] {
+            for (key, what) in [("Enter", "发送"), ("Shift+Enter", "换行"), ("Esc", "收起")] {
                 ui.label(
                     egui::RichText::new(key)
                         .size(theme::TEXT_SMALL)
@@ -254,19 +266,27 @@ fn footer_bar(ui: &mut egui::Ui, state: &PanelState) {
                 );
                 ui.label(theme::meta(ui.ctx(), what));
             }
+            // The right-hand side is one line that is allowed to be cut short: it reports a
+            // prompt in flight, or a font that is missing, or what the panel is following.
+            let status = state
+                .prompt_line
+                .clone()
+                .or_else(|| state.fonts_warning.clone())
+                .unwrap_or_else(|| state.follow.status());
+            let colour = if state.prompt_line.is_none() && state.fonts_warning.is_some() {
+                warn_text()
+            } else {
+                muted()
+            };
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(status).size(theme::TEXT_SMALL).color(colour),
+                    )
+                    .truncate(),
+                );
+            });
         });
-        // One line, always: the composer's own report while a prompt is in flight, or what
-        // the panel is following. Whichever it is, it is the panel's answer to "what is
-        // happening", so it lives where the design puts the status.
-        let status = state
-            .prompt_line
-            .clone()
-            .unwrap_or_else(|| state.follow.status());
-        ui.add(egui::Label::new(theme::meta(ui.ctx(), status)).truncate());
-        if let Some(warning) = &state.fonts_warning {
-            ui.add(egui::Label::new(egui::RichText::new(warning).size(theme::TEXT_META).color(warn_text())).truncate());
-        }
-        ui.add(egui::Label::new(theme::meta(ui.ctx(), state.hotkey.clone())).truncate());
     });
 }
 

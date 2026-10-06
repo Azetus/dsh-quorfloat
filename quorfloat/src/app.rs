@@ -71,6 +71,18 @@ pub struct App {
     window_seen: bool,
     /// Whether the resolved theme has been reported once this run.
     theme_seen: bool,
+    /// Where to write one picture of the panel, when the environment asks for one.
+    ///
+    /// A development aid with no part in the running panel: this process draws the panel's
+    /// corners and its own shadow, and the only honest way to check either is to look at
+    /// them. It needs no screen-recording permission because the pixels come from egui's own
+    /// framebuffer rather than from the desktop — which is also its limit: it shows what the
+    /// panel draws, not how the platform composites it.
+    screenshot: Option<std::path::PathBuf>,
+    /// Whether that picture has been asked for yet this run.
+    screenshot_asked: bool,
+    /// Whether it has been written, so it is written once and not once a frame.
+    screenshot_written: bool,
     /// Where the window is, and where that is remembered.
     ///
     /// Owned here rather than by the window layer: the window reports where it is, and the
@@ -127,6 +139,11 @@ impl App {
             window_state,
             window_seen: false,
             theme_seen: false,
+            screenshot: std::env::var_os("DSH_QUORFLOAT_SCREENSHOT")
+                .map(std::path::PathBuf::from)
+                .filter(|path| !path.as_os_str().is_empty()),
+            screenshot_asked: false,
+            screenshot_written: false,
             draft: String::new(),
             fonts_warning: None,
             fonts_checked: false,
@@ -188,6 +205,44 @@ impl App {
         self.fonts_warning = Some(message);
     }
 
+    /// Ask for one picture of the panel, and write it when egui hands it over.
+    ///
+    /// The ask has to come from inside a pass, and the answer arrives as an event on a later
+    /// one — hence two pieces of state rather than a straight-line call.
+    fn write_screenshot(&mut self) {
+        let Some(path) = self.screenshot.clone() else { return };
+        let Some(ctx) = &self.context else { return };
+
+        if self.screenshot_written {
+            return;
+        }
+        if let Some(image) = ctx.input(|input| {
+            input.events.iter().find_map(|event| match event {
+                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                _ => None,
+            })
+        }) {
+            match crate::ui::screenshot::write_ppm(&path, &image) {
+                Ok(()) => {
+                    self.screenshot_written = true;
+                    self.sink.mark(&format!("screenshot written to {}", path.display()));
+                }
+                Err(error) => {
+                    self.screenshot_written = true;
+                    self.sink.mark(&format!("screenshot failed: {error}"));
+                }
+            }
+            return;
+        }
+        // Once the panel is actually on screen: a hidden window has no framebuffer to hand
+        // over, and asking then would capture nothing rather than the panel.
+        let visible = ctx.input(|input| input.viewport().visible().unwrap_or(true));
+        if !self.screenshot_asked && visible {
+            self.screenshot_asked = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+        }
+    }
+
     /// Report where the window is, so the next run can open there.
     ///
     /// Called from every pass rather than from the drag handler: the window can also be
@@ -211,7 +266,13 @@ impl App {
                 .window_state
                 .requested()
                 .map_or_else(|| "none".to_owned(), |(x, y)| format!("{x:.0},{y:.0}"));
-            self.sink.mark(&format!("window first seen at {x:.0},{y:.0} (requested {requested})"));
+            // Visibility belongs in this line. "The panel is not on screen" then has an
+            // answer in the log rather than a guess about which layer ate it — which is
+            // exactly the question that cost a round of screenshots of the wrong window.
+            let visible = ctx.input(|input| input.viewport().visible().unwrap_or(true));
+            self.sink.mark(&format!(
+                "window first seen at {x:.0},{y:.0} (requested {requested}, visible {visible})"
+            ));
         }
         if self.window_state.observe((x, y), now) {
             self.sink.mark(&format!("window position remembered {x:.0},{y:.0}"));
@@ -251,6 +312,15 @@ impl App {
         if self.startup_hidden {
             return;
         }
+        // Unless the panel was asked to open showing. This command used to run
+        // unconditionally, which quietly defeated that request: the window was created
+        // visible and hidden again a frame later, so "start visible" looked like a setting
+        // that did nothing — and a screenshot of the panel came back as a picture of the
+        // window behind it.
+        if self.settings.start_visible {
+            self.startup_hidden = true;
+            return;
+        }
         self.startup_hidden = true;
         if let Some(ctx) = &self.context {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -284,6 +354,7 @@ impl App {
     pub fn logic(&mut self) {
         self.hide_after_startup();
         self.verify_fonts();
+        self.write_screenshot();
         self.remember_window_position();
         self.pump();
         self.apply_window_commands();

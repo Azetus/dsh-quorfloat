@@ -158,6 +158,32 @@ pub fn glyph(ctx: &egui::Context, icon: Icon, size: f32, colour: egui::Color32) 
     egui::RichText::new(icon.chars()).font(crate::ui::fonts::icon_font(size)).color(colour)
 }
 
+/// Paint one icon into a rect, for the places that draw rather than lay out text.
+///
+/// The companion to [`glyph`], and the reason it exists: an icon drawn with
+/// `ui.painter().text(…)` names the family itself, which is how the guard in [`glyph`] was
+/// bypassed once and the panel panicked on its first frame. There is now one guarded way to
+/// draw an icon and one guarded way to lay one out, and
+/// `nothing_outside_this_file_names_the_icon_family` keeps it that way.
+///
+/// @param ui - where to paint.
+/// @param center - the middle of the icon's box.
+/// @param icon - which picture.
+/// @param size - the box's size, in points.
+/// @param colour - the colour to draw it in.
+pub fn paint(ui: &egui::Ui, center: egui::Pos2, icon: Icon, size: f32, colour: egui::Color32) {
+    if !crate::ui::fonts::icons_ready(ui.ctx()) {
+        return;
+    }
+    ui.painter().text(
+        center,
+        egui::Align2::CENTER_CENTER,
+        icon.chars(),
+        crate::ui::fonts::icon_font(size),
+        colour,
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +217,35 @@ mod tests {
         let unique = glyphs.len();
         glyphs.dedup();
         assert_eq!(glyphs.len(), unique, "two icons share a glyph");
+    }
+
+    /// One guarded way in, and this is what keeps it that way.
+    ///
+    /// naming the icon family anywhere else means drawing without the guard — which is a
+    /// panic in any context whose first frame came before the fonts were applied, and was
+    /// found by exactly that test.
+    #[test]
+    fn nothing_outside_this_file_names_the_icon_family() {
+        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/ui");
+        let mut offenders = Vec::new();
+        for entry in std::fs::read_dir(&directory).expect("the ui sources are readable") {
+            let path = entry.expect("an entry").path();
+            if path.extension().is_none_or(|extension| extension != "rs") {
+                continue;
+            }
+            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            if name == "icons.rs" || name == "fonts.rs" {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("a source file");
+            if text.contains("icon_font(") || text.contains("ICON_FAMILY") {
+                offenders.push(name);
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these files draw icons without the guard: {offenders:?} — use icons::glyph or icons::paint",
+        );
     }
 
     /// The cross-check, and the reason this table can be trusted to match the design.

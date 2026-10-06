@@ -44,13 +44,7 @@ pub(super) fn composer(
             // "here". It is not a button and does not pretend to be one.
             let mark = theme::TEXT_COMPOSER * 0.8;
             let (rect, _) = ui.allocate_exact_size(egui::vec2(mark, mark), egui::Sense::hover());
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                crate::ui::icons::Icon::Search.chars(),
-                theme::font(ui.ctx(), theme::Weight::Regular, mark),
-                theme::accent(),
-            );
+            crate::ui::icons::paint(ui, rect.center(), crate::ui::icons::Icon::Search, mark, theme::accent());
 
             let editor_width = (ui.available_width() - theme::SEND_BUTTON - theme::GAP_COMPOSER).max(80.0);
             let editor = ui.add_sized(
@@ -63,6 +57,10 @@ pub(super) fn composer(
                     // Shift+Enter is the combination that inserts a newline; plain Enter is
                     // left unconsumed so the check below can turn it into a send.
                     .return_key(Some(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::Enter)))
+                    // No box of its own: the design's input is a bare line on the panel, and
+                    // egui's default would paint it `extreme_bg_color` — a near-black
+                    // rectangle in the middle of a light panel.
+                    .frame(egui::Frame::NONE)
                     .hint_text("问点什么…"),
             );
 
@@ -110,13 +108,7 @@ fn submit_button(ui: &mut egui::Ui, stop: bool, enabled: bool) -> egui::Response
     };
     ui.painter().rect_filled(rect, egui::CornerRadius::same(theme::RADIUS_SUBMIT), fill);
     let icon = if stop { crate::ui::icons::Icon::Stop } else { crate::ui::icons::Icon::ArrowUp };
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        icon.chars(),
-        theme::font(ui.ctx(), theme::Weight::Regular, theme::ICON),
-        foreground,
-    );
+    crate::ui::icons::paint(ui, rect.center(), icon, theme::ICON, foreground);
     if enabled {
         response.on_hover_text(if stop { "停止生成" } else { "发送" })
     } else {

@@ -239,6 +239,18 @@ impl eframe::App for EguiApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.inner.draw(ui);
     }
+
+    /// Clear to nothing, because there is nothing behind the panel to clear to.
+    ///
+    /// eframe's default is `rgba(12, 12, 12, 180)` — a near-black that is *almost*
+    /// transparent, chosen so that turning on transparency gives "immediate results". Those
+    /// results were a dark, square-cornered rectangle covering the whole window: the panel's
+    /// rounded corners and its own shadow sat inside it, which reads as a black shadow and
+    /// two square bottom corners. A window that is only ever a rounded panel has to clear to
+    /// zero, so that the desktop shows through everywhere the panel is not.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
+    }
 }
 
 /// The accelerator to register, from the host's spawn environment.

@@ -22,6 +22,12 @@ pub struct WindowSettings {
     pub reduce_motion: bool,
     /// Which of the design's two palettes to draw in.
     pub theme: crate::ui::theme::Preference,
+    /// Open with the panel already showing.
+    ///
+    /// Off by default and meant for development: it is the difference between "look at the
+    /// panel" and "press the hotkey and then describe what you saw", which is what makes a
+    /// screenshot scriptable.
+    pub start_visible: bool,
 }
 
 impl Default for WindowSettings {
@@ -38,6 +44,7 @@ impl Default for WindowSettings {
             // A panel that floats over other applications should look like it belongs to
             // the desktop it is floating over, so the platform decides until told otherwise.
             theme: crate::ui::theme::Preference::System,
+            start_visible: false,
         }
     }
 }
@@ -58,6 +65,7 @@ impl WindowSettings {
             max_height: float_env("DSH_QUORFLOAT_WINDOW_MAX_HEIGHT", defaults.max_height),
             always_on_top: bool_env("DSH_QUORFLOAT_WINDOW_ALWAYS_ON_TOP", defaults.always_on_top),
             theme: crate::ui::theme::Preference::from_env(),
+            start_visible: bool_env("DSH_QUORFLOAT_WINDOW_START_VISIBLE", defaults.start_visible),
             reduce_motion: bool_env("DSH_QUORFLOAT_WINDOW_REDUCE_MOTION", defaults.reduce_motion),
         }
     }
@@ -112,9 +120,16 @@ pub fn viewport(settings: &WindowSettings, remembered: Option<(f32, f32)>) -> eg
         // if the window behind them is not painted: an opaque window would show its square
         // corners around the rounded panel.
         .with_transparent(true)
-        // Starts hidden. The hotkey is what reveals it, and starting visible would
-        // flash a panel on every launch — including every automatic restart.
-        .with_visible(false)
+        // And without the platform's own shadow. egui's own note on this is the recipe we
+        // are following: for an overlay-like window on macOS, transparency wants
+        // `has_shadow = false`, or the system's square-cornered shadow ghosts the panel we
+        // are drawing ourselves.
+        .with_has_shadow(false)
+        // Hidden unless the environment says otherwise. The hotkey is what reveals it, and
+        // starting visible would flash a panel on every launch — including every automatic
+        // restart. The exception exists for development, where "look at the panel" should not
+        // require a keystroke (`DSH_QUORFLOAT_WINDOW_START_VISIBLE`).
+        .with_visible(settings.start_visible)
         // The window is the panel *plus* the room the panel's shadow needs, so that the
         // configured width and height keep meaning "how big the panel is".
         .with_inner_size([

@@ -511,8 +511,10 @@ pub const SHADOW_ROOM_SIDE: i8 = 34;
 /// The room above the panel: the shadow reaches down, not up, so this is only the blur's
 /// first few pixels.
 pub const SHADOW_ROOM_TOP: i8 = 20;
-/// The room below the panel, where the shadow is at its longest.
-pub const SHADOW_ROOM_BOTTOM: i8 = 34;
+/// The room below the panel, where the shadow is at its longest: the far layer is drawn
+/// `offset` (16) plus half its blur (21) below the panel's edge, so 34 was three pixels
+/// short of what it needs and the shadow was clipped flat along the bottom.
+pub const SHADOW_ROOM_BOTTOM: i8 = 40;
 
 /// The far layer of the float shadow: `0 16px 42px`.
 #[must_use]
