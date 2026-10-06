@@ -66,7 +66,6 @@ function fakeContext() {
   }
 }
 
-/** Build interactions with a fixed ownership set and a captured notification log. */
 /**
  * Authority used by the behaviour tests: the panel decides, silently.
  *
@@ -75,7 +74,15 @@ function fakeContext() {
  */
 const PANEL_DECIDES = { authority: 'panel', reason: 'harness-not-visible', fresh: [] }
 
-function build({ owned = ['session-owned'], notify, authority = () => PANEL_DECIDES } = {}) {
+/**
+ * What the peer declared in `hello`, as the behaviour tests assume it: the panel
+ * answers approvals. A panel that claims a question it cannot render hides it from
+ * the Harness window for the whole claim deadline, so claiming is gated on this.
+ */
+const PANEL_ANSWERS = kind => kind === 'approval'
+
+/** Build interactions with a fixed ownership set and a captured notification log. */
+function build({ owned = ['session-owned'], notify, authority = () => PANEL_DECIDES, canAnswer = PANEL_ANSWERS } = {}) {
   const ctx = fakeContext()
   const notifications = []
   const ownerSet = new Set(owned)
@@ -83,6 +90,7 @@ function build({ owned = ['session-owned'], notify, authority = () => PANEL_DECI
     ctx,
     ownedSessionIds: () => [...ownerSet],
     authority,
+    canAnswer,
     notify: async (method, params) => {
       notifications.push({ method, params })
       await notify?.(method, params)
@@ -121,7 +129,13 @@ test('an owned approval is published to the peer and settles with its answer', a
   const { ctx, interactions, notifications } = build()
   const pending = ctx.dispatch(
     'approval/request',
-    { agent: { id: 'session-owned' }, toolName: 'bash', callId: 'call-1', reason: 'needs network' },
+    {
+      agent: { id: 'session-owned' },
+      toolName: 'bash',
+      callId: 'call-1',
+      reason: 'needs network',
+      displayReason: { en: 'Allow this with network access?', zh: '允许访问网络吗？', fr: 7 },
+    },
     next,
   )
   await new Promise(resolve => setImmediate(resolve))
@@ -130,10 +144,61 @@ test('an owned approval is published to the peer and settles with its answer', a
   assert.equal(open.params.kind, 'approval')
   assert.equal(open.params.payload.toolName, 'bash')
   assert.equal(open.params.payload.reason, 'needs network')
+  // The card shows the text written to be read, not the audit string; a locale
+  // filled with something that is not text is dropped rather than coerced.
+  assert.deepEqual(open.params.payload.displayReason, {
+    en: 'Allow this with network access?',
+    zh: '允许访问网络吗？',
+  })
 
   const result = interactions.answer(open.params.interactionId, { kind: 'approval', outcome: 'allowed-once' })
   assert.equal(result.accepted, true)
   assert.equal(await pending, 'allowed-once')
+})
+
+test('an approval without usable display text carries none rather than junk', async () => {
+  const { ctx, notifications } = build()
+  ctx.dispatch(
+    'approval/request',
+    { agent: { id: 'session-owned' }, toolName: 'bash', displayReason: { zh: '   ' } },
+    next,
+  )
+  await new Promise(resolve => setImmediate(resolve))
+  const open = notifications.find(entry => entry.method === 'interaction/open')
+  assert.equal(open.params.payload.displayReason, null, 'whitespace is not text to show a user')
+})
+
+test('the answer shape the panel writes is the one the host validates', async () => {
+  // Pinned literally, because it is a cross-language contract with no compiler
+  // between the two halves: the Rust side builds `{"interactionId":…,"answer":
+  // {"outcome":"allowed-once"}}` by hand. A second field is not required, and the
+  // closed vocabulary is what decides the outcome — anything else is refused rather
+  // than read as "no".
+  const { ctx, interactions, notifications } = build()
+  const pending = ctx.dispatch('approval/request', { agent: { id: 'session-owned' }, toolName: 'bash' }, next)
+  await new Promise(resolve => setImmediate(resolve))
+  const open = notifications.find(entry => entry.method === 'interaction/open')
+
+  assert.deepEqual(interactions.answer(open.params.interactionId, { outcome: 'allowed-once' }), {
+    accepted: true,
+  })
+  assert.equal(await pending, 'allowed-once')
+})
+
+test('an outcome outside the closed vocabulary is refused, not read as a refusal', async () => {
+  // `allowed-forever` must never be mistaken for a rejection, and must never be
+  // mistaken for a grant: it is not in the vocabulary, so it settles nothing.
+  const { ctx, interactions, notifications } = build()
+  const pending = ctx.dispatch('approval/request', { agent: { id: 'session-owned' }, toolName: 'bash' }, next)
+  await new Promise(resolve => setImmediate(resolve))
+  const open = notifications.find(entry => entry.method === 'interaction/open')
+
+  const refused = interactions.answer(open.params.interactionId, { outcome: 'allowed-forever' })
+  assert.equal(refused.accepted, false)
+  assert.match(refused.reason, /does not match an approval interaction/)
+  // Still pending afterwards: the request can still be answered properly.
+  assert.deepEqual(interactions.answer(open.params.interactionId, { outcome: 'rejected' }), { accepted: true })
+  assert.equal(await pending, 'rejected')
 })
 
 test('a second answer for the same request is refused, not applied twice', async () => {
@@ -193,7 +258,10 @@ test('abortAll withdraws every pending request', async () => {
 })
 
 test('an owned question is published with its options and answered as a batch', async () => {
-  const { ctx, interactions, notifications } = build()
+  // Only for a peer that declared it can answer questions. The shipping build does
+  // not (see `the answer shape the panel writes…` and `canAnswer`), so this covers
+  // the machinery that build will need rather than today's behaviour.
+  const { ctx, interactions, notifications } = build({ canAnswer: () => true })
   const pending = ctx.dispatch(
     'user-questions/request',
     {
@@ -269,6 +337,7 @@ test('an answerer registered later still runs first (prepend)', async () => {
     ctx,
     ownedSessionIds: () => ['session-owned'],
     authority: () => PANEL_DECIDES,
+    canAnswer: PANEL_ANSWERS,
     notify: async (method, params) => {
       notifications.push({ method, params })
     },
@@ -332,6 +401,7 @@ test('an unanswered claim settles instead of holding the turn forever', async ()
       ctx,
       ownedSessionIds: () => ['session-owned'],
       authority: () => PANEL_DECIDES,
+      canAnswer: PANEL_ANSWERS,
       notify: async (method, params) => {
         notifications.push({ method, params })
       },
@@ -353,6 +423,7 @@ test('an answer arriving after the deadline is refused, not applied', async () =
       ctx,
       ownedSessionIds: () => ['session-owned'],
       authority: () => PANEL_DECIDES,
+      canAnswer: PANEL_ANSWERS,
       notify: async (method, params) => {
         notifications.push({ method, params })
       },
@@ -377,6 +448,7 @@ test('unregister removes both listeners so nothing outlives the plugin', () => {
     ctx,
     ownedSessionIds: () => ['session-owned'],
     authority: () => PANEL_DECIDES,
+    canAnswer: PANEL_ANSWERS,
     notify: async () => {},
     log: recordingLogger(),
   })
@@ -394,6 +466,7 @@ test('an unregistered plugin never claims, and nothing hangs on its behalf', asy
     ctx,
     ownedSessionIds: () => ['session-owned'],
     authority: () => PANEL_DECIDES,
+    canAnswer: PANEL_ANSWERS,
     notify: async () => {},
     log: recordingLogger(),
   })
@@ -405,13 +478,14 @@ test('an unregistered plugin never claims, and nothing hangs on its behalf', asy
 
 
 /** Build interactions with a fixed authority verdict, for routing tests. */
-function buildWithAuthority(verdict) {
+function buildWithAuthority(verdict, canAnswer = PANEL_ANSWERS) {
   const ctx = fakeContext()
   const notifications = []
   const interactions = new Interactions({
     ctx,
     ownedSessionIds: () => ['session-owned'],
     authority: () => verdict,
+    canAnswer,
     notify: async (method, params) => {
       notifications.push({ method, params })
     },
@@ -434,21 +508,49 @@ test('a visible Harness window keeps the decision, and the panel only gets a hin
   assert.deepEqual(notifications, [], 'a focused window needs no hint: it shows the card itself')
 })
 
-test('an open but unfocused window hands over and tells the panel where the request is', async () => {
+test('a claimed approval needs no pointer to the Harness window', async () => {
+  // An open-but-unfocused Harness window used to earn the panel a hint telling the
+  // user to go and confirm there. That was wrong: claiming is exclusive, so the
+  // window has nothing to show for this request — the card is on the panel the user
+  // is looking at, and sending them elsewhere is noise at best.
   const { ctx, notifications } = buildWithAuthority({
     authority: 'panel',
     reason: 'harness-open-but-idle',
     fresh: ['desktop'],
   })
   const pending = ctx.dispatch('approval/request', { agent: { id: 'session-owned' }, toolName: 'bash' })
-  const hint = await waitForNotification(notifications, 'interaction/hint')
-  assert.equal(hint.params.reason, 'harness-open-but-idle')
-  assert.equal(hint.params.kind, 'approval')
-  assert.deepEqual(hint.params.surfaces, ['desktop'], 'the hint names the surface holding the request')
-
   const open = await waitForNotification(notifications, 'interaction/open')
-  assert.equal(interactionsAnswer(ctx, open.params.interactionId, { kind: 'approval', outcome: 'allowed-once' }).accepted, true)
+  assert.equal(
+    notifications.filter(entry => entry.method === 'interaction/hint').length,
+    0,
+    'the card is right there',
+  )
+  interactionsAnswer(ctx, open.params.interactionId, { kind: 'approval', outcome: 'allowed-once' })
   assert.equal(await pending, 'allowed-once')
+})
+
+test('a question the panel cannot answer is announced and handed over at once', async () => {
+  // The defect this prevents: claiming a question this build has no widget for hides
+  // it from the Harness window for the entire claim deadline and then hands back a
+  // request that was invisible the whole time. The user is told where it went instead,
+  // and the request reaches the answerer that can actually take it.
+  const { ctx, notifications } = buildWithAuthority(
+    { authority: 'panel', reason: 'harness-not-visible', fresh: ['web'] },
+    () => false,
+  )
+  const outcome = await ctx.dispatch(
+    'user-questions/request',
+    { agent: { id: 'session-owned' }, questions: [{ id: 'q1', question: 'Which preset?' }] },
+  )
+  assert.equal(outcome, 'unavailable', 'passed on immediately, not held until the deadline')
+  assert.equal(
+    notifications.filter(entry => entry.method === 'interaction/open').length,
+    0,
+    'nothing is published to a panel that cannot render it',
+  )
+  const hint = await waitForNotification(notifications, 'interaction/hint')
+  assert.equal(hint.params.kind, 'question', 'the panel learns what kind it is being told about')
+  assert.deepEqual(hint.params.surfaces, ['web'], 'and which surface will show it')
 })
 
 test('a hidden window hands over without a hint', async () => {
@@ -504,13 +606,16 @@ test('a session this host does not own is deferred regardless of the authority',
   assert.deepEqual(notifications, [])
 })
 
-test('a failed hint does not fail the request', async () => {
+test('a hint that cannot be delivered does not fail the request', async () => {
+  // The hint is advisory. If the peer is gone the question still has to reach the
+  // answerer that can take it, and a failed courtesy must not become a failed turn.
   const ctx = fakeContext()
   const notifications = []
   const interactions = new Interactions({
     ctx,
     ownedSessionIds: () => ['session-owned'],
-    authority: () => ({ authority: 'panel', reason: 'harness-open-but-idle', fresh: ['desktop'] }),
+    authority: () => ({ authority: 'panel', reason: 'harness-not-visible', fresh: [] }),
+    canAnswer: () => false,
     notify: async (method, params) => {
       if (method === 'interaction/hint') throw new Error('peer went away')
       notifications.push({ method, params })
@@ -519,10 +624,11 @@ test('a failed hint does not fail the request', async () => {
   })
   interactions.register()
   lastInteractions = interactions
-  const pending = ctx.dispatch('approval/request', { agent: { id: 'session-owned' }, toolName: 'bash' })
-  const open = await waitForNotification(notifications, 'interaction/open')
-  interactionsAnswer(ctx, open.params.interactionId, { kind: 'approval', outcome: 'allowed-once' })
-  assert.equal(await pending, 'allowed-once', 'the window still owns the request; the hint is advisory')
+  const outcome = await ctx.dispatch(
+    'user-questions/request',
+    { agent: { id: 'session-owned' }, questions: [{ id: 'q1', question: 'x' }] },
+  )
+  assert.equal(outcome, 'unavailable', 'the request still reached the next answerer')
 })
 
 /** Wait for one protocol notification to reach the peer. */
@@ -536,23 +642,23 @@ async function waitForNotification(notifications, method) {
 }
 
 
-test('a claimed question is announced even while the window is hidden', async () => {
-  // The panel has to know it is holding a *question*: that answer shape has no
-  // "cancelled" member, so a question which times out is handed to the next
-  // answerer instead of being settled — the panel should send the user to the
-  // Harness window to type while there is still time.
-  const { ctx, notifications } = buildWithAuthority({
-    authority: 'panel',
-    reason: 'harness-not-visible',
-    fresh: [],
-  })
+test('a peer that declares it can answer questions gets them published and answered', async () => {
+  // The claim path for questions stays live for the build that grows the widget,
+  // which is why it is exercised here with a peer that declares the capability.
+  const { ctx, notifications } = buildWithAuthority(
+    { authority: 'panel', reason: 'harness-not-visible', fresh: [] },
+    () => true,
+  )
   const pending = ctx.dispatch(
     'user-questions/request',
     { agent: { id: 'session-owned' }, questions: [{ id: 'q1', question: 'which?' }] },
   )
-  const hint = await waitForNotification(notifications, 'interaction/hint')
-  assert.equal(hint.params.kind, 'question')
-  assert.equal(hint.params.reason, 'harness-not-visible')
+  // No hint: a hint means "this went somewhere else", and here the panel holds it.
+  assert.equal(
+    notifications.filter(entry => entry.method === 'interaction/hint').length,
+    0,
+    'a claimed request is not announced as a hand-off',
+  )
   const open = await waitForNotification(notifications, 'interaction/open')
   interactionsAnswer(ctx, open.params.interactionId, {
     kind: 'question',

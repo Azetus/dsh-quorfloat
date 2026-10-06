@@ -60,6 +60,18 @@ export interface SupervisorSnapshot {
   readonly panelVisible: boolean
   /** Capabilities the panel process has measured and reported. */
   readonly panelCapabilities: readonly string[]
+  /**
+   * Capabilities the panel declared in `hello` — what its build implements.
+   *
+   * Distinct from `panelCapabilities` on purpose: that one is measured at runtime
+   * (a window that was really created), this one is the build inventory written
+   * before any window exists. It is what decides whether a claimed request can be
+   * rendered: claiming is exclusive, so claiming what the panel cannot answer hides
+   * the request from every other answerer for the whole claim deadline.
+   *
+   * Empty before the handshake, which defers everything — the safe direction.
+   */
+  readonly peerCapabilities: readonly string[]
 }
 
 /** Event delivered to listeners on every meaningful supervision change. */
@@ -159,6 +171,7 @@ export class QuorfloatSupervisor {
       restartExhausted: this.#restartExhausted,
       panelVisible: this.#panelVisible,
       panelCapabilities: this.#panelCapabilities,
+      peerCapabilities: this.#router?.handshake?.capabilities ?? [],
     }
   }
 

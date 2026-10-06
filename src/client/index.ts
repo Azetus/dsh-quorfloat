@@ -65,6 +65,30 @@ const ENDPOINT = 'quorfloat/reportPresence'
  */
 const HINT_DEBOUNCE_MS = 50
 
+/**
+ * How often the current state is re-reported even though nothing changed.
+ *
+ * Without this the report is only a *change* notification, and the host expires
+ * reports — deliberately, so that a page which dies without a `blur` cannot pin the
+ * approval authority to a window nobody is looking at. Those two rules together
+ * produced a defect measured on a real `dsh web` session: a page the user had been
+ * looking at for longer than `presenceMaxAgeMs` (30s by default) **stopped counting
+ * as "the user is looking at it"**, and the floating panel began answering approvals
+ * that belonged to the window in front of them.
+ *
+ * A heartbeat turns the report into a *liveness* claim: while the page is alive its
+ * state stays fresh, and when it dies the report expires exactly as intended. It must
+ * be comfortably shorter than the host's `presenceMaxAgeMs`; five seconds against
+ * thirty leaves six missed beats of margin.
+ *
+ * A hidden page's timers are throttled by the browser, so a hidden page may still
+ * expire between beats. That costs nothing where it matters — a hidden page is not a
+ * surface the user is looking at, and the panel is supposed to take over there. It
+ * can make the `surfaces` list of an `interaction/hint` say "no window can answer
+ * this" while a hidden page exists: a wording problem, not an authority problem.
+ */
+const HEARTBEAT_MS = 5000
+
 /** Which surface this page is. The desktop shell and a plain browser share code. */
 function surfaceOf(): 'desktop' | 'web' {
   return typeof (globalThis as { dshDesktop?: unknown }).dshDesktop === 'undefined' ? 'web' : 'desktop'
@@ -130,15 +154,21 @@ export function apply(ctx: ClientContext): void {
     }, HINT_DEBOUNCE_MS)
   }
 
-  document.addEventListener('visibilitychange', schedule)
-  window.addEventListener('focus', schedule)
-  window.addEventListener('blur', schedule)
-
-  ctx.effect(() => () => {
-    document.removeEventListener('visibilitychange', schedule)
-    window.removeEventListener('focus', schedule)
-    window.removeEventListener('blur', schedule)
-    if (pending !== undefined) clearTimeout(pending)
+  ctx.effect(() => {
+    document.addEventListener('visibilitychange', schedule)
+    window.addEventListener('focus', schedule)
+    window.addEventListener('blur', schedule)
+    // The liveness half of the report. An unchanged state still has to be re-sent,
+    // or the host's expiry turns "the user is looking at this window" into "nobody is
+    // looking" after half a minute of the user doing exactly that.
+    const heartbeat = setInterval(() => void send(), HEARTBEAT_MS)
+    return () => {
+      document.removeEventListener('visibilitychange', schedule)
+      window.removeEventListener('focus', schedule)
+      window.removeEventListener('blur', schedule)
+      clearInterval(heartbeat)
+      if (pending !== undefined) clearTimeout(pending)
+    }
   }, 'quorfloat/presence: listeners')
 
   // Report the opening state too: without it the host would treat a freshly

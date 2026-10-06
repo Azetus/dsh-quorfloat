@@ -65,7 +65,14 @@ pub mod error_code {
 /// created a viewport. Hosts that need to decide whether a panel can appear must
 /// read that one; this list only says which binary is running, which is what a
 /// human reads in diagnostics to confirm the version in front of them.
-pub const CAPABILITIES: &[&str] = &["window", "hotkey", "egui"];
+///
+/// `approval` is here rather than in the measured list because it has no runtime
+/// failure mode to measure: this build either renders approval cards and answers
+/// them or it does not, and that is a property of the binary. It is a *separate*
+/// claim from `window` on purpose — a build with no display server still speaks the
+/// protocol, and naming the two things apart keeps a diagnostic reader from
+/// concluding that a missing window means a missing answerer.
+pub const CAPABILITIES: &[&str] = &["window", "hotkey", "egui", "approval"];
 
 #[cfg(test)]
 mod tests {
@@ -81,6 +88,16 @@ mod tests {
     #[test]
     fn frame_limit_matches_the_host_budget() {
         assert_eq!(MAX_FRAME_BYTES, 1024 * 1024);
+    }
+
+    #[test]
+    fn the_build_inventory_names_every_implemented_area() {
+        // Read by a human in diagnostics and asserted here so a capability cannot be
+        // dropped by accident: a host that trusted `approval` and then saw it vanish
+        // would have to guess whether the panel can still answer.
+        for expected in ["window", "hotkey", "egui", "approval"] {
+            assert!(CAPABILITIES.contains(&expected), "{expected} is missing from {CAPABILITIES:?}");
+        }
     }
 
     #[test]

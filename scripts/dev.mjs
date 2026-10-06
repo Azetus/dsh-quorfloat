@@ -72,6 +72,13 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 /** The executable name, matching what the host half resolves per platform. */
 const SIDECAR_NAME = process.platform === 'win32' ? 'dsh-quorfloat.exe' : 'dsh-quorfloat'
 
+/** The font the panel loads; keep in step with `quorfloat/src/fonts.rs`. */
+const FONT_NAME = 'NotoSansSC-VF.otf'
+
+/** The licence that must sit beside it. Same directory, so they travel together. */
+const FONT_LICENCE = 'OFL.txt'
+
+
 /** Whether `npm` and `dsh` need a shell to be resolved (they do on Windows). */
 const NEEDS_SHELL = process.platform === 'win32'
 
@@ -305,8 +312,58 @@ function stageSidecar() {
     }
   }
   cpSync(source, destination, { force: true })
+  stageFonts(directory)
   return destination
 }
+
+/**
+ * Put the font and its licence where the sidecar looks for them.
+ *
+ * The sidecar resolves `fonts/<file>` next to its own executable, which is exactly the
+ * layout the platform package ships (`bin/`, `fonts/`) — so the development harness
+ * exercises the same lookup rule as production rather than a special case. Both files
+ * are copied together because they ship together: a font without its licence is the
+ * packaging mistake this layout is meant to make impossible.
+ */
+function stageFonts(sidecarDirectory) {
+  const directory = join(sidecarDirectory, 'fonts')
+  const missing = []
+  for (const name of [FONT_NAME, FONT_LICENCE]) {
+    const source = join(ROOT, 'quorfloat', 'assets', 'fonts', name)
+    const destination = join(directory, name)
+    if (!existsSync(source)) {
+      missing.push(name)
+      // Mirror the repository rather than keeping a copy from an earlier run: a staged
+      // font the repository no longer has would let the panel look healthy while a
+      // fresh checkout is broken — and it is the very failure this harness exists to
+      // show you.
+      rmSync(destination, { force: true })
+      continue
+    }
+    mkdirSync(directory, { recursive: true })
+    cpSync(source, destination, { force: true })
+  }
+  if (missing.length > 0) {
+    process.stdout.write(
+      `dev: missing ${missing.join(' and ')} in quorfloat/assets/fonts/\n`
+      + 'dev: the panel will fall back to Latin only — run `npm run fonts` to fetch them\n',
+    )
+    return
+  }
+  process.stdout.write(`dev: staged the font and its licence in ${directory}\n`)
+}
+
+/** One line describing what the staged sidecar will find. */
+function panelFonts(sidecar) {
+  if (sidecar === undefined) return '(no panel)'
+  const directory = join(dirname(sidecar), 'fonts')
+  const font = join(directory, FONT_NAME)
+  if (!existsSync(font)) return '(missing: run `npm run fonts`)'
+  const megabytes = (statSync(font).size / 1_048_576).toFixed(1)
+  const licence = existsSync(join(directory, FONT_LICENCE)) ? `+ ${FONT_LICENCE}` : '(licence missing)'
+  return `${font} (${megabytes} MB) ${licence}`
+}
+
 
 /**
  * Write the workspace registry the generated profile starts from.
@@ -497,6 +554,9 @@ function countFiles(directory) {
   return files
 }
 
+/** Where the sidecar appends its breadcrumbs during a dev run. */
+const MARKER_PATH = join(DEV_HOME, 'sidecar.log')
+
 /** Start dsh, and shut it down cleanly on an interrupt. */
 function start(options, home, sidecar, staged) {
   const args = ['--profile', options.profile, '--port', options.port]
@@ -510,6 +570,10 @@ function start(options, home, sidecar, staged) {
     // The published package carries no binary yet, so without this the host has
     // nothing to resolve.
     ...(sidecar === undefined ? {} : { DSH_QUORFLOAT_PATH: sidecar }),
+    // The panel's only durable record. The host captures the sidecar's stderr and
+    // shows it nowhere, so without this file "did the approval reach the panel, and
+    // did the click leave it" has no answer after the fact.
+    DSH_QUORFLOAT_RUST_MARKER: MARKER_PATH,
     // A deprecation warning from a dependency pollutes every line otherwise.
     NODE_NO_WARNINGS: '1',
   }
@@ -519,6 +583,8 @@ function start(options, home, sidecar, staged) {
     + `     staged=${staged.destination} (${countFiles(staged.destination)} files,`
     + ` entry points checked: ${staged.entryPoints.join(', ')})\n`
     + `     sidecar=${sidecar ?? '(not built — no panel)'}\n`
+    + `     panel log=${sidecar === undefined ? '(no panel)' : MARKER_PATH}\n`
+    + `     panel font=${panelFonts(sidecar)}\n`
     + `     bundles=${profileBundles(home, options.profile).join(', ')}\n`
     + `     workspace=${join(DEV_HOME, 'workspace')}\n\n`)
 

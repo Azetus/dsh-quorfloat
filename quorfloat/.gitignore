@@ -17,3 +17,6 @@ rust-analyzer.json
 /dsh-quorfloat.exe
 /dsh-quorfloat.pdb
 
+
+# 字体
+assets/fonts/*

@@ -23,7 +23,8 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
-use crate::session::{FrameSink, Session, SessionExit, WindowCommand};
+use crate::fonts::{self, FontStatus};
+use crate::session::{ApprovalVerdict, FrameSink, Handoff, Interaction, InteractionKind, InteractionState, Session, SessionExit, WindowCommand};
 use crate::transport::StdinSource;
 use crate::window::{Hotkey, WindowSettings};
 
@@ -91,6 +92,17 @@ impl SharedSink {
     pub fn log(&self, line: &str) {
         self.with(|sink| sink.log(line));
     }
+
+    /// Record one durable breadcrumb.
+    ///
+    /// Forwarded explicitly rather than left to the trait's default: the default is
+    /// a no-op, so forgetting this hop makes the marker file exist and stay empty —
+    /// which reads as "nothing happened" rather than as "the plumbing is missing".
+    ///
+    /// @param line - text to record.
+    pub fn mark(&self, line: &str) {
+        self.with(|sink| sink.mark(line));
+    }
 }
 
 impl FrameSink for SharedSink {
@@ -100,6 +112,10 @@ impl FrameSink for SharedSink {
 
     fn log(&mut self, line: &str) {
         self.with(|sink| sink.log(line));
+    }
+
+    fn mark(&mut self, line: &str) {
+        self.with(|sink| sink.mark(line));
     }
 }
 
@@ -209,6 +225,10 @@ impl FrameSink for BorrowedSink<'_> {
     fn log(&mut self, line: &str) {
         self.0.log(line);
     }
+
+    fn mark(&mut self, line: &str) {
+        self.0.mark(line);
+    }
 }
 
 /// The application as egui sees it.
@@ -237,6 +257,14 @@ pub struct App {
     /// reported before it is real would have the host promise the user a panel that
     /// never appears.
     capabilities: Vec<&'static str>,
+    /// What to tell the user about the fonts, when there is something to tell.
+    ///
+    /// A panel that cannot draw its own text has to say so: silent boxes look like a
+    /// rendering bug in the conversation rather than a missing file.
+    fonts_warning: Option<String>,
+    /// Whether the glyph check has run. It cannot run until a pass has happened,
+    /// because a font set does not exist before then.
+    fonts_checked: bool,
 }
 
 impl App {
@@ -271,6 +299,8 @@ impl App {
             context: None,
             startup_hidden: false,
             capabilities: measured_capabilities(hotkey_active),
+            fonts_warning: None,
+            fonts_checked: false,
         }
     }
 
@@ -289,6 +319,44 @@ impl App {
     #[must_use]
     pub fn capabilities(&self) -> &[&'static str] {
         &self.capabilities
+    }
+
+    /// Record what the font installation produced.
+    ///
+    /// Called from eframe's app creator, before the first frame, so a missing font is
+    /// visible in the very first paint rather than discovered by a user reading boxes.
+    ///
+    /// @param status - what [`crate::fonts::install`] found and loaded.
+    pub fn note_fonts(&mut self, status: FontStatus) {
+        self.sink.log(&status.describe());
+        self.sink.mark(&status.describe());
+        self.fonts_warning = status.warning();
+    }
+
+    /// Check, once, that the panel can actually draw its own text.
+    ///
+    /// Installing a font is a claim about the file; this is the measurement, taken
+    /// through egui's own glyph lookup. It runs on the first pass because there is no
+    /// font set before that — and a claim that never gets checked is how a panel ends
+    /// up shipping boxes.
+    fn verify_fonts(&mut self) {
+        if self.fonts_checked {
+            return;
+        }
+        let Some(ctx) = self.context.clone() else { return };
+        self.fonts_checked = true;
+        if fonts::covers_panel_text(&ctx) {
+            self.sink.log("fonts: the panel's own text has glyphs");
+            self.sink.mark("fonts coverage=ok");
+            return;
+        }
+        // Either nothing was loaded, or something was and it does not carry these
+        // characters. Both are worth saying out loud, and the second one is the reason
+        // this check exists at all.
+        let message = "中文无法显示：字体未生效".to_owned();
+        self.sink.log("fonts: the panel's own text has no glyphs");
+        self.sink.mark("fonts coverage=missing");
+        self.fonts_warning = Some(message);
     }
 
     /// Record why the session ended.
@@ -355,9 +423,25 @@ impl App {
     /// freeze the window.
     pub fn logic(&mut self) {
         self.hide_after_startup();
+        self.verify_fonts();
         self.pump();
         self.apply_window_commands();
+        self.pump_follow();
         self.report_visibility();
+    }
+
+    /// Keep the followed conversation current.
+    ///
+    /// Not driven by an incoming frame, unlike everything in [`App::pump`]: a panel
+    /// with nothing arriving still has to notice the conversation that was started
+    /// beside it. [`watch_clock`] is what makes this run at all while the panel is
+    /// hidden — which is its normal state.
+    pub fn pump_follow(&mut self) {
+        let mut session = match self.session.lock() {
+            Ok(session) => session,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        session.pump_follow(&mut BorrowedSink(&self.sink));
     }
 
     /// Drain pending work from the reader thread.
@@ -461,6 +545,131 @@ impl App {
     pub fn settings(&self) -> &WindowSettings {
         &self.settings
     }
+
+    /// Read the interactions, the hand-off, and the follow state under one short lock.
+    ///
+    /// Copied rather than borrowed because the alternative is holding the session
+    /// mutex across a paint, and the reader thread needs that same mutex to answer
+    /// `ping`. A stalled liveness answer is how the host decides this process is
+    /// dead, so the window must never be able to cause one. The copy is a handful of
+    /// small values, and only while the panel is actually being painted.
+    ///
+    /// @returns what the window renders this pass.
+    #[must_use]
+    fn state(&self) -> PanelState {
+        let session = match self.session.lock() {
+            Ok(session) => session,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let follow = session.follow();
+        PanelState {
+            interactions: session.interactions().to_vec(),
+            handoff: session.handoff().cloned(),
+            follow: FollowView {
+                session_id: follow.session_id().map(str::to_owned),
+                label: follow.label().map(str::to_owned),
+                started: follow.is_started(),
+                events: follow.events(),
+                resyncs: follow.resyncs(),
+            },
+        }
+    }
+
+    /// Answer one approval, or drop a card the user has finished with.
+    ///
+    /// The only path from a click to the protocol, so the two cannot drift: the
+    /// state machine that decides whether an answer is allowed lives in the session,
+    /// and this only supplies the sink it must write through.
+    ///
+    /// @param action - what the user asked for.
+    fn apply_card_action(&mut self, action: CardAction) {
+        let mut session = match self.session.lock() {
+            Ok(session) => session,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut sink = BorrowedSink(&self.sink);
+        match action {
+            CardAction::Answer { id, verdict } => {
+                session.answer_interaction(&id, verdict, &mut sink);
+            }
+            CardAction::Dismiss { id } => {
+                session.dismiss_interaction(&id);
+            }
+            CardAction::DismissHandoff => session.dismiss_handoff(),
+        }
+    }
+}
+
+/// What a painted card asked the user to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CardAction {
+    /// Answer one approval.
+    Answer {
+        /// Which interaction.
+        id: String,
+        /// What the user decided.
+        verdict: ApprovalVerdict,
+    },
+    /// Stop showing a card.
+    Dismiss {
+        /// Which interaction.
+        id: String,
+    },
+    /// Stop showing the hand-off banner.
+    DismissHandoff,
+}
+
+/// Everything the window renders, read under one short lock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PanelState {
+    /// Requests waiting for the user, oldest first.
+    interactions: Vec<Interaction>,
+    /// The last hand-off the host announced, if any.
+    handoff: Option<Handoff>,
+    /// The conversation this panel follows.
+    follow: FollowView,
+}
+
+/// What the status line needs to know about the followed conversation.
+///
+/// Shown because two states look identical from every other angle: "attached to
+/// nothing" and "attached and receiving nothing". The first one means no approval can
+/// ever reach this panel, so it must not be invisible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FollowView {
+    /// The conversation followed, if any.
+    session_id: Option<String>,
+    /// The workspace name that came with it.
+    label: Option<String>,
+    /// Whether discovery has started at all.
+    started: bool,
+    /// Persistent events received for it.
+    events: u64,
+    /// Times the host reported a gap.
+    resyncs: u64,
+}
+
+impl FollowView {
+    /// The line to show under the header.
+    #[must_use]
+    fn status(&self) -> String {
+        match (&self.session_id, self.started) {
+            (Some(id), _) => {
+                let short: String = id.chars().take(8).collect();
+                let label = self.label.as_deref().unwrap_or("会话");
+                let gap = if self.resyncs == 0 {
+                    String::new()
+                } else {
+                    format!(" · 补齐 {} 次", self.resyncs)
+                };
+                format!("跟随 {label} · {short} · 事件 {}{gap}", self.events)
+            }
+            // Started but nothing to follow: the Harness window has no conversation
+            // yet, which is the normal state of a fresh environment.
+            (None, true) => "未跟随会话（Harness 中还没有会话）".to_owned(),
+            (None, false) => "尚未连接".to_owned(),
+        }
+    }
 }
 
 impl App {
@@ -471,30 +680,56 @@ impl App {
     ///
     /// @param ui - the root area, with no margin or background of its own.
     pub fn draw(&mut self, ui: &mut egui::Ui) {
+        let state = self.state();
+        // Clicks are collected while painting and applied after it, so no session
+        // lock is held inside the layout closure.
+        let mut action: Option<CardAction> = None;
+        let hotkey_status = if self.hotkey.is_active() {
+            format!("{} 隐藏", self.hotkey.spec())
+        } else {
+            format!("热键未注册：{}", self.hotkey.reason().unwrap_or("unknown"))
+        };
+        let follow_status = state.follow.status();
+        let fonts_warning = self.fonts_warning.clone();
+
         egui::Frame::NONE
-            .fill(egui::Color32::from_rgb(24, 24, 28))
+            .fill(BACKGROUND)
             .inner_margin(egui::Margin::same(12))
             .show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new("quorfloat")
-                        .size(15.0)
-                        .color(egui::Color32::from_rgb(220, 220, 230)),
-                );
-                ui.add_space(4.0);
-                // Say what the panel cannot do rather than showing a key that
-                // silently does nothing: a taken accelerator is a normal outcome,
-                // and the user needs to know to pick another one.
-                let status = if self.hotkey.is_active() {
-                    format!("{} 隐藏", self.hotkey.spec())
-                } else {
-                    format!("热键未注册：{}", self.hotkey.reason().unwrap_or("unknown"))
-                };
-                ui.label(
-                    egui::RichText::new(status)
-                        .size(12.0)
-                        .color(egui::Color32::from_rgb(150, 150, 165)),
-                );
+                ui.label(egui::RichText::new("quorfloat").size(15.0).color(TEXT));
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new(hotkey_status).size(12.0).color(MUTED));
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new(follow_status).size(12.0).color(MUTED));
+                if let Some(warning) = &fonts_warning {
+                    ui.add_space(2.0);
+                    wrapped(ui, egui::RichText::new(warning).size(12.0).color(WARN));
+                }
+                ui.add_space(8.0);
+
+                if let Some(handoff) = &state.handoff {
+                    handoff_banner(ui, handoff, &mut action);
+                    ui.add_space(8.0);
+                }
+
+                if state.interactions.is_empty() {
+                    ui.label(egui::RichText::new("没有待处理的请求").size(12.0).color(MUTED));
+                }
+
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    for card in &state.interactions {
+                        match card.kind() {
+                            InteractionKind::Approval => approval_card(ui, card, &mut action),
+                            InteractionKind::Question => question_card(ui, card, &mut action),
+                        }
+                        ui.add_space(8.0);
+                    }
+                });
             });
+
+        if let Some(action) = action {
+            self.apply_card_action(action);
+        }
     }
 
     /// Close the window if the session is over.
@@ -508,6 +743,253 @@ impl App {
             }
         }
     }
+}
+
+/// The locale the panel asks the asker's own text for.
+///
+/// Every string this file writes is Chinese, so a localized `displayReason` is
+/// requested in Chinese too and falls back to `en` (see [`Interaction::detail`]).
+const DISPLAY_LOCALE: &str = "zh";
+
+const BACKGROUND: egui::Color32 = egui::Color32::from_rgb(24, 24, 28);
+const CARD: egui::Color32 = egui::Color32::from_rgb(34, 34, 41);
+const TEXT: egui::Color32 = egui::Color32::from_rgb(226, 226, 234);
+const MUTED: egui::Color32 = egui::Color32::from_rgb(150, 150, 165);
+const ALLOW: egui::Color32 = egui::Color32::from_rgb(38, 92, 58);
+const REJECT: egui::Color32 = egui::Color32::from_rgb(104, 42, 46);
+const BANNER: egui::Color32 = egui::Color32::from_rgb(58, 50, 30);
+const WARN: egui::Color32 = egui::Color32::from_rgb(228, 196, 122);
+const OK: egui::Color32 = egui::Color32::from_rgb(134, 205, 158);
+const BAD: egui::Color32 = egui::Color32::from_rgb(226, 140, 140);
+
+/// Draw a label that wraps, so peer-supplied text cannot widen the panel.
+///
+/// @param ui - where to draw.
+/// @param text - the already-styled text.
+fn wrapped(ui: &mut egui::Ui, text: egui::RichText) {
+    ui.add(egui::Label::new(text).wrap());
+}
+
+/// Draw the announcement that a request was routed to another surface.
+///
+/// The wording has to be true, and "true" depends on what the host reported. A hint
+/// now means "the panel did not take this" — the host only announces a hand-off when
+/// it defers — so the panel must not imply it is holding the request. And "go to the
+/// Harness window" is only advice it can give when a surface is actually live: with
+/// none, the honest sentence is that nothing can answer it.
+///
+/// @param ui - where to draw.
+/// @param handoff - what the host announced.
+/// @param action - collects the dismissal if the user asks for one.
+fn handoff_banner(ui: &mut egui::Ui, handoff: &Handoff, action: &mut Option<CardAction>) {
+    let live = !handoff.surfaces().is_empty();
+    let (headline, instruction) = match (handoff.kind(), live) {
+        (InteractionKind::Question, true) => ("追问待回答", "请切到 Harness 窗口输入"),
+        (InteractionKind::Question, false) => ("追问待回答", "当前没有可以回答它的 Harness 窗口"),
+        (InteractionKind::Approval, true) => ("审批待确认", "请切到 Harness 窗口确认"),
+        (InteractionKind::Approval, false) => ("审批待确认", "当前没有可以确认它的 Harness 窗口"),
+    };
+    egui::Frame::NONE
+        .fill(BANNER)
+        .inner_margin(egui::Margin::same(10))
+        .corner_radius(6)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(headline).size(13.0).color(WARN).strong());
+                ui.label(egui::RichText::new(instruction).size(12.0).color(TEXT));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("知道了").clicked() {
+                        *action = Some(CardAction::DismissHandoff);
+                    }
+                });
+            });
+        });
+}
+
+/// Draw one approval card, with its buttons only while an answer is still possible.
+///
+/// @param ui - where to draw.
+/// @param card - the interaction to render.
+/// @param action - collects what the user clicked.
+fn approval_card(ui: &mut egui::Ui, card: &Interaction, action: &mut Option<CardAction>) {
+    egui::Frame::NONE
+        .fill(CARD)
+        .inner_margin(egui::Margin::same(12))
+        .corner_radius(6)
+        .show(ui, |ui| {
+            let headline = match card.tool_name() {
+                Some(tool) => format!("工具 {tool} 请求提权"),
+                None => "有工具请求提权".to_owned(),
+            };
+            ui.label(egui::RichText::new(headline).size(13.0).color(TEXT).strong());
+            ui.add_space(4.0);
+            wrapped(
+                ui,
+                egui::RichText::new(
+                    card.detail(DISPLAY_LOCALE).unwrap_or_else(|| "请求方没有说明原因".to_owned()),
+                )
+                .size(12.0)
+                .color(MUTED),
+            );
+            ui.add_space(8.0);
+            match card.state() {
+                InteractionState::Pending => {
+                    ui.horizontal(|ui| {
+                        let allow = egui::Button::new(egui::RichText::new("允许一次").color(TEXT)).fill(ALLOW);
+                        if ui.add(allow).clicked() {
+                            *action = Some(CardAction::Answer {
+                                id: card.id().to_owned(),
+                                verdict: ApprovalVerdict::AllowOnce,
+                            });
+                        }
+                        let reject = egui::Button::new(egui::RichText::new("拒绝").color(TEXT)).fill(REJECT);
+                        if ui.add(reject).clicked() {
+                            *action = Some(CardAction::Answer {
+                                id: card.id().to_owned(),
+                                verdict: ApprovalVerdict::Reject,
+                            });
+                        }
+                    });
+                }
+                InteractionState::Submitting { .. } => {
+                    // Buttons are gone rather than disabled: a second click would be a
+                    // second decision for one question, and the host refuses it anyway.
+                    ui.label(egui::RichText::new("已提交，等待 Harness 确认…").size(12.0).color(MUTED));
+                }
+                InteractionState::Applied { verdict } => {
+                    let (text, colour) = match verdict {
+                        ApprovalVerdict::AllowOnce => ("已允许一次", OK),
+                        ApprovalVerdict::Reject => ("已拒绝", BAD),
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(text).size(12.0).color(colour));
+                        close_button(ui, card, action);
+                    });
+                }
+                InteractionState::Refused { reason } => {
+                    wrapped(
+                        ui,
+                        egui::RichText::new(format!("已失效：{reason}")).size(12.0).color(BAD),
+                    );
+                    ui.add_space(4.0);
+                    close_button(ui, card, action);
+                }
+            }
+        });
+}
+
+/// Draw one question card.
+///
+/// It has no answer widgets, and says so. This build cannot answer a question — the
+/// answer shape is a list of selected option ids, and there is no widget for that
+/// yet — and a card that offered a disabled button would imply the panel could
+/// answer if only the user tried harder. What it *can* do is show the question, which
+/// is what lets the user decide whether to switch to the Harness window.
+///
+/// @param ui - where to draw.
+/// @param card - the interaction to render.
+/// @param action - collects what the user clicked.
+fn question_card(ui: &mut egui::Ui, card: &Interaction, action: &mut Option<CardAction>) {
+    let questions = card.questions();
+    egui::Frame::NONE
+        .fill(CARD)
+        .inner_margin(egui::Margin::same(12))
+        .corner_radius(6)
+        .show(ui, |ui| {
+            ui.label(
+                egui::RichText::new(format!("追问（{} 个问题）", card.question_count()))
+                    .size(13.0)
+                    .color(TEXT)
+                    .strong(),
+            );
+            ui.add_space(4.0);
+            wrapped(
+                ui,
+                egui::RichText::new("本窗口不能回答追问，请切到 Harness 窗口输入").size(12.0).color(WARN),
+            );
+            for (header, question) in &questions {
+                ui.add_space(4.0);
+                let text = match header {
+                    Some(header) => format!("• {header} — {question}"),
+                    None => format!("• {question}"),
+                };
+                wrapped(ui, egui::RichText::new(text).size(12.0).color(MUTED));
+            }
+            if card.question_count() > questions.len() {
+                ui.add_space(4.0);
+                wrapped(ui, egui::RichText::new("（还有更多，未全部显示）").size(12.0).color(MUTED));
+            }
+            ui.add_space(8.0);
+            if ui.button("知道了").clicked() {
+                *action = Some(CardAction::Dismiss { id: card.id().to_owned() });
+            }
+        });
+}
+
+/// Draw the button that stops showing a resolved card.
+///
+/// @param ui - where to draw.
+/// @param card - the card being closed.
+/// @param action - collects the dismissal.
+fn close_button(ui: &mut egui::Ui, card: &Interaction, action: &mut Option<CardAction>) {
+    if ui.small_button("关闭").clicked() {
+        *action = Some(CardAction::Dismiss { id: card.id().to_owned() });
+    }
+}
+
+/// How often the clock thread wakes the render loop.
+///
+/// One second, and deliberately not the follow layer's own interval: this is only a
+/// ceiling on how long clock-driven work can be delayed, while the policy (how often
+/// to look for a new conversation) lives in [`crate::follow`]. Waking a hidden panel
+/// costs a pass that paints nothing.
+pub const CLOCK_INTERVAL_MS: u64 = 1000;
+
+/// Wake the render loop on a timer.
+///
+/// eframe repaints on demand, so with the panel hidden and no frames arriving `logic`
+/// is never called — and hidden is the state this panel spends its life in. Anything
+/// that comes due *by clock* rather than by event therefore needs something to wake
+/// the loop, and that is all this thread does. It is the same shape as
+/// [`crate::window::watch_hotkey`], and for the same reason: a poll inside the render
+/// callback cannot run when there is no render callback.
+///
+/// The interval is a ceiling, not a schedule: what is actually due is decided by
+/// [`crate::follow::Follow`], which is where the policy belongs.
+///
+/// @param interval - how long to sleep between wakes.
+/// @param egui - the render context, filled in once the window exists.
+/// @param outcome - the shared ending slot; the thread stops once it is filled.
+/// @returns an error when the thread could not be started.
+pub fn watch_clock(
+    interval: std::time::Duration,
+    egui: Arc<Mutex<Option<egui::Context>>>,
+    outcome: Arc<Mutex<Option<SessionExit>>>,
+) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("quorfloat-clock".to_owned())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(interval);
+                {
+                    let finished = match outcome.lock() {
+                        Ok(slot) => slot.is_some(),
+                        Err(poisoned) => poisoned.into_inner().is_some(),
+                    };
+                    if finished {
+                        return;
+                    }
+                }
+                let context = match egui.lock() {
+                    Ok(slot) => slot.clone(),
+                    Err(poisoned) => poisoned.into_inner().clone(),
+                };
+                if let Some(ctx) = context {
+                    ctx.request_repaint();
+                }
+            }
+        })
+        .map(|_| ())
 }
 
 /// The capabilities known before any window exists.
@@ -539,6 +1021,7 @@ mod tests {
     struct Recorded {
         frames: Arc<Mutex<Vec<serde_json::Value>>>,
         logs: Arc<Mutex<Vec<String>>>,
+        marks: Arc<Mutex<Vec<String>>>,
     }
 
     impl Recorded {
@@ -548,6 +1031,10 @@ mod tests {
 
         fn logs(&self) -> Vec<String> {
             self.logs.lock().expect("not poisoned").clone()
+        }
+
+        fn marks(&self) -> Vec<String> {
+            self.marks.lock().expect("not poisoned").clone()
         }
     }
 
@@ -563,6 +1050,10 @@ mod tests {
         fn log(&mut self, line: &str) {
             self.0.logs.lock().expect("not poisoned").push(line.to_owned());
         }
+
+        fn mark(&mut self, line: &str) {
+            self.0.marks.lock().expect("not poisoned").push(line.to_owned());
+        }
     }
 
     fn identity() -> Identity {
@@ -576,14 +1067,52 @@ mod tests {
 
     /// Build an app whose hotkey never registered, so no real grab is attempted.
     fn app() -> (App, Recorded, Sender<Wake>) {
+        let (app, recorded, _session, wake) = app_and_session();
+        (app, recorded, wake)
+    }
+
+    /// The same app, plus the session, for tests that deliver host frames into it.
+    fn app_and_session() -> (App, Recorded, Arc<Mutex<Session>>, Sender<Wake>) {
         let session = Arc::new(Mutex::new(Session::new(identity())));
         let recorded = Recorded::default();
         let sink = Arc::new(SharedSink::new(Box::new(RecordingSink(recorded.clone()))));
         let (tx, rx) = channel();
         let hotkey = Hotkey::Unavailable { reason: "test".to_owned(), spec: "Alt+Space".to_owned() };
         let outcome = Arc::new(Mutex::new(None));
-        let app = App::new(session, sink, hotkey, WindowSettings::default(), rx, outcome, false);
-        (app, recorded, tx)
+        let app = App::new(
+            Arc::clone(&session),
+            sink,
+            hotkey,
+            WindowSettings::default(),
+            rx,
+            outcome,
+            false,
+        );
+        (app, recorded, session, tx)
+    }
+
+    /// Deliver one host frame, on the same path the reader thread uses.
+    fn deliver(session: &Arc<Mutex<Session>>, recorded: &Recorded, frame: Inbound) {
+        let mut sink = RecordingSink(recorded.clone());
+        let mut guard = session.lock().expect("not poisoned");
+        guard.on_frame(frame, &mut sink);
+    }
+
+    /// The host's `interaction/open` for one approval.
+    fn approval_open(id: &str) -> Inbound {
+        Inbound::Notification {
+            method: "interaction/open".to_owned(),
+            params: Some(serde_json::json!({
+                "interactionId": id,
+                "sessionId": "session-1",
+                "kind": "approval",
+                "payload": {
+                    "toolName": "bash",
+                    "reason": "escalate sandbox to danger-full-access: V5-B",
+                    "displayReason": {"zh": "允许本次操作使用 danger-full-access 权限：V5-B"},
+                },
+            })),
+        }
     }
 
     #[test]
@@ -820,7 +1349,110 @@ mod tests {
         let mut borrowed = BorrowedSink(&sink);
         borrowed.send(&serde_json::json!({"a": 1})).expect("write succeeds");
         borrowed.log("hello");
+        borrowed.mark("a breadcrumb");
         assert_eq!(recorded.frames().len(), 1);
         assert_eq!(recorded.logs(), vec!["hello".to_owned()]);
+        // The breadcrumb has to survive the extra hop, or the marker file exists and
+        // stays empty — which is worse than not having one, because it looks like
+        // nothing happened.
+        assert_eq!(recorded.marks(), vec!["a breadcrumb".to_owned()]);
+    }
+
+    #[test]
+    fn an_approval_arriving_becomes_a_card_the_window_can_draw() {
+        let (app, recorded, session, _wake) = app_and_session();
+        deliver(&session, &recorded, approval_open("approval-1"));
+        let state = app.state();
+        assert!(state.handoff.is_none());
+        assert_eq!(state.interactions.len(), 1);
+        let card = &state.interactions[0];
+        assert_eq!(card.id(), "approval-1");
+        assert_eq!(card.tool_name(), Some("bash"));
+        assert!(card.is_actionable(), "an unanswered approval offers both buttons");
+        assert_eq!(
+            card.detail(DISPLAY_LOCALE).as_deref(),
+            Some("允许本次操作使用 danger-full-access 权限：V5-B"),
+        );
+    }
+
+    #[test]
+    fn allowing_sends_the_answer_through_the_shared_sink() {
+        // The wiring this covers: a click has to reach the protocol, and the sink it
+        // writes through is shared with the reader thread. That path is the one place
+        // the window layer can get the host's answer wrong.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        deliver(&session, &recorded, approval_open("approval-1"));
+        app.apply_card_action(CardAction::Answer {
+            id: "approval-1".to_owned(),
+            verdict: ApprovalVerdict::AllowOnce,
+        });
+        let frames = recorded.frames();
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["method"], "interaction/answer");
+        assert_eq!(frames[0]["params"]["answer"]["outcome"], "allowed-once");
+        assert_eq!(
+            app.state().interactions[0].state(),
+            &InteractionState::Submitting { verdict: ApprovalVerdict::AllowOnce }
+        );
+    }
+
+    #[test]
+    fn one_card_cannot_be_answered_twice() {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        deliver(&session, &recorded, approval_open("approval-1"));
+        app.apply_card_action(CardAction::Answer {
+            id: "approval-1".to_owned(),
+            verdict: ApprovalVerdict::Reject,
+        });
+        app.apply_card_action(CardAction::Answer {
+            id: "approval-1".to_owned(),
+            verdict: ApprovalVerdict::AllowOnce,
+        });
+        let answers: Vec<_> = recorded
+            .frames()
+            .into_iter()
+            .filter(|frame| frame["method"] == "interaction/answer")
+            .collect();
+        assert_eq!(answers.len(), 1, "the second decision never left the process");
+        assert_eq!(answers[0]["params"]["answer"]["outcome"], "rejected");
+    }
+
+    #[test]
+    fn the_hosts_verdict_reaches_the_card() {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        deliver(&session, &recorded, approval_open("approval-1"));
+        app.apply_card_action(CardAction::Answer {
+            id: "approval-1".to_owned(),
+            verdict: ApprovalVerdict::AllowOnce,
+        });
+        let id = recorded.frames()[0]["id"].clone();
+        deliver(
+            &session,
+            &recorded,
+            Inbound::Response { id, outcome: Ok(serde_json::json!({"accepted": true})) },
+        );
+        let cards = app.state().interactions;
+        assert_eq!(cards[0].state(), &InteractionState::Applied { verdict: ApprovalVerdict::AllowOnce });
+        assert!(!cards[0].is_actionable(), "a resolved card offers no buttons");
+        app.apply_card_action(CardAction::Dismiss { id: "approval-1".to_owned() });
+        assert!(app.state().interactions.is_empty());
+    }
+
+    #[test]
+    fn a_hand_off_is_shown_and_can_be_dismissed() {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        deliver(
+            &session,
+            &recorded,
+            Inbound::Notification {
+                method: "interaction/hint".to_owned(),
+                params: Some(serde_json::json!({"kind": "question", "reason": "harness-not-visible"})),
+            },
+        );
+        let state = app.state();
+        assert!(state.interactions.is_empty(), "a hint is not a card: it has no id and cannot be answered");
+        assert_eq!(state.handoff.expect("the banner is shown").kind(), InteractionKind::Question);
+        app.apply_card_action(CardAction::DismissHandoff);
+        assert!(app.state().handoff.is_none());
     }
 }

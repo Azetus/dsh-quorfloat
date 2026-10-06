@@ -199,6 +199,12 @@ export function createPlugin(overrides: PluginOverrides = {}) {
         ctx,
         ownedSessionIds: () => sessionLayer.ownedSessionIds(),
         authority,
+        // The peer declares what its build implements in `hello`, and claiming is
+        // exclusive — so the panel claims only what it says it can render. Today that
+        // is approvals: a question's answer is a list of selected option ids and the
+        // panel has no widget for it, so claiming one would hide it from the Harness
+        // window for the whole claim deadline and then hand it back.
+        canAnswer: kind => activation.supervisor?.snapshot().peerCapabilities.includes(kind) === true,
         notify: async (method, params) => {
           const supervisor = activation.supervisor
           if (supervisor === undefined) return

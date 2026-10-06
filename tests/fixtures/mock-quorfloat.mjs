@@ -175,7 +175,11 @@ async function main() {
     quorfloatVersion: VERSION,
     platform: process.platform,
     arch: process.arch,
-    capabilities: ['window', 'hotkey', 'egui'],
+    // The same build inventory the real binary declares. It matters now: the plugin
+    // claims an interaction only when the peer says it can render that kind, so a
+    // mock that under-declared would silently exercise the deferral path instead of
+    // the claim path it is standing in for.
+    capabilities: ['window', 'hotkey', 'egui', 'approval'],
     hotkey: { requested: 'Alt+Space', registered: MODE !== 'no-hotkey' },
   })
   observed.helloAnswered = true

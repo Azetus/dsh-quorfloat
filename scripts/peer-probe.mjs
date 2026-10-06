@@ -521,7 +521,11 @@ async function main() {
     quorfloatVersion: '0.0.1-peer-probe',
     platform: process.platform,
     arch: process.arch,
-    capabilities: ['window', 'hotkey', 'probe'],
+    // `approval` is load-bearing: the plugin claims an interaction only when the peer
+    // says it can render that kind. A probe that stayed silent here would have every
+    // approval deferred to the Harness window, and the scenario would read as a
+    // routing regression rather than as a mis-declared peer.
+    capabilities: ['window', 'hotkey', 'probe', 'approval'],
     hotkey: { requested: 'Alt+Space', registered: false },
   })
   observed.handshake = handshake

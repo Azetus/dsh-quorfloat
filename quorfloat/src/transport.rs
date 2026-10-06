@@ -16,25 +16,29 @@
 use std::io::{BufReader, Read, Write};
 
 use crate::frame::{Decoded, FrameReader};
+use crate::marker::Marker;
 use crate::rpc::{self, Inbound};
 use crate::session::{FrameSink, FrameSource};
 
-/// Writes frames to stdout and log lines to stderr.
+/// Writes frames to stdout, log lines to stderr, breadcrumbs to the marker file.
 pub struct StdioSink {
     out: std::io::Stdout,
+    marker: Marker,
 }
 
 impl Default for StdioSink {
     fn default() -> Self {
-        Self::new()
+        Self::new(Marker::disabled())
     }
 }
 
 impl StdioSink {
-    /// Create a sink over the process's stdout.
+    /// Create a sink over the process's stdout and stderr.
+    ///
+    /// @param marker - where durable breadcrumbs go; a disabled marker writes none.
     #[must_use]
-    pub fn new() -> Self {
-        Self { out: std::io::stdout() }
+    pub fn new(marker: Marker) -> Self {
+        Self { out: std::io::stdout(), marker }
     }
 }
 
@@ -54,6 +58,10 @@ impl FrameSink for StdioSink {
         // is not actionable — stderr is allowed to be closed — so it is dropped
         // rather than escalated into the session's control flow.
         let _ = writeln!(std::io::stderr(), "{line}");
+    }
+
+    fn mark(&mut self, line: &str) {
+        self.marker.write(line);
     }
 }
 

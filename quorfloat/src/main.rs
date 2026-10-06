@@ -15,7 +15,8 @@ use std::process::ExitCode;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 
-use dsh_quorfloat::app::{App, Reader, SharedSink};
+use dsh_quorfloat::app::{self, App, Reader, SharedSink};
+use dsh_quorfloat::marker::Marker;
 use dsh_quorfloat::session::{FrameSink, HotkeyReport, Identity, Session, SessionExit};
 use dsh_quorfloat::transport::{StdinSource, StdioSink};
 use dsh_quorfloat::window::{self, Hotkey, WindowSettings};
@@ -68,7 +69,10 @@ fn run() -> Result<SessionExit, String> {
         },
     })));
 
-    let sink = Arc::new(SharedSink::new(Box::new(StdioSink::new())));
+    // Shared with the sink, so a breadcrumb written from inside the session (an
+    // approval arriving, an answer being applied) lands in the same file as the
+    // lifecycle lines written here. One file, one ordering, one story.
+    let sink = Arc::new(SharedSink::new(Box::new(StdioSink::new(marker.clone()))));
 
     // The handshake, before eframe starts and therefore before any window, font, or
     // GPU initialisation can delay it.
@@ -111,6 +115,18 @@ fn run() -> Result<SessionExit, String> {
         window::watch_hotkey(hotkey_wake, Arc::clone(&egui_slot), Arc::clone(&sink));
     }
 
+    // The same argument, for the other kind of idle work: the panel has to notice a
+    // conversation started next to it while it is hidden, and a hidden panel performs
+    // no pass of its own accord. This only wakes the loop; what is due is decided by
+    // the follow layer.
+    if let Err(error) = app::watch_clock(
+        std::time::Duration::from_millis(app::CLOCK_INTERVAL_MS),
+        Arc::clone(&egui_slot),
+        Arc::clone(&outcome),
+    ) {
+        sink.log(&format!("could not start the clock thread; the panel may miss new conversations: {error}"));
+    }
+
     let options = eframe::NativeOptions {
         viewport: window::viewport(&settings),
         ..Default::default()
@@ -143,6 +159,10 @@ fn run() -> Result<SessionExit, String> {
             // If creation fails, `run_native` returns an error and this is never
             // reached — the host hears nothing rather than hearing a promise.
             app.note_window_created();
+            // Before the first frame: a font set installed later would lay text out
+            // once with the old one and rebuild the atlas to correct it.
+            let fonts = dsh_quorfloat::fonts::install(&cc.egui_ctx);
+            app.note_fonts(fonts);
             Ok(Box::new(EguiApp { inner: app, context: cc.egui_ctx.clone() }))
         }),
     )
@@ -243,43 +263,4 @@ impl FrameSink for Borrowed<'_> {
 #[allow(dead_code)]
 fn _source_is_used() -> Option<StdinSource> {
     None
-}
-
-/// The optional lifecycle marker file named by `DSH_QUORFLOAT_RUST_MARKER`.
-///
-/// Absent unless asked for: a shipped build writes nothing to disk. It exists
-/// because the host does not surface its logs, which leaves "did the binary even
-/// start" unanswerable from outside when the desktop app owns the process.
-struct Marker {
-    path: Option<std::path::PathBuf>,
-}
-
-impl Marker {
-    /// Read the marker path from the environment.
-    ///
-    /// @returns a marker that writes nothing when the variable is unset.
-    fn from_env() -> Self {
-        Self {
-            path: std::env::var("DSH_QUORFLOAT_RUST_MARKER")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .map(std::path::PathBuf::from),
-        }
-    }
-
-    /// Append one line, if a marker was requested. Failures are ignored: this is a
-    /// diagnostic aid and must never be the reason a session fails.
-    ///
-    /// @param line - text to append, without a trailing newline.
-    fn write(&self, line: &str) {
-        let Some(path) = &self.path else { return };
-        use std::io::Write as _;
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            // Timestamped because this file is the only record of what this process
-            // did, and "was it restarted, or did it never start?" is the first
-            // question asked of it. A sequence of timestamps answers it immediately;
-            // a bare `start` line does not.
-            let _ = writeln!(file, "[{}] {line}", dsh_quorfloat::rpc::now_millis());
-        }
-    }
 }
