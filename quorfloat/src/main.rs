@@ -15,7 +15,8 @@ use std::process::ExitCode;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 
-use dsh_quorfloat::app::{self, App, Reader, SharedSink};
+use dsh_quorfloat::app::sink::{Reader, SharedSink};
+use dsh_quorfloat::app::{self, App};
 use dsh_quorfloat::runtime::diag::marker::Marker;
 use dsh_quorfloat::app::session::{FrameSink, HotkeyReport, Identity, Session, SessionExit};
 use dsh_quorfloat::ipc::transport::{StdinSource, StdioSink};

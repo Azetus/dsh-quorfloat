@@ -6,6 +6,8 @@
 //!   [`ipc::frame`] the framing, [`ipc::rpc`] the message shapes, [`ipc::transport`]
 //!   the byte stream, [`ipc::platform`] how this process names itself. This is the one
 //!   layer whose changes can break the other half of the system.
+//! - [`ui`] — what the panel draws: the conversation, the cards, the palette. It reads
+//!   a state snapshot and reports clicks; it cannot reach the session.
 //! - [`app`] — the state, and the event loop that drives it. [`app::session`] is the
 //!   handshake, the notifications, the interactions and shutdown over an abstract I/O;
 //!   [`app::session::follow`] decides which conversation this panel follows (and why
@@ -26,6 +28,7 @@ pub mod app;
 pub mod fonts;
 pub mod ipc;
 pub mod runtime;
+pub mod ui;
 pub mod window;
 
 /// Version of this subproject, taken from the crate manifest at build time.

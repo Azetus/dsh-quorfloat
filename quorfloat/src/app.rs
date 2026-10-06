@@ -18,221 +18,27 @@
 //! The reader thread is the only writer; the main thread reads it to pick up the
 //! host's configuration.
 
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
 pub mod session;
+pub mod sink;
 
 use crate::fonts::{self, FontStatus};
-use crate::app::session::interaction::{ApprovalVerdict, Handoff, Interaction, InteractionKind, InteractionState};
-use crate::app::session::{FrameSink, Session, SessionExit, WindowCommand};
-use crate::ipc::transport::StdinSource;
+use crate::app::session::interaction::{Handoff, Interaction};
+use crate::app::sink::{BorrowedSink, SharedSink, Wake};
+use crate::app::session::{Session, SessionExit, WindowCommand};
 use crate::window::{Hotkey, WindowSettings};
 
-/// Something that needs the main thread's attention.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Wake {
-    /// At least one frame arrived. The frames were already answered on the reader
-    /// thread; this asks the main thread to redraw with any new configuration.
-    Frames,
-    /// The hotkey was pressed.
-    Hotkey,
-    /// The host asked this process to stop, or the channel ended.
-    Exit(SessionExit),
-}
 
-/// A frame sink that can be written from several threads.
-///
-/// The handshake is written by the main thread before the window exists, and every
-/// later frame is written by the reader thread. Both must serialise onto one
-/// stdout, so the sink is shared rather than owned.
-pub struct SharedSink {
-    inner: Mutex<Box<dyn FrameSink + Send>>,
-}
 
-impl SharedSink {
-    /// Wrap a sink for cross-thread use.
-    ///
-    /// @param sink - the underlying sink, normally stdout.
-    #[must_use]
-    pub fn new(sink: Box<dyn FrameSink + Send>) -> Self {
-        Self { inner: Mutex::new(sink) }
-    }
 
-    /// Run one operation with the sink locked.
-    ///
-    /// A poisoned mutex is recovered rather than propagated: a panic in one writer
-    /// must not turn the protocol channel into a permanent failure, and the mutex
-    /// guards only a file handle, which no panic can leave half-updated.
-    ///
-    /// @param operation - what to do with the sink.
-    /// @returns whatever the operation returned.
-    pub fn with<T>(&self, operation: impl FnOnce(&mut dyn FrameSink) -> T) -> T {
-        let mut guard = match self.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        operation(guard.as_mut())
-    }
 
-    /// Write one frame.
-    ///
-    /// Inherent rather than only a trait method so it can take `&self`: a shared
-    /// sink lives behind an `Arc`, so callers never have `&mut self` to give the
-    /// trait's signature. The mutex provides the interior mutability.
-    ///
-    /// @param frame - the message to encode and send.
-    /// @returns an error when the peer is gone.
-    pub fn send(&self, frame: &serde_json::Value) -> std::io::Result<()> {
-        self.with(|sink| sink.send(frame))
-    }
 
-    /// Record one log line, on stderr.
-    ///
-    /// @param line - text to record.
-    pub fn log(&self, line: &str) {
-        self.with(|sink| sink.log(line));
-    }
 
-    /// Record one durable breadcrumb.
-    ///
-    /// Forwarded explicitly rather than left to the trait's default: the default is
-    /// a no-op, so forgetting this hop makes the marker file exist and stay empty —
-    /// which reads as "nothing happened" rather than as "the plumbing is missing".
-    ///
-    /// @param line - text to record.
-    pub fn mark(&self, line: &str) {
-        self.with(|sink| sink.mark(line));
-    }
-}
 
-impl FrameSink for SharedSink {
-    fn send(&mut self, frame: &serde_json::Value) -> std::io::Result<()> {
-        self.with(|sink| sink.send(frame))
-    }
-
-    fn log(&mut self, line: &str) {
-        self.with(|sink| sink.log(line));
-    }
-
-    fn mark(&mut self, line: &str) {
-        self.with(|sink| sink.mark(line));
-    }
-}
-
-/// The stdin pump, running on its own thread.
-pub struct Reader {
-    session: Arc<Mutex<Session>>,
-    sink: Arc<SharedSink>,
-    wake: Sender<Wake>,
-    /// Records why the session ended, so the window closing and the host closing
-    /// the channel do not have to be told apart afterwards.
-    outcome: Arc<Mutex<Option<SessionExit>>>,
-    /// Nudges the render loop. Filled in once the window exists; a wake delivered
-    /// before that is still queued on the channel and picked up by the first pass.
-    egui: Arc<Mutex<Option<egui::Context>>>,
-}
-
-impl Reader {
-    /// Assemble a reader.
-    ///
-    /// @param session - the session state, shared with the main thread.
-    /// @param sink - where answers go.
-    /// @param wake - how to notify the main thread.
-    /// @param outcome - where to record why the session ended.
-    /// @param egui - the render context slot, filled once the window exists.
-    #[must_use]
-    pub fn new(
-        session: Arc<Mutex<Session>>,
-        sink: Arc<SharedSink>,
-        wake: Sender<Wake>,
-        outcome: Arc<Mutex<Option<SessionExit>>>,
-        egui: Arc<Mutex<Option<egui::Context>>>,
-    ) -> Self {
-        Self { session, sink, wake, outcome, egui }
-    }
-
-    /// Read frames until the stream ends, answering each one.
-    ///
-    /// Blocking reads are exactly what is wanted here: this thread owns stdin, and
-    /// the thread ends when the host closes it. Nothing about it needs the window
-    /// to be visible, which is why the host keeps receiving answers while the panel
-    /// is hidden.
-    pub fn run(self) {
-        let mut source = StdinSource::new();
-        loop {
-            let Some(frame) = source.next_frame() else {
-                self.finish(SessionExit::PeerClosed);
-                return;
-            };
-            let exit = {
-                let mut session = match self.session.lock() {
-                    Ok(session) => session,
-                    Err(poisoned) => poisoned.into_inner(),
-                };
-                session.on_frame(frame, &mut BorrowedSink(&self.sink))
-            };
-            self.notify(Wake::Frames);
-            if let Some(exit) = exit {
-                self.finish(exit);
-                return;
-            }
-        }
-    }
-
-    /// Record the ending and tell the main thread to stop.
-    fn finish(&self, exit: SessionExit) {
-        {
-            let mut outcome = match self.outcome.lock() {
-                Ok(outcome) => outcome,
-                Err(poisoned) => poisoned.into_inner(),
-            };
-            *outcome = Some(exit.clone());
-        }
-        self.notify(Wake::Exit(exit));
-    }
-
-    /// Tell the main thread something happened, and ask for a redraw.
-    ///
-    /// A send failure means the main thread is gone, which ends the process anyway;
-    /// there is nothing to recover.
-    fn notify(&self, wake: Wake) {
-        let _ = self.wake.send(wake);
-        // Without this the panel would not redraw while hidden — and hidden is its
-        // normal state, so the configuration the host sends would never be
-        // reflected in what the user eventually sees.
-        let context = match self.egui.lock() {
-            Ok(slot) => slot.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        };
-        if let Some(ctx) = context {
-            ctx.request_repaint();
-        }
-    }
-}
-
-/// Hands the shared sink to a `&mut dyn FrameSink` parameter.
-///
-/// The session takes a trait object, while the shared sink is only reachable
-/// behind an `Arc`; this adapter is the smallest way to bridge the two without
-/// adding a second locking scheme.
-struct BorrowedSink<'a>(&'a SharedSink);
-
-impl FrameSink for BorrowedSink<'_> {
-    fn send(&mut self, frame: &serde_json::Value) -> std::io::Result<()> {
-        self.0.send(frame)
-    }
-
-    fn log(&mut self, line: &str) {
-        self.0.log(line);
-    }
-
-    fn mark(&mut self, line: &str) {
-        self.0.mark(line);
-    }
-}
 
 /// The application as egui sees it.
 pub struct App {
@@ -567,6 +373,8 @@ impl App {
         let follow = session.follow();
         let transcript = session.transcript();
         PanelState {
+            hotkey: self.hotkey_status(),
+            fonts_warning: self.fonts_warning.clone(),
             interactions: session.interactions().to_vec(),
             handoff: session.handoff().cloned(),
             entries: transcript.shared_entries(),
@@ -589,7 +397,8 @@ impl App {
     /// and this only supplies the sink it must write through.
     ///
     /// @param action - what the user asked for.
-    fn apply_card_action(&mut self, action: CardAction) {
+    fn apply_card_action(&mut self, action: crate::ui::CardAction) {
+        use crate::ui::CardAction;
         let mut session = match self.session.lock() {
             Ok(session) => session,
             Err(poisoned) => poisoned.into_inner(),
@@ -607,42 +416,28 @@ impl App {
     }
 }
 
-/// What a painted card asked the user to do.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CardAction {
-    /// Answer one approval.
-    Answer {
-        /// Which interaction.
-        id: String,
-        /// What the user decided.
-        verdict: ApprovalVerdict,
-    },
-    /// Stop showing a card.
-    Dismiss {
-        /// Which interaction.
-        id: String,
-    },
-    /// Stop showing the hand-off banner.
-    DismissHandoff,
-}
 
 /// Everything the window renders, read under one short lock.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PanelState {
+pub(crate) struct PanelState {
+    /// The hotkey line: which key hides the panel, or why none does.
+    pub(crate) hotkey: String,
+    /// What to tell the user about the fonts, when there is something to tell.
+    pub(crate) fonts_warning: Option<String>,
     /// Requests waiting for the user, oldest first.
-    interactions: Vec<Interaction>,
+    pub(crate) interactions: Vec<Interaction>,
     /// The last hand-off the host announced, if any.
-    handoff: Option<Handoff>,
+    pub(crate) handoff: Option<Handoff>,
     /// The conversation this panel follows.
-    follow: FollowView,
+    pub(crate) follow: FollowView,
     /// The conversation so far, oldest first.
     ///
     /// Shared, not cloned: this is read on every repaint and may hold megabytes.
-    entries: std::sync::Arc<Vec<crate::app::session::transcript::Entry>>,
+    pub(crate) entries: std::sync::Arc<Vec<crate::app::session::transcript::Entry>>,
     /// The assistant message being generated, when one is.
-    live: Option<crate::app::session::transcript::Entry>,
+    pub(crate) live: Option<crate::app::session::transcript::Entry>,
     /// The harness's name for this conversation, when it has chosen one.
-    title: Option<String>,
+    pub(crate) title: Option<String>,
 }
 
 /// What the status line needs to know about the followed conversation.
@@ -651,23 +446,23 @@ struct PanelState {
 /// nothing" and "attached and receiving nothing". The first one means no approval can
 /// ever reach this panel, so it must not be invisible.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct FollowView {
+pub(crate) struct FollowView {
     /// The conversation followed, if any.
-    session_id: Option<String>,
+    pub(crate) session_id: Option<String>,
     /// The workspace name that came with it.
-    label: Option<String>,
+    pub(crate) label: Option<String>,
     /// Whether discovery has started at all.
-    started: bool,
+    pub(crate) started: bool,
     /// Persistent events received for it.
-    events: u64,
+    pub(crate) events: u64,
     /// Times the host reported a gap.
-    resyncs: u64,
+    pub(crate) resyncs: u64,
 }
 
 impl FollowView {
     /// The line to show under the header.
     #[must_use]
-    fn status(&self) -> String {
+    pub(crate) fn status(&self) -> String {
         match (&self.session_id, self.started) {
             (Some(id), _) => {
                 // Everything the harness calls a session starts with `session-`, so the
@@ -691,75 +486,33 @@ impl FollowView {
 }
 
 impl App {
+    /// The hotkey line the panel shows.
+    ///
+    /// Built here rather than in the renderer because it is a fact about this process,
+    /// not about the view: a failed grab has a reason, and the reason is worth a line.
+    #[must_use]
+    fn hotkey_status(&self) -> String {
+        if self.hotkey.is_active() {
+            format!("{} 隐藏", self.hotkey.spec())
+        } else {
+            format!("热键未注册：{}", self.hotkey.reason().unwrap_or("unknown"))
+        }
+    }
+
     /// Draw the panel's contents.
     ///
     /// Separate from [`App::logic`] because eframe only calls this when there is
     /// something to paint. Anything the host depends on must not live here.
     ///
+    /// A thin delegate on purpose: the drawing lives in [`crate::ui`], and the click it
+    /// reports is applied *after* the frame, so no session lock is ever held inside a
+    /// layout closure.
+    ///
     /// @param ui - the root area, with no margin or background of its own.
     pub fn draw(&mut self, ui: &mut egui::Ui) {
         let state = self.state();
-        // Clicks are collected while painting and applied after it, so no session
-        // lock is held inside the layout closure.
-        let mut action: Option<CardAction> = None;
-        let hotkey_status = if self.hotkey.is_active() {
-            format!("{} 隐藏", self.hotkey.spec())
-        } else {
-            format!("热键未注册：{}", self.hotkey.reason().unwrap_or("unknown"))
-        };
-        let follow_status = state.follow.status();
-        let fonts_warning = self.fonts_warning.clone();
-
-        egui::Frame::NONE
-            .fill(BACKGROUND)
-            .inner_margin(egui::Margin::same(12))
-            .show(ui, |ui| {
-                // The harness's own title when it has one: it is the name the user sees
-                // in the Harness window, so the panel says the same thing rather than
-                // guessing from the first message.
-                let heading = state.title.clone().unwrap_or_else(|| "quorfloat".to_owned());
-                wrapped(ui, egui::RichText::new(heading).size(15.0).color(TEXT));
-                ui.add_space(2.0);
-                ui.label(egui::RichText::new(hotkey_status).size(12.0).color(MUTED));
-                ui.add_space(2.0);
-                ui.label(egui::RichText::new(follow_status).size(12.0).color(MUTED));
-                if let Some(warning) = &fonts_warning {
-                    ui.add_space(2.0);
-                    wrapped(ui, egui::RichText::new(warning).size(12.0).color(WARN));
-                }
-                ui.add_space(8.0);
-
-                if let Some(handoff) = &state.handoff {
-                    handoff_banner(ui, handoff, &mut action);
-                    ui.add_space(8.0);
-                }
-
-                if state.interactions.is_empty() {
-                    ui.label(egui::RichText::new("没有待处理的请求").size(12.0).color(MUTED));
-                } else {
-                    // `auto_shrink` vertically, and bounded: a request is actionable so it
-                    // has to be on screen, but a year-old card must not push the
-                    // conversation out of the panel — which is exactly what an
-                    // `auto_shrink([false, false])` area does even when it is empty.
-                    let cards = (ui.available_height() * 0.6).max(120.0);
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, true])
-                        .max_height(cards)
-                        .show(ui, |ui| {
-                            for card in &state.interactions {
-                                match card.kind() {
-                                    InteractionKind::Approval => approval_card(ui, card, &mut action),
-                                    InteractionKind::Question => question_card(ui, card, &mut action),
-                                }
-                                ui.add_space(8.0);
-                            }
-                        });
-                }
-
-                ui.add_space(8.0);
-                conversation(ui, &state);
-            });
-
+        let mut action: Option<crate::ui::CardAction> = None;
+        crate::ui::draw(ui, &state, &mut action);
         if let Some(action) = action {
             self.apply_card_action(action);
         }
@@ -778,296 +531,16 @@ impl App {
     }
 }
 
-/// Draw the conversation.
-///
-/// Sticks to the bottom, which is the whole of the "follow the answer as it is written"
-/// behaviour: egui only keeps a scroll area pinned while it is already at the bottom, so
-/// a user who has scrolled up to read something is not yanked back by the next token.
-///
-/// @param ui - where to draw.
-/// @param state - the conversation, plus the message still being generated.
-fn conversation(ui: &mut egui::Ui, state: &PanelState) {
-    // Whatever the header and any cards did not take. This is the panel's main body, so
-    // it is the part that must never be squeezed to nothing: an empty area that expands
-    // to fill the window is what left the conversation invisible, not empty.
-    let height = ui.available_height().max(CONVERSATION_MIN_HEIGHT);
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .stick_to_bottom(true)
-        .max_height(height)
-        .show(ui, |ui| {
-            if state.entries.is_empty() && state.live.is_none() {
-                ui.label(egui::RichText::new("尚无对话内容").size(12.0).color(MUTED));
-                return;
-            }
-            for entry in state.entries.iter() {
-                entry_ui(ui, entry);
-            }
-            if let Some(live) = &state.live {
-                entry_ui(ui, live);
-            }
-        });
-}
 
-/// Draw one line of the conversation.
-///
-/// @param ui - where to draw.
-/// @param entry - the line.
-fn entry_ui(ui: &mut egui::Ui, entry: &crate::app::session::transcript::Entry) {
-    use crate::app::session::transcript::{Block, Entry};
 
-    ui.add_space(6.0);
-    ui.label(egui::RichText::new(speaker(entry)).size(11.0).color(MUTED));
-    ui.add_space(2.0);
-    match entry {
-        Entry::User { text } => {
-            wrapped(ui, egui::RichText::new(text).size(13.0).color(TEXT));
-        }
-        Entry::Assistant { blocks, streaming } => {
-            for block in blocks {
-                match block {
-                    Block::Text(text) => wrapped(ui, egui::RichText::new(text).size(13.0).color(TEXT)),
-                    // Reasoning is drawn, not hidden: it is what the model is doing, and
-                    // a panel that shows only conclusions makes a slow answer look stuck.
-                    Block::Reasoning(text) => {
-                        wrapped(ui, egui::RichText::new(text).size(12.0).color(MUTED).italics());
-                    }
-                    Block::Call { name, arguments } => {
-                        wrapped(ui, egui::RichText::new(format!("$ {name} {arguments}")).size(12.0).color(MUTED).monospace());
-                    }
-                }
-                ui.add_space(2.0);
-            }
-            if *streaming {
-                ui.label(egui::RichText::new("生成中…").size(11.0).color(MUTED));
-            }
-        }
-        Entry::Tool { text, is_error, .. } => {
-            let colour = if *is_error { BAD } else { MUTED };
-            wrapped(ui, egui::RichText::new(text).size(12.0).color(colour).monospace());
-        }
-        Entry::System { text } => wrapped(ui, egui::RichText::new(text).size(12.0).color(MUTED)),
-        Entry::Notice { text, .. } => wrapped(ui, egui::RichText::new(text).size(12.0).color(MUTED)),
-    }
-}
 
-/// Who a line is from, as the panel labels it.
-///
-/// @param entry - the line.
-/// @returns the label above it.
-#[must_use]
-fn speaker(entry: &crate::app::session::transcript::Entry) -> String {
-    use crate::app::session::transcript::Entry;
-    match entry {
-        Entry::User { .. } => "你".to_owned(),
-        Entry::Assistant { .. } => "quorfloat".to_owned(),
-        Entry::Tool { name, .. } => {
-            name.as_ref().map_or_else(|| "工具".to_owned(), |name| format!("工具 · {name}"))
-        }
-        Entry::System { .. } => "系统".to_owned(),
-        // The kind is in the label rather than only in the text: an unrecognised event
-        // is exactly the case where the reader needs to know what it was called.
-        Entry::Notice { kind, .. } => format!("事件 · {kind}"),
-    }
-}
 
-/// How tall the conversation is allowed to be when nothing else needs the space.
-///
-/// A floor, not a preference: the panel's reason to exist is the conversation, so it
-/// gets its own room even when the window is small.
-const CONVERSATION_MIN_HEIGHT: f32 = 160.0;
 
-/// The locale the panel asks the asker's own text for.
-///
-/// Every string this file writes is Chinese, so a localized `displayReason` is
-/// requested in Chinese too and falls back to `en` (see [`Interaction::detail`]).
-const DISPLAY_LOCALE: &str = "zh";
 
-const BACKGROUND: egui::Color32 = egui::Color32::from_rgb(24, 24, 28);
-const CARD: egui::Color32 = egui::Color32::from_rgb(34, 34, 41);
-const TEXT: egui::Color32 = egui::Color32::from_rgb(226, 226, 234);
-const MUTED: egui::Color32 = egui::Color32::from_rgb(150, 150, 165);
-const ALLOW: egui::Color32 = egui::Color32::from_rgb(38, 92, 58);
-const REJECT: egui::Color32 = egui::Color32::from_rgb(104, 42, 46);
-const BANNER: egui::Color32 = egui::Color32::from_rgb(58, 50, 30);
-const WARN: egui::Color32 = egui::Color32::from_rgb(228, 196, 122);
-const OK: egui::Color32 = egui::Color32::from_rgb(134, 205, 158);
-const BAD: egui::Color32 = egui::Color32::from_rgb(226, 140, 140);
 
-/// Draw a label that wraps, so peer-supplied text cannot widen the panel.
-///
-/// @param ui - where to draw.
-/// @param text - the already-styled text.
-fn wrapped(ui: &mut egui::Ui, text: egui::RichText) {
-    ui.add(egui::Label::new(text).wrap());
-}
 
-/// Draw the announcement that a request was routed to another surface.
-///
-/// The wording has to be true, and "true" depends on what the host reported. A hint
-/// now means "the panel did not take this" — the host only announces a hand-off when
-/// it defers — so the panel must not imply it is holding the request. And "go to the
-/// Harness window" is only advice it can give when a surface is actually live: with
-/// none, the honest sentence is that nothing can answer it.
-///
-/// @param ui - where to draw.
-/// @param handoff - what the host announced.
-/// @param action - collects the dismissal if the user asks for one.
-fn handoff_banner(ui: &mut egui::Ui, handoff: &Handoff, action: &mut Option<CardAction>) {
-    let live = !handoff.surfaces().is_empty();
-    let (headline, instruction) = match (handoff.kind(), live) {
-        (InteractionKind::Question, true) => ("追问待回答", "请切到 Harness 窗口输入"),
-        (InteractionKind::Question, false) => ("追问待回答", "当前没有可以回答它的 Harness 窗口"),
-        (InteractionKind::Approval, true) => ("审批待确认", "请切到 Harness 窗口确认"),
-        (InteractionKind::Approval, false) => ("审批待确认", "当前没有可以确认它的 Harness 窗口"),
-    };
-    egui::Frame::NONE
-        .fill(BANNER)
-        .inner_margin(egui::Margin::same(10))
-        .corner_radius(6)
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(headline).size(13.0).color(WARN).strong());
-                ui.label(egui::RichText::new(instruction).size(12.0).color(TEXT));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("知道了").clicked() {
-                        *action = Some(CardAction::DismissHandoff);
-                    }
-                });
-            });
-        });
-}
 
-/// Draw one approval card, with its buttons only while an answer is still possible.
-///
-/// @param ui - where to draw.
-/// @param card - the interaction to render.
-/// @param action - collects what the user clicked.
-fn approval_card(ui: &mut egui::Ui, card: &Interaction, action: &mut Option<CardAction>) {
-    egui::Frame::NONE
-        .fill(CARD)
-        .inner_margin(egui::Margin::same(12))
-        .corner_radius(6)
-        .show(ui, |ui| {
-            let headline = match card.tool_name() {
-                Some(tool) => format!("工具 {tool} 请求提权"),
-                None => "有工具请求提权".to_owned(),
-            };
-            ui.label(egui::RichText::new(headline).size(13.0).color(TEXT).strong());
-            ui.add_space(4.0);
-            wrapped(
-                ui,
-                egui::RichText::new(
-                    card.detail(DISPLAY_LOCALE).unwrap_or_else(|| "请求方没有说明原因".to_owned()),
-                )
-                .size(12.0)
-                .color(MUTED),
-            );
-            ui.add_space(8.0);
-            match card.state() {
-                InteractionState::Pending => {
-                    ui.horizontal(|ui| {
-                        let allow = egui::Button::new(egui::RichText::new("允许一次").color(TEXT)).fill(ALLOW);
-                        if ui.add(allow).clicked() {
-                            *action = Some(CardAction::Answer {
-                                id: card.id().to_owned(),
-                                verdict: ApprovalVerdict::AllowOnce,
-                            });
-                        }
-                        let reject = egui::Button::new(egui::RichText::new("拒绝").color(TEXT)).fill(REJECT);
-                        if ui.add(reject).clicked() {
-                            *action = Some(CardAction::Answer {
-                                id: card.id().to_owned(),
-                                verdict: ApprovalVerdict::Reject,
-                            });
-                        }
-                    });
-                }
-                InteractionState::Submitting { .. } => {
-                    // Buttons are gone rather than disabled: a second click would be a
-                    // second decision for one question, and the host refuses it anyway.
-                    ui.label(egui::RichText::new("已提交，等待 Harness 确认…").size(12.0).color(MUTED));
-                }
-                InteractionState::Applied { verdict } => {
-                    let (text, colour) = match verdict {
-                        ApprovalVerdict::AllowOnce => ("已允许一次", OK),
-                        ApprovalVerdict::Reject => ("已拒绝", BAD),
-                    };
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(text).size(12.0).color(colour));
-                        close_button(ui, card, action);
-                    });
-                }
-                InteractionState::Refused { reason } => {
-                    wrapped(
-                        ui,
-                        egui::RichText::new(format!("已失效：{reason}")).size(12.0).color(BAD),
-                    );
-                    ui.add_space(4.0);
-                    close_button(ui, card, action);
-                }
-            }
-        });
-}
 
-/// Draw one question card.
-///
-/// It has no answer widgets, and says so. This build cannot answer a question — the
-/// answer shape is a list of selected option ids, and there is no widget for that
-/// yet — and a card that offered a disabled button would imply the panel could
-/// answer if only the user tried harder. What it *can* do is show the question, which
-/// is what lets the user decide whether to switch to the Harness window.
-///
-/// @param ui - where to draw.
-/// @param card - the interaction to render.
-/// @param action - collects what the user clicked.
-fn question_card(ui: &mut egui::Ui, card: &Interaction, action: &mut Option<CardAction>) {
-    let questions = card.questions();
-    egui::Frame::NONE
-        .fill(CARD)
-        .inner_margin(egui::Margin::same(12))
-        .corner_radius(6)
-        .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(format!("追问（{} 个问题）", card.question_count()))
-                    .size(13.0)
-                    .color(TEXT)
-                    .strong(),
-            );
-            ui.add_space(4.0);
-            wrapped(
-                ui,
-                egui::RichText::new("本窗口不能回答追问，请切到 Harness 窗口输入").size(12.0).color(WARN),
-            );
-            for (header, question) in &questions {
-                ui.add_space(4.0);
-                let text = match header {
-                    Some(header) => format!("• {header} — {question}"),
-                    None => format!("• {question}"),
-                };
-                wrapped(ui, egui::RichText::new(text).size(12.0).color(MUTED));
-            }
-            if card.question_count() > questions.len() {
-                ui.add_space(4.0);
-                wrapped(ui, egui::RichText::new("（还有更多，未全部显示）").size(12.0).color(MUTED));
-            }
-            ui.add_space(8.0);
-            if ui.button("知道了").clicked() {
-                *action = Some(CardAction::Dismiss { id: card.id().to_owned() });
-            }
-        });
-}
-
-/// Draw the button that stops showing a resolved card.
-///
-/// @param ui - where to draw.
-/// @param card - the card being closed.
-/// @param action - collects the dismissal.
-fn close_button(ui: &mut egui::Ui, card: &Interaction, action: &mut Option<CardAction>) {
-    if ui.small_button("关闭").clicked() {
-        *action = Some(CardAction::Dismiss { id: card.id().to_owned() });
-    }
-}
 
 /// How often the clock thread wakes the render loop.
 ///
@@ -1144,6 +617,10 @@ fn measured_capabilities(hotkey_active: bool) -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::session::interaction::{ApprovalVerdict, InteractionKind, InteractionState};
+    use crate::app::sink::BorrowedSink;
+    use crate::ui::{CardAction, DISPLAY_LOCALE, speaker};
+    use std::sync::mpsc::Sender;
     use crate::ipc::rpc::Inbound;
     use crate::app::session::{FrameSink, HotkeyReport, Identity};
     use std::sync::mpsc::channel;

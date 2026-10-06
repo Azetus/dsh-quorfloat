@@ -174,9 +174,9 @@ impl Hotkey {
 /// @param egui - the render context slot, filled once the window exists.
 /// @param log - where to report a watcher that ends unexpectedly.
 pub fn watch_hotkey(
-    wake: std::sync::mpsc::Sender<crate::app::Wake>,
+    wake: std::sync::mpsc::Sender<crate::app::sink::Wake>,
     egui: std::sync::Arc<std::sync::Mutex<Option<egui::Context>>>,
-    log: std::sync::Arc<crate::app::SharedSink>,
+    log: std::sync::Arc<crate::app::sink::SharedSink>,
 ) {
     let _ = std::thread::Builder::new()
         .name("quorfloat-hotkey".to_owned())
@@ -194,7 +194,7 @@ pub fn watch_hotkey(
                     // physical press from toggling the panel twice.
                     continue;
                 }
-                if wake.send(crate::app::Wake::Hotkey).is_err() {
+                if wake.send(crate::app::sink::Wake::Hotkey).is_err() {
                     return;
                 }
                 let context = match egui.lock() {
