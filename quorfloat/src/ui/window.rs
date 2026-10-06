@@ -22,6 +22,12 @@ pub struct WindowSettings {
     pub reduce_motion: bool,
     /// Which of the design's two palettes to draw in.
     pub theme: crate::ui::theme::Preference,
+    /// Put the panel away when the user moves to another window.
+    ///
+    /// The design's own semantics: the panel is a thing you summon, use, and leave — and a
+    /// panel still sitting over someone else's application after they have gone back to it
+    /// is in the way. Off is a legitimate choice too, so it is a setting, not a rule.
+    pub hide_on_blur: bool,
     /// Open with the panel already showing.
     ///
     /// Off by default and meant for development: it is the difference between "look at the
@@ -44,6 +50,7 @@ impl Default for WindowSettings {
             // A panel that floats over other applications should look like it belongs to
             // the desktop it is floating over, so the platform decides until told otherwise.
             theme: crate::ui::theme::Preference::System,
+            hide_on_blur: true,
             start_visible: false,
         }
     }
@@ -65,6 +72,7 @@ impl WindowSettings {
             max_height: float_env("DSH_QUORFLOAT_WINDOW_MAX_HEIGHT", defaults.max_height),
             always_on_top: bool_env("DSH_QUORFLOAT_WINDOW_ALWAYS_ON_TOP", defaults.always_on_top),
             theme: crate::ui::theme::Preference::from_env(),
+            hide_on_blur: bool_env("DSH_QUORFLOAT_WINDOW_HIDE_ON_BLUR", defaults.hide_on_blur),
             start_visible: bool_env("DSH_QUORFLOAT_WINDOW_START_VISIBLE", defaults.start_visible),
             reduce_motion: bool_env("DSH_QUORFLOAT_WINDOW_REDUCE_MOTION", defaults.reduce_motion),
         }
@@ -82,6 +90,12 @@ impl WindowSettings {
         }
         if let Some(height) = window.get("maxHeight").and_then(serde_json::Value::as_f64) {
             self.max_height = height as f32;
+        }
+        if let Some(hide) = window.get("hideOnBlur").and_then(serde_json::Value::as_bool) {
+            self.hide_on_blur = hide;
+        }
+        if let Some(hide) = window.get("hideOnBlur").and_then(serde_json::Value::as_bool) {
+            self.hide_on_blur = hide;
         }
         if let Some(theme) = window.get("theme").and_then(serde_json::Value::as_str) {
             self.theme = crate::ui::theme::Preference::from_name(Some(theme));

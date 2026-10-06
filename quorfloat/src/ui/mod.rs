@@ -75,6 +75,19 @@ pub enum Action {
     Hide,
 }
 
+/// What the drawing layer learned about the panel's own size.
+///
+/// The window follows the conversation: compact while there is nothing to read, growing as
+/// an answer arrives, and capped so that a long one scrolls instead of covering the screen.
+/// That makes the height a *result* of drawing, which is why it comes back from here rather
+/// than being computed by the caller — only this layer knows how tall the content turned out
+/// to be.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PanelLayout {
+    /// How tall the panel would like to be, in logical pixels.
+    pub desired_height: f32,
+}
+
 /// Draw the panel.
 ///
 /// Clicks are reported rather than applied: the caller owns the session, and holding its
@@ -84,7 +97,13 @@ pub enum Action {
 /// @param state - everything the panel is allowed to know.
 /// @param draft - the composer's text, owned by the caller so it survives a frame.
 /// @param action - where a click is reported, if the user makes one.
-pub(crate) fn draw(ui: &mut egui::Ui, state: &PanelState, draft: &mut String, action: &mut Option<Action>) {
+/// @returns how tall the panel wants to be, for the window to follow.
+pub(crate) fn draw(
+    ui: &mut egui::Ui,
+    state: &PanelState,
+    draft: &mut String,
+    action: &mut Option<Action>,
+) -> PanelLayout {
     // The window is transparent so that the panel can have rounded corners and a shadow of
     // its own; this is the room it leaves for both.
     egui::Frame::NONE
@@ -108,12 +127,18 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PanelState, draft: &mut String, ac
                 .stroke(egui::Stroke::new(theme::BORDER, line()))
                 .shadow(theme::shadow_near())
                 .show(ui, |ui| {
+                    let panel_top = ui.min_rect().top();
                     top_bar(ui, state, action);
                     composer(ui, state, draft, action);
                     if let Some(handoff) = &state.handoff {
                         handoff_banner(ui, handoff, action);
                     }
                     cards(ui, state, action);
+                    // Everything above the conversation, measured rather than predicted:
+                    // this is the distance from the panel's top edge to where the thread
+                    // starts, and it is what makes "how tall does the panel want to be" a
+                    // question with an answer instead of an estimate.
+                    let chrome_above = ui.cursor().min.y - panel_top;
                     // The composer claimed its share by being drawn first; the footer is
                     // below the conversation and has to be predicted, or a long
                     // conversation pushes the panel's own hints off the bottom. The thread's
@@ -123,13 +148,26 @@ pub(crate) fn draw(ui: &mut egui::Ui, state: &PanelState, draft: &mut String, ac
                     let thread_padding =
                         f32::from(theme::PAD_THREAD.top + theme::PAD_THREAD.bottom);
                     let thread = (ui.available_height() - footer - thread_padding).max(0.0);
-                    egui::Frame::NONE.inner_margin(theme::PAD_THREAD).show(ui, |ui| {
-                        conversation(ui, state, thread);
-                    });
+                    let content = egui::Frame::NONE
+                        .inner_margin(theme::PAD_THREAD)
+                        .show(ui, |ui| conversation(ui, state, thread))
+                        .inner;
                     footer_bar(ui, state);
-                });
-        });
+                    PanelLayout {
+                        desired_height: (chrome_above + thread_padding + content + footer)
+                            .clamp(MIN_PANEL_HEIGHT, state.max_height),
+                    }
+                })
+                .inner
+        })
+        .inner
 }
+
+/// The shortest the panel is allowed to be.
+///
+/// The top bar, the composer and the footer, with room to see that the conversation is
+/// empty: below this the panel would hide the controls it exists to offer.
+pub(super) const MIN_PANEL_HEIGHT: f32 = 168.0;
 
 /// The eight pixels of nothing that keep two sections from touching.
 const SECTION_GAP: f32 = 8.0;
@@ -152,7 +190,7 @@ fn top_bar(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
                     // The brand, at the design's weight and letter spacing: it is a mark, not
                     // a sentence, and it never changes.
                     ui.label(
-                        egui::RichText::new("QUORFLOAT")
+                        egui::RichText::new("DeepSeek")
                             .font(theme::font(ui.ctx(), theme::Weight::Medium, theme::TEXT_BRAND))
                             .extra_letter_spacing(theme::BRAND_LETTER_SPACING)
                             .color(text()),

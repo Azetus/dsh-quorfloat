@@ -71,6 +71,12 @@ pub struct App {
     window_seen: bool,
     /// Whether the resolved theme has been reported once this run.
     theme_seen: bool,
+    /// Whether the panel has held focus at least once since it was shown.
+    ///
+    /// The rule for hiding on blur is about the user *leaving*: a panel that was never
+    /// focused — shown behind another window, or opened by a script — must not vanish the
+    /// moment it appears, which is what a plain "not focused" test would do.
+    focused_once: bool,
     /// Where to write one picture of the panel, when the environment asks for one.
     ///
     /// A development aid with no part in the running panel: this process draws the panel's
@@ -139,6 +145,7 @@ impl App {
             window_state,
             window_seen: false,
             theme_seen: false,
+            focused_once: false,
             screenshot: std::env::var_os("DSH_QUORFLOAT_SCREENSHOT")
                 .map(std::path::PathBuf::from)
                 .filter(|path| !path.as_os_str().is_empty()),
@@ -203,6 +210,32 @@ impl App {
         self.sink.log("fonts: the panel's own text has no glyphs");
         self.sink.mark("fonts coverage=missing");
         self.fonts_warning = Some(message);
+    }
+
+    /// Put the panel away when the user has gone back to another window.
+    ///
+    /// @see should_hide_on_blur for the rule itself: it is a function so that it can be
+    ///   tested without a window manager, which is the only part of this a test can drive.
+    fn hide_when_the_user_leaves(&mut self) {
+        let Some(ctx) = self.context.clone() else { return };
+        let (visible, focused) = ctx.input(|input| {
+            (
+                input.viewport().visible().unwrap_or(true),
+                input.viewport().focused.unwrap_or(false),
+            )
+        });
+        if focused {
+            self.focused_once = true;
+        }
+        if should_hide_on_blur(self.settings.hide_on_blur, visible, self.focused_once, focused) {
+            self.focused_once = false;
+            self.set_visible(false);
+        }
+        if !visible {
+            // Forgotten while hidden, so that the next appearance has to earn focus again
+            // rather than hiding itself because the *previous* appearance once had it.
+            self.focused_once = false;
+        }
     }
 
     /// Ask for one picture of the panel, and write it when egui hands it over.
@@ -355,6 +388,7 @@ impl App {
         self.hide_after_startup();
         self.verify_fonts();
         self.write_screenshot();
+        self.hide_when_the_user_leaves();
         self.remember_window_position();
         self.pump();
         self.apply_window_commands();
@@ -506,6 +540,7 @@ impl App {
             entries: transcript.shared_entries(),
             live: transcript.live_entry(),
             title: transcript.title().map(str::to_owned),
+            max_height: self.settings.max_height,
             follow: FollowView {
                 session_id: follow.session_id().map(str::to_owned),
                 label: follow.label().map(str::to_owned),
@@ -570,7 +605,7 @@ impl App {
 
 
 /// Everything the window renders, read under one short lock.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PanelState {
     /// The hotkey line: which key hides the panel, or why none does.
     pub(crate) hotkey: String,
@@ -596,6 +631,12 @@ pub(crate) struct PanelState {
     pub(crate) live: Option<crate::app::session::transcript::Entry>,
     /// The harness's name for this conversation, when it has chosen one.
     pub(crate) title: Option<String>,
+    /// The tallest the panel may grow, in logical pixels.
+    ///
+    /// Handed down rather than read from the settings where they live, because the drawing
+    /// layer is what decides how much of the conversation fits — and it must decide it
+    /// without reaching for the window.
+    pub(crate) max_height: f32,
 }
 
 /// What the status line needs to know about the followed conversation.
@@ -668,6 +709,41 @@ impl App {
     ///
     /// @param ui - the root area, with no margin or background of its own.
     pub fn draw(&mut self, ui: &mut egui::Ui) {
+        let layout = self.draw_panel(ui);
+        self.follow_content_height(ui.ctx(), layout.desired_height);
+    }
+
+    /// Give the window the height the content asked for, one animation step at a time.
+    ///
+    /// The panel's height *is* its content now: compact while there is nothing to read,
+    /// growing as an answer arrives, and capped where a long one starts to scroll. The
+    /// animation is not decoration — a window that jumps two hundred pixels when a reply
+    /// lands is a window that looks like it crashed and came back.
+    ///
+    /// @param ctx - the context to send the resize through.
+    /// @param desired - the panel height the drawing layer measured.
+    fn follow_content_height(&mut self, ctx: &egui::Context, desired: f32) {
+        let outer = desired
+            + f32::from(crate::ui::theme::SHADOW_ROOM_TOP)
+            + f32::from(crate::ui::theme::SHADOW_ROOM_BOTTOM);
+        let animated = if self.settings.reduce_motion {
+            outer
+        } else {
+            let id = egui::Id::new("quorfloat-panel-height");
+            ctx.animate_value_with_time(id, outer, crate::ui::theme::SPEED_EXPAND)
+        };
+        // Only when it differs: a resize command every frame is a window manager working
+        // every frame, and `inner_rect` already says what the platform settled on.
+        let current = ctx.input(|input| input.viewport().inner_rect.map(|rect| rect.height()));
+        if current.is_some_and(|current| (current - animated).abs() < 0.5) {
+            return;
+        }
+        let width = self.settings.width + f32::from(crate::ui::theme::SHADOW_ROOM_SIDE) * 2.0;
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(width, animated)));
+    }
+
+    /// Draw the panel itself, and report what it measured.
+    fn draw_panel(&mut self, ui: &mut egui::Ui) -> crate::ui::PanelLayout {
         // Before anything is drawn: the panel names a family for every icon it draws, and a
         // family bound to no fonts is a panic in epaint rather than a blank space.
         crate::ui::fonts::ensure_icons(ui.ctx());
@@ -692,10 +768,11 @@ impl App {
         }
         let state = self.state();
         let mut action: Option<crate::ui::Action> = None;
-        crate::ui::draw(ui, &state, &mut self.draft, &mut action);
+        let layout = crate::ui::draw(ui, &state, &mut self.draft, &mut action);
         if let Some(action) = action {
             self.apply_card_action(action);
         }
+        layout
     }
 
     /// Close the window if the session is over.
@@ -792,6 +869,26 @@ fn measured_capabilities(hotkey_active: bool) -> Vec<&'static str> {
         capabilities.push("hotkey");
     }
     capabilities
+}
+
+/// Whether the panel should put itself away, given who is focused.
+///
+/// Four conditions, and each is a way this could have been wrong:
+///
+/// - the setting has to be on at all;
+/// - the panel has to be visible, or this is a hide command for something already hidden;
+/// - the user has to have been *in* the panel since it appeared, because a panel that opens
+///   behind another window is not focused and must not vanish on its first frame;
+/// - and focus has to be somewhere else now.
+///
+/// @param hide_on_blur - the setting.
+/// @param visible - whether the panel is on screen.
+/// @param focused_once - whether it has held focus since it was shown.
+/// @param focused - whether it holds focus now.
+/// @returns whether to hide.
+#[must_use]
+fn should_hide_on_blur(hide_on_blur: bool, visible: bool, focused_once: bool, focused: bool) -> bool {
+    hide_on_blur && visible && focused_once && !focused
 }
 
 #[cfg(test)]
@@ -1060,6 +1157,69 @@ mod tests {
         // The conversation is still there — the composer taking its share is not the same
         // as the content above it disappearing.
         assert!(visible("帮我看看"), "the conversation did not vanish: {texts:#?}");
+    }
+
+    /// Every way the hide-on-blur rule can be asked, including the two that must not hide.
+    #[test]
+    fn the_panel_puts_itself_away_only_when_the_user_has_left_it() {
+        // Left it: focused before, elsewhere now.
+        assert!(should_hide_on_blur(true, true, true, false));
+        // Never focused it: shown behind another window or opened by a script, so it stays.
+        assert!(!should_hide_on_blur(true, true, false, false));
+        // Already hidden: nothing to do.
+        assert!(!should_hide_on_blur(true, false, true, false));
+        // Still in it.
+        assert!(!should_hide_on_blur(true, true, true, true));
+        // And the setting turns the whole rule off.
+        assert!(!should_hide_on_blur(false, true, true, false));
+    }
+
+    /// The window follows the conversation, and the conversation is what decides.
+    #[test]
+    fn the_window_grows_with_the_conversation_and_is_compact_without_one() {
+        let size = egui::vec2(708.0, 620.0);
+        let (mut app, recorded, session, _wake) = app_and_session();
+        let empty = last_inner_size(&mut app, size);
+        assert!(empty > 0.0, "a size is sent even when there is nothing to read: {empty}");
+
+        deliver(&session, &recorded, conversation_frame());
+        let full = last_inner_size(&mut app, size);
+        assert!(full > empty, "a conversation makes the panel taller: {empty} -> {full}");
+        // And the cap holds: the panel never asks for more than its maximum plus the room its
+        // shadow needs, which is what keeps a long answer scrolling instead of growing.
+        let ceiling = app.settings().max_height
+            + f32::from(crate::ui::theme::SHADOW_ROOM_TOP)
+            + f32::from(crate::ui::theme::SHADOW_ROOM_BOTTOM);
+        assert!(full <= ceiling + 1.0, "{full} is not more than {ceiling}");
+    }
+
+    /// Run passes until the height settles, and answer what the panel asked for.
+    fn last_inner_size(app: &mut App, size: egui::Vec2) -> f32 {
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let mut height = 0.0;
+        // Several passes: the height is animated, so the first pass only starts it.
+        for _ in 0..8 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    focused: true,
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            for command in output
+                .viewport_output
+                .values()
+                .flat_map(|viewport| &viewport.commands)
+            {
+                if let egui::ViewportCommand::InnerSize(requested) = command {
+                    height = requested.y;
+                }
+            }
+            output.textures_delta.clear();
+        }
+        height
     }
 
     #[test]

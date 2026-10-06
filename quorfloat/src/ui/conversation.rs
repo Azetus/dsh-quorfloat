@@ -20,12 +20,16 @@ use super::wrapped;
 /// @param height - the space left after the header, the cards and the composer's strip.
 ///   Passed in rather than measured so that the composer, which is drawn afterwards, has
 ///   already claimed its share.
-pub(super) fn conversation(ui: &mut egui::Ui, state: &PanelState, height: f32) {
+///
+/// @returns how tall the conversation's content is, which is what the window's height is
+///   grown from. The height handed in is the space it may *use*; this is the space it
+///   *wants*, and the two differ exactly when the conversation is short.
+pub(super) fn conversation(ui: &mut egui::Ui, state: &PanelState, height: f32) -> f32 {
     // The floor is a floor for a *window*, not a claim on space that is not there: past it
     // the conversation is clipped at the bottom — above the composer, which is the right
     // thing to lose.
     let height = height.max(CONVERSATION_MIN_HEIGHT.min(height.max(0.0))).max(0.0);
-    egui::ScrollArea::vertical()
+    let output = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .stick_to_bottom(true)
         .max_height(height)
@@ -41,6 +45,7 @@ pub(super) fn conversation(ui: &mut egui::Ui, state: &PanelState, height: f32) {
                 entry_ui(ui, live);
             }
         });
+    output.content_size.y
 }
 
 /// A model's answer, in the design's own proportion.
