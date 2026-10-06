@@ -22,6 +22,12 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+mod records;
+mod stream;
+
+use self::records::{content_blocks, find_call_id, message_text, summarize};
+use self::stream::Live;
+
 /// How many entries are kept. A floating panel is not an archive: past this, the oldest
 /// are dropped and the fact that they were is part of the transcript.
 const MAX_ENTRIES: usize = 400;
@@ -83,13 +89,6 @@ pub enum Entry {
         /// A short human description.
         text: String,
     },
-}
-
-/// A partially received assistant message.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct Live {
-    /// Blocks by index; `None` until that block starts.
-    blocks: Vec<Block>,
 }
 
 /// The conversation as it stands, built only from frames the host sent.
@@ -278,7 +277,10 @@ impl Transcript {
             return false;
         }
         let Some(frame) = params.get("frame") else { return false };
-        self.fold_stream_frame(frame);
+        // The live state is created on first use and reset by a `start` frame, which is
+        // the frame that means "the previous attempt is gone".
+        let live = self.live.get_or_insert_with(Live::default);
+        self.unknown += live.fold(frame);
         true
     }
 
@@ -473,114 +475,6 @@ impl Transcript {
         self.push(Entry::Tool { name, text, is_error });
     }
 
-    /// Fold one stream frame into the message being generated.
-    ///
-    /// **The live frames are not the shape of the recorded replay**, and assuming they
-    /// were is the kind of mistake that produces a panel which shows nothing until the
-    /// answer is already over. Captured side by side:
-    ///
-    /// | | live `session/stream` | replay in `assistant/message.data.stream[]` |
-    /// |---|---|---|
-    /// | deltas | `{type:"chunk", chunk:{type:"text-delta", index, text}}` | `{type:"text-chunks", index, texts:[…]}` |
-    /// | block index | `chunk.index` | `frame.index` |
-    /// | extra | `start` (with `attemptId`/`revision`), `end` | — |
-    ///
-    /// Only the live shape is handled, because only the live shape is ever sent here: an
-    /// assistant message is rendered from its finished content blocks, never replayed.
-    ///
-    /// @param frame - one frame from a `session/stream` notification.
-    fn fold_stream_frame(&mut self, frame: &Value) {
-        match frame.get("type").and_then(Value::as_str).unwrap_or_default() {
-            // A new attempt replaces the one in flight: the previous attempt was
-            // abandoned or retried, and its half-written blocks describe an answer that
-            // will never be committed.
-            "start" => self.live = Some(Live::default()),
-            // The outcome says the message landed at a sequence; the record that follows
-            // is what replaces this stream on screen, so there is nothing to do here.
-            "end" => {}
-            "chunk" => {
-                let chunk = frame.get("chunk").cloned().unwrap_or(Value::Null);
-                // `chunk.index` is the block; the frame's own `index` is a counter over
-                // frames, and using it would create one placeholder block per token.
-                let index = chunk
-                    .get("index")
-                    .or_else(|| frame.get("index"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0) as usize;
-                match chunk.get("type").and_then(Value::as_str).unwrap_or_default() {
-                    "block-start" => {
-                        let block = match chunk.get("blockType").and_then(Value::as_str).unwrap_or_default() {
-                            "reasoning" => Block::Reasoning(String::new()),
-                            "tool-call" => Block::Call { name: "unknown".to_owned(), arguments: String::new() },
-                            _ => Block::Text(String::new()),
-                        };
-                        self.set_block(index, block);
-                    }
-                    "text-delta" => {
-                        if let Some(text) = chunk.get("text").and_then(Value::as_str) {
-                            self.append_delta(index, false, text);
-                        }
-                    }
-                    "reasoning-delta" => {
-                        if let Some(text) = chunk.get("text").and_then(Value::as_str) {
-                            self.append_delta(index, true, text);
-                        }
-                    }
-                    // The complete block, which is authoritative: the accumulated deltas
-                    // are a guess about text that can be corrected here.
-                    "block-end" => {
-                        if let Some(block) = chunk.get("block").and_then(stream_block) {
-                            self.set_block(index, block);
-                        }
-                    }
-                    // Usage and the finish reason describe the attempt, not its text;
-                    // the record that follows carries both.
-                    "usage" | "finish" => {}
-                    // A delta kind this build has never seen. Counted rather than drawn:
-                    // a token-by-token line would be noise, and the counter is what sends
-                    // someone to a capture to find out what it was.
-                    _ => self.unknown += 1,
-                }
-            }
-            _ => self.unknown += 1,
-        }
-    }
-
-    /// Put a block in place, replacing whatever placeholder stood there.
-    fn set_block(&mut self, index: usize, block: Block) {
-        self.ensure_live();
-        let live = self.live.as_mut().expect("just ensured");
-        while live.blocks.len() <= index {
-            live.blocks.push(Block::Text(String::new()));
-        }
-        live.blocks[index] = block;
-    }
-
-    /// Append incremental text to the live block at `index`.
-    ///
-    /// Creates the block when the start frame was lost: a delta is better evidence of
-    /// what the block is than the absence of a frame is. The placeholder's kind comes
-    /// from the delta, which is why the caller says whether this is reasoning.
-    fn append_delta(&mut self, index: usize, reasoning: bool, text: &str) {
-        let placeholder = if reasoning { Block::Reasoning(String::new()) } else { Block::Text(String::new()) };
-        self.ensure_live();
-        let live = self.live.as_mut().expect("just ensured");
-        while live.blocks.len() <= index {
-            live.blocks.push(placeholder.clone());
-        }
-        match &mut live.blocks[index] {
-            Block::Text(existing) | Block::Reasoning(existing) => existing.push_str(text),
-            // A tool call's block holds arguments, not prose.
-            Block::Call { .. } => {}
-        }
-    }
-
-    fn ensure_live(&mut self) {
-        if self.live.is_none() {
-            self.live = Some(Live::default());
-        }
-    }
-
     fn push(&mut self, entry: Entry) {
         Arc::make_mut(&mut self.entries).push(bounded(entry));
         self.cap();
@@ -606,10 +500,10 @@ impl Transcript {
     #[must_use]
     pub fn live_entry(&self) -> Option<Entry> {
         let live = self.live.as_ref()?;
-        if live.blocks.is_empty() {
+        if live.is_empty() {
             return None;
         }
-        Some(Entry::Assistant { blocks: live.blocks.clone(), streaming: true })
+        Some(Entry::Assistant { blocks: live.blocks().to_vec(), streaming: true })
     }
 }
 
@@ -700,84 +594,6 @@ impl Skipped {
         }
         Some(format!("transcript skipped: {}", parts.join(", ")))
     }
-}
-
-/// A stream frame's finished block.
-fn stream_block(block: &Value) -> Option<Block> {
-    match block.get("type").and_then(Value::as_str)? {
-        "text" => Some(Block::Text(block.get("text").and_then(Value::as_str)?.to_owned())),
-        "reasoning" => Some(Block::Reasoning(block.get("text").and_then(Value::as_str)?.to_owned())),
-        _ => None,
-    }
-}
-
-/// The text of a `data.message`, joined from its content blocks.
-fn message_text(data: &Value) -> String {
-    content_blocks(data)
-        .into_iter()
-        .filter_map(|block| match block {
-            Block::Text(text) | Block::Reasoning(text) => Some(text),
-            Block::Call { .. } => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// The content blocks of an event's payload.
-///
-/// **The harness is not uniform about where they live**, and the difference was found
-/// by capturing real frames rather than by reading the contract:
-///
-/// - `user/message` carries them directly: `data.content`;
-/// - `assistant/message`, `system/message` and `tool/result` wrap them:
-///   `data.message.content`.
-///
-/// Reading only the wrapped form silently drops every user message — the conversation
-/// renders with the questions missing and the answers unexplained. Both are accepted
-/// here so that either shape works, and a test pins the user one specifically.
-fn content_blocks(data: &Value) -> Vec<Block> {
-    let content = data
-        .get("message")
-        .and_then(|message| message.get("content"))
-        .or_else(|| data.get("content"))
-        .and_then(Value::as_array);
-    content.into_iter().flatten().filter_map(block_of).collect()
-}
-
-/// One content block.
-fn block_of(block: &Value) -> Option<Block> {
-    match block.get("type").and_then(Value::as_str)? {
-        "text" => Some(Block::Text(block.get("text").and_then(Value::as_str)?.to_owned())),
-        "reasoning" => Some(Block::Reasoning(block.get("text").and_then(Value::as_str)?.to_owned())),
-        "tool-call" => Some(Block::Call {
-            name: block.get("name").and_then(Value::as_str).unwrap_or("unknown").to_owned(),
-            arguments: block.get("arguments").and_then(Value::as_str).unwrap_or_default().to_owned(),
-        }),
-        _ => None,
-    }
-}
-
-/// The tool-call id inside a message, when there is exactly one.
-fn find_call_id(data: &Value) -> Option<String> {
-    data.get("message")
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find_map(|block| block.get("id").and_then(Value::as_str))
-        .map(str::to_owned)
-}
-
-/// A short description of an unrecognised event, so its line says more than its name.
-fn summarize(data: &Value) -> String {
-    for key in ["title", "text", "message", "reason", "id", "name"] {
-        if let Some(value) = data.get(key) {
-            if let Some(text) = value.as_str() {
-                return text.chars().take(120).collect();
-            }
-        }
-    }
-    String::new()
 }
 
 #[cfg(test)]
