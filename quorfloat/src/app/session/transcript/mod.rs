@@ -124,6 +124,12 @@ pub struct Transcript {
     duplicates: usize,
     stale: usize,
     internal: usize,
+    /// The `source.kind` values recognised as injected rather than typed.
+    ///
+    /// Kept so that a harness which starts injecting under a new name is discoverable: the
+    /// filter would hide those messages, and silence is the one failure mode this layer must
+    /// not have.
+    injected: std::collections::BTreeSet<String>,
     unknown: usize,
 }
 
@@ -206,6 +212,15 @@ impl Transcript {
     /// Reported because "the panel is quiet" has several causes that look identical on
     /// screen: nothing arrived, everything arrived twice, it all belonged to a replaced
     /// subscription, or it was internal. The counts are how those are told apart.
+    /// The injected `source.kind` values this transcript has recognised.
+    ///
+    /// Empty in a session with no scaffolding in it. A name appearing here is not a problem in
+    /// itself — it is the record of a decision the filter made for the reader to check.
+    #[must_use]
+    pub fn injected_kinds(&self) -> Vec<&str> {
+        self.injected.iter().map(String::as_str).collect()
+    }
+
     #[must_use]
     pub fn skipped(&self) -> Skipped {
         Skipped {
@@ -379,18 +394,25 @@ impl Transcript {
                 // The user's own words end any stream still on screen: the answer it
                 // belonged to is over, whatever the stream has not been told.
                 self.live = None;
+                // …but only what the user actually said. The harness records its own
+                // scaffolding in this same record type: a runtime-context snapshot — the file
+                // policy, the runtime context, the tools available — arrives as a *user
+                // message* whose `source.kind` is not `user`. Drawing it puts the harness's
+                // internal instructions into the conversation as if they had been typed.
+                if !from_the_user(data, &mut self.injected) {
+                    self.internal += 1;
+                    return;
+                }
                 let text = message_text(data);
                 if !text.is_empty() {
                     self.push(Entry::User { text });
                 }
             }
             "assistant/message" => self.push_message(data),
-            "system/message" => {
-                let text = message_text(data);
-                if !text.is_empty() {
-                    self.push(Entry::System { text });
-                }
-            }
+            // The system prompt, inserted into the history by the harness itself — its
+            // `request/context` says `systemPromptUpdate: "in-history"`. The user never wrote
+            // it and has no reason to read it back.
+            "system/message" => self.internal += 1,
             "tool/call" => self.note_call(data),
             "tool/result" => self.push_tool_result(data),
             "session/title" => {
@@ -568,6 +590,30 @@ fn clip(text: String) -> String {
 }
 
 /// Counts of what the transcript set aside.
+/// Whether a `user/message` is something the user typed.
+///
+/// Read from `source.kind` rather than guessed from the text: a runtime-context snapshot is a
+/// user message with `kind: "runtime-context"`, and guessing from wording would break the first
+/// time the harness rephrases it. A message with no `source` at all is treated as the user's —
+/// an unfamiliar harness should show too much rather than hide a real message.
+///
+/// @param data - the record's payload.
+/// @param seen - collects the kinds recognised as injected, for diagnostics.
+/// @returns whether it should be drawn as the user's own words.
+fn from_the_user(data: &Value, seen: &mut std::collections::BTreeSet<String>) -> bool {
+    match data
+        .get("source")
+        .and_then(|source| source.get("kind"))
+        .and_then(Value::as_str)
+    {
+        Some("user") | None => true,
+        Some(other) => {
+            seen.insert(other.to_owned());
+            false
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Skipped {
     /// Records at or below the cursor.
@@ -865,6 +911,60 @@ mod tests {
     }
 
     #[test]
+    /// The bug this filter was written for: the panel showed the harness's own instructions as
+    /// if the user had typed them.
+    #[test]
+    fn injected_context_and_the_system_prompt_are_not_shown() {
+        let mut transcript = Transcript::new();
+        transcript.apply_snapshot(&snapshot(vec![
+            // A real user message.
+            record(0, "user/message", json!({
+                "role": "user", "id": "m-1",
+                "content": [{"type": "text", "text": "帮我看看这段代码"}],
+                "source": {"kind": "user", "rpcId": "r-1"},
+            })),
+            // The runtime context: a user message by record type, scaffolding by source.
+            record(1, "user/message", json!({
+                "role": "user", "id": "m-2",
+                "content": [{"type": "text", "text": "Current runtime context. This snapshot supersedes…"}],
+                "source": {"kind": "runtime-context", "form": "snapshot"},
+            })),
+            // The system prompt, which the harness inserts into the history itself.
+            record(2, "system/message", json!({
+                "role": "system",
+                "message": {"role": "system", "content": [{"type": "text", "text": "You are an AI agent powered by DeepSeek Harness."}]},
+            })),
+        ], 0, 1));
+
+        let shown: Vec<String> = transcript
+            .entries()
+            .iter()
+            .map(|entry| match entry {
+                Entry::User { text } => text.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(shown, vec!["帮我看看这段代码".to_owned()], "only the user's own words");
+        assert_eq!(transcript.skipped().internal, 2, "and the two scaffolding records were counted");
+        assert_eq!(transcript.injected_kinds(), vec!["runtime-context"], "with the kind on the record");
+    }
+
+    /// An unfamiliar source is shown rather than hidden: hiding a real message is the worse
+    /// mistake, and the kind is recorded so that the choice can be reviewed.
+    #[test]
+    fn a_message_with_no_source_is_still_the_users() {
+        let mut transcript = Transcript::new();
+        transcript.apply_snapshot(&snapshot(vec![
+            record(0, "user/message", json!({
+                "role": "user", "id": "m-1",
+                "content": [{"type": "text", "text": "没有 source 的消息"}],
+            })),
+        ], 0, 1));
+        assert_eq!(transcript.entries().len(), 1);
+        assert!(matches!(&transcript.entries()[0], Entry::User { text } if text == "没有 source 的消息"));
+        assert!(transcript.injected_kinds().is_empty());
+    }
+
     fn the_buffer_keeps_the_newest_and_says_how_many_it_dropped() {
         let mut transcript = Transcript::new();
         let records = (0..(MAX_ENTRIES as i64 + 25))

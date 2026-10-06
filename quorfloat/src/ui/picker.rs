@@ -167,7 +167,10 @@ pub(super) fn conversations(ui: &mut egui::Ui, state: &PanelState) -> Outcome {
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.set_width(theme::POPOVER_WIDTH);
-            popover_head(ui, "会话", &format!("{} 个", state.conversations.len()));
+            // The header says *where* these conversations are, not how many there are: the
+            // workspace is what tells two similarly named conversations apart, and the count is
+            // something the list shows by existing.
+            popover_head(ui, "会话", &workspace_title(state));
             if let Some(Row::Chosen) =
                 option_row(ui, Icon::Plus, "开始新会话", Some("发送时创建"), false, false, false)
             {
@@ -199,7 +202,7 @@ pub(super) fn conversations(ui: &mut egui::Ui, state: &PanelState) -> Outcome {
                 }
             }
             separator(ui);
-            popover_hint(ui, "固定的会话会在每次呼出面板时打开；未固定时跟随最新的会话。");
+            popover_hint(ui, "固定会话后，每次呼出继续此会话。");
         });
     Outcome { action, button: button.rect }
 }
@@ -237,19 +240,28 @@ fn conversation_name(state: &PanelState, conversation: &SessionSummary) -> Strin
     short_id(&conversation.session_id).to_owned()
 }
 
-/// A conversation's second line: where it is, and how old it is.
+/// A conversation's second line: how old it is, and what it is doing.
+///
+/// The workspace used to lead this line; the design puts it once in the header, and repeating it
+/// on every row is what makes a menu taller than the thing it lists.
 fn describe(conversation: &SessionSummary, now: i64) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(label) = conversation.label.as_deref().filter(|label| !label.is_empty()) {
-        parts.push(label.to_owned());
-    }
-    parts.push(short_time(conversation.updated_at, now));
+    let mut parts: Vec<String> = vec![short_time(conversation.updated_at, now)];
     if conversation.running {
         parts.push("生成中".to_owned());
     } else if conversation.blank {
         parts.push("空白".to_owned());
     }
     parts.join(" · ")
+}
+
+/// The name of the workspace the panel is in, for the conversation menu's header.
+fn workspace_title(state: &PanelState) -> String {
+    state
+        .current_workspace
+        .as_deref()
+        .or(state.pinned_workspace.as_deref())
+        .and_then(|id| state.workspaces.iter().find(|workspace| workspace.workspace_id == id))
+        .map_or_else(String::new, |workspace| workspace.title.clone())
 }
 
 /// The shortest unique-looking form of a session id.
@@ -287,6 +299,11 @@ pub fn short_time(updated_at: i64, now: i64) -> String {
         ..=59 => "刚刚".to_owned(),
         60..=3_599 => format!("{} 分钟前", seconds / 60),
         3_600..=86_399 => format!("{} 小时前", seconds / 3_600),
+        // "Yesterday" rather than "1 天前", because that is how the design words the same
+        // band — and it is computed from elapsed time rather than from a calendar, because
+        // this process has no timezone to compare days in. `今天 14:32` would need one; see
+        // `docs/prototype.md` §34 for why that is a decision rather than an oversight.
+        86_400..=172_799 => "昨天".to_owned(),
         _ => format!("{} 天前", seconds / 86_400),
     }
 }
@@ -486,7 +503,9 @@ mod tests {
         assert_eq!(short_time(now - 60_000, now), "1 分钟前");
         assert_eq!(short_time(now - 3_599_000, now), "59 分钟前");
         assert_eq!(short_time(now - 3_600_000, now), "1 小时前");
-        assert_eq!(short_time(now - 86_400_000, now), "1 天前");
+        assert_eq!(short_time(now - 86_400_000, now), "昨天");
+        assert_eq!(short_time(now - 172_799_000, now), "昨天");
+        assert_eq!(short_time(now - 172_800_000, now), "2 天前");
         assert_eq!(short_time(now - 86_400_000 * 9, now), "9 天前");
         // A clock that disagrees with the host's must not produce "in the future".
         assert_eq!(short_time(now + 60_000, now), "刚刚");

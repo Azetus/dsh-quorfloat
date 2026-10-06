@@ -60,10 +60,45 @@ pub enum Icon {
     Check,
     /// A new one.
     Plus,
+    /// Return/Enter, for the keyboard hints.
+    KeyReturn,
+    /// Shift, drawn as a fat arrow because the font has no shift glyph.
+    ShiftUp,
+    /// A folded section, pointing right.
+    CaretRight,
 }
 
 /// Every icon this build knows, for the checks that have to consider all of them.
-pub const ALL: [Icon; 18] = [
+pub const ALL: [Icon; 21] = [
+    Icon::Folder,
+    Icon::FolderSimple,
+    Icon::Chat,
+    Icon::CaretDown,
+    Icon::PushPin,
+    Icon::PushPinSlash,
+    Icon::GearSix,
+    Icon::Close,
+    Icon::Search,
+    Icon::ArrowUp,
+    Icon::Stop,
+    Icon::ClipboardText,
+    Icon::Brain,
+    Icon::ShieldCheck,
+    Icon::Shield,
+    Icon::Eye,
+    Icon::Check,
+    Icon::Plus,
+    Icon::KeyReturn,
+    Icon::ShiftUp,
+    Icon::CaretRight,
+];
+
+/// The icons the design itself names.
+///
+/// Kept apart from [`ALL`] so that the cross-check against the mockup stays meaningful: the
+/// design's map is what those icons are checked against, while an icon for a control the
+/// design does not have — the keyboard hints, here — is a choice this panel made and says so.
+pub const DESIGNED: [Icon; 18] = [
     Icon::Folder,
     Icon::FolderSimple,
     Icon::Chat,
@@ -107,6 +142,9 @@ impl Icon {
             Self::Eye => "eye",
             Self::Check => "check",
             Self::Plus => "plus",
+            Self::KeyReturn => "key-return",
+            Self::ShiftUp => "arrow-fat-up",
+            Self::CaretRight => "caret-right",
         }
     }
 
@@ -132,6 +170,9 @@ impl Icon {
             Self::Eye => egui_phosphor::regular::EYE,
             Self::Check => egui_phosphor::regular::CHECK,
             Self::Plus => egui_phosphor::regular::PLUS,
+            Self::KeyReturn => egui_phosphor::regular::KEY_RETURN,
+            Self::ShiftUp => egui_phosphor::regular::ARROW_FAT_UP,
+            Self::CaretRight => egui_phosphor::regular::CARET_RIGHT,
         }
     }
 }
@@ -265,12 +306,17 @@ mod tests {
         let start = text.find("phosphorNames=").expect("the mockup maps icon names");
         let end = text[start..].find('}').expect("the map ends") + start;
         let block = &text[start..end];
-        for icon in ALL {
+        // Only the icons the design names are checked against it. The others are this panel's
+        // own additions, and they are listed as such where they are declared.
+        for icon in DESIGNED {
             assert!(
                 block.contains(&format!("\"{}\"", icon.name())),
                 "{} is not one of the names the design maps",
                 icon.name(),
             );
         }
+        // And nothing may be added to `ALL` without being either designed or documented: a
+        // count is enough to notice, and the compiler notices the arrays' lengths.
+        assert!(ALL.len() > DESIGNED.len(), "the panel's own glyphs are the difference");
     }
 }

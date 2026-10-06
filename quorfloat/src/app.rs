@@ -822,29 +822,6 @@ pub(crate) struct FollowView {
 }
 
 impl FollowView {
-    /// The line to show under the header.
-    #[must_use]
-    pub(crate) fn status(&self) -> String {
-        match (&self.session_id, self.started) {
-            (Some(id), _) => {
-                // Everything the harness calls a session starts with `session-`, so the
-                // first eight characters of one are the word "session". Take from after
-                // the prefix, which is the part that actually distinguishes two of them.
-                let short: String = id.strip_prefix("session-").unwrap_or(id).chars().take(8).collect();
-                let label = self.label.as_deref().unwrap_or("会话");
-                let gap = if self.resyncs == 0 {
-                    String::new()
-                } else {
-                    format!(" · 补齐 {} 次", self.resyncs)
-                };
-                format!("跟随 {label} · {short} · 事件 {}{gap}", self.events)
-            }
-            // Started but nothing to follow: the Harness window has no conversation
-            // yet, which is the normal state of a fresh environment.
-            (None, true) => "未跟随会话（Harness 中还没有会话）".to_owned(),
-            (None, false) => "尚未连接".to_owned(),
-        }
-    }
 }
 
 impl App {
@@ -1628,6 +1605,31 @@ mod tests {
     /// the compact case: the conversation area *filled* the space it was offered while the
     /// height it reported was the height of its content, and the footer ended up 40 pixels
     /// past the bottom of the panel's own window.
+    /// Reasoning is folded away by default, and one click opens it.
+    ///
+    /// The request came from using the panel: a chain of thought on screen for every answer
+    /// buries the answer. It is kept rather than dropped, because a long silence with no visible
+    /// work is how a slow model looks broken.
+    #[test]
+    fn reasoning_is_folded_away_until_it_is_asked_for() {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        deliver(&session, &recorded, conversation_frame());
+        let size = egui::vec2(708.0, 620.0);
+
+        let folded = drawn_text(&mut app, size);
+        assert!(
+            folded.iter().any(|(text, _)| text.contains("思考")),
+            "the fold is offered: {folded:#?}",
+        );
+        assert!(
+            !folded.iter().any(|(text, _)| text.contains("想一下")),
+            "and its contents are not on screen: {folded:#?}",
+        );
+        // The answer itself is there, which is the point of folding the working-out.
+        assert!(folded.iter().any(|(text, _)| text.contains("看到了")), "{folded:#?}");
+    }
+
     #[test]
     fn nothing_is_drawn_below_the_height_the_panel_asked_its_window_for() {
         let (mut app, _recorded, _session, _wake) = app_and_session();

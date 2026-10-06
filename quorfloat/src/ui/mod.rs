@@ -405,6 +405,37 @@ fn footer_height(ui: &egui::Ui) -> f32 {
     theme::TEXT_SMALL + 4.0 + f32::from(theme::PAD_FOOTER.top + theme::PAD_FOOTER.bottom) + ui.spacing().item_spacing.y
 }
 
+/// One keyboard hint: a chip with the key on it, and what it does.
+///
+/// @param ui - where to draw.
+/// @param keys - the glyphs to draw inside the chip, left to right.
+/// @param what - what the key does.
+fn kbd(ui: &mut egui::Ui, keys: &[icons::Icon], what: &str) {
+    egui::Frame::NONE
+        .fill(theme::soft())
+        .stroke(egui::Stroke::new(theme::BORDER, theme::line()))
+        .corner_radius(egui::CornerRadius::same(theme::RADIUS_KBD))
+        .inner_margin(egui::Margin { left: 4, right: 4, top: 1, bottom: 1 })
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 1.0;
+                for key in keys {
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(theme::TEXT_SMALL, theme::TEXT_SMALL),
+                        egui::Sense::hover(),
+                    );
+                    icons::paint(ui, rect.center(), *key, theme::TEXT_SMALL, muted());
+                }
+                if keys.is_empty() {
+                    ui.label(
+                        egui::RichText::new("esc").size(theme::TEXT_SMALL).color(muted()),
+                    );
+                }
+            });
+        });
+    ui.label(theme::meta(ui.ctx(), what));
+}
+
 /// The bottom bar: what the keys do, and what the panel is doing.
 ///
 /// One row, always: the shortcut hints on the left, and whatever the panel has to report on
@@ -416,35 +447,36 @@ fn footer_bar(ui: &mut egui::Ui, state: &PanelState) {
     frame.show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_TIGHT;
-            for (key, what) in [("Enter", "发送"), ("Shift+Enter", "换行"), ("Esc", "收起")] {
-                ui.label(
-                    egui::RichText::new(key)
-                        .size(theme::TEXT_SMALL)
-                        .color(muted())
-                        .background_color(theme::soft()),
-                );
-                ui.label(theme::meta(ui.ctx(), what));
-            }
-            // The right-hand side is one line that is allowed to be cut short: it reports a
-            // prompt in flight, or a font that is missing, or what the panel is following.
+            // The keys are drawn as chips, which is how the design shows them: a key is a thing
+            // you press, and a bordered box says so at a glance. `KEY_RETURN` and a fat up arrow
+            // are the font's nearest glyphs to ↵ and ⇧ — the shift symbol it does not have.
+            kbd(ui, &[icons::Icon::KeyReturn], "发送");
+            kbd(ui, &[icons::Icon::ShiftUp, icons::Icon::KeyReturn], "换行");
+            kbd(ui, &[], "关闭");
+            // The right-hand side is empty unless there is something to say. It used to report
+            // what the panel was following on every frame, which under the current design is
+            // both stale ("following the newest" no longer exists) and noise: the session picker
+            // in the top bar answers that question, and the composer answers the one that
+            // matters — whether a message can be sent.
             let status = state
                 .prompt_line
                 .clone()
-                .or_else(|| state.fonts_warning.clone())
-                .unwrap_or_else(|| state.follow.status());
-            let colour = if state.prompt_line.is_none() && state.fonts_warning.is_some() {
-                warn_text()
-            } else {
-                muted()
-            };
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(status).size(theme::TEXT_SMALL).color(colour),
-                    )
-                    .truncate(),
-                );
-            });
+                .or_else(|| state.fonts_warning.clone());
+            if let Some(status) = status {
+                let colour = if state.prompt_line.is_none() && state.fonts_warning.is_some() {
+                    warn_text()
+                } else {
+                    muted()
+                };
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(status).size(theme::TEXT_SMALL).color(colour),
+                        )
+                        .truncate(),
+                    );
+                });
+            }
         });
     });
 }

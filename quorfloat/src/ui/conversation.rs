@@ -6,7 +6,8 @@ use crate::app::PanelState;
 use crate::ui::theme as theme;
 use crate::ui::theme::CONVERSATION_MIN_HEIGHT;
 
-use super::wrapped;
+use super::{icons, wrapped};
+use crate::app::session::transcript::Block;
 
 /// Draw the conversation.
 ///
@@ -54,6 +55,47 @@ pub(super) fn conversation(ui: &mut egui::Ui, state: &PanelState, height: f32) -
     output.content_size.y
 }
 
+/// The reasoning blocks of one assistant message, joined.
+///
+/// One string rather than a list, because the fold is one fold: the working-out of a single
+/// answer reads as one piece, and the harness may split it across blocks.
+///
+/// @param blocks - the message's blocks.
+/// @returns the reasoning, or an empty string when there is none.
+#[must_use]
+pub(super) fn reasoning_text(
+    blocks: &[crate::app::session::transcript::Block],
+) -> String {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Reasoning(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The identity a fold's open/closed state is remembered under.
+///
+/// Keyed by the text rather than by position: the transcript drops its oldest entries as it
+/// grows, and a fold that jumped to another answer when the buffer trimmed would be worse than
+/// one that forgot.
+///
+/// @param reasoning - the reasoning text.
+/// @returns the egui id for its fold.
+#[must_use]
+pub(super) fn reasoning_id(reasoning: &str) -> egui::Id {
+    // FNV-1a, which is enough for this: the id only has to separate the handful of answers on
+    // screen, and a collision would fold two together rather than lose anything.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in reasoning.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    egui::Id::new(("quorfloat-reasoning", hash))
+}
+
 /// A model's answer, in the design's own proportion.
 ///
 /// The line height is the point: an answer is prose to be read rather than scanned, and
@@ -86,14 +128,52 @@ pub(super) fn entry_ui(ui: &mut egui::Ui, entry: &crate::app::session::transcrip
             wrapped(ui, answer(ui.ctx(), text));
         }
         Entry::Assistant { blocks, streaming } => {
+            // The model's working-out, folded away. It is kept rather than dropped — it is what
+            // the model is doing, and a panel that shows only conclusions makes a slow answer
+            // look stuck — but it is not what the user came to read, so it is one click away
+            // instead of always on screen. The design has no opinion here; the request for it
+            // came from using the panel (see `docs/prototype.md` §35).
+            let reasoning = reasoning_text(blocks);
+            if !reasoning.is_empty() {
+                let id = reasoning_id(&reasoning);
+                let open = ui.memory(|memory| memory.data.get_temp::<bool>(id).unwrap_or(false));
+                let label = if *streaming && !open { "思考中…" } else { "思考" };
+                let row = ui
+                    .horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        let mark = if open { icons::Icon::CaretDown } else { icons::Icon::CaretRight };
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(theme::ICON_CHEVRON, theme::ICON_CHEVRON),
+                            egui::Sense::hover(),
+                        );
+                        icons::paint(ui, rect.center(), mark, theme::ICON_CHEVRON, theme::muted());
+                        ui.label(
+                            egui::RichText::new(label).size(theme::TEXT_SMALL).color(theme::muted()),
+                        );
+                    })
+                    .response
+                    .interact(egui::Sense::click());
+                if row.clicked() {
+                    ui.memory_mut(|memory| memory.data.insert_temp(id, !open));
+                }
+                if row.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if open {
+                    wrapped(
+                        ui,
+                        egui::RichText::new(&reasoning)
+                            .size(theme::TEXT_META)
+                            .color(theme::muted())
+                            .italics(),
+                    );
+                }
+            }
             for block in blocks {
                 match block {
                     Block::Text(text) => wrapped(ui, answer(ui.ctx(), text)),
-                    // Reasoning is drawn, not hidden: it is what the model is doing, and
-                    // a panel that shows only conclusions makes a slow answer look stuck.
-                    Block::Reasoning(text) => {
-                        wrapped(ui, egui::RichText::new(text).size(theme::TEXT_META).color(theme::muted()).italics());
-                    }
+                    // Drawn above, folded; never twice.
+                    Block::Reasoning(_) => {}
                     Block::Call { name, arguments } => {
                         wrapped(ui, egui::RichText::new(format!("$ {name} {arguments}")).size(theme::TEXT_META).color(theme::muted()).monospace());
                     }
