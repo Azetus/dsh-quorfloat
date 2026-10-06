@@ -58,6 +58,8 @@ export interface SupervisorSnapshot {
    * to a window nobody is looking at.
    */
   readonly panelVisible: boolean
+  /** Capabilities the panel process has measured and reported. */
+  readonly panelCapabilities: readonly string[]
 }
 
 /** Event delivered to listeners on every meaningful supervision change. */
@@ -121,6 +123,13 @@ export class QuorfloatSupervisor {
   #stderrDelivered = 0
   /** Last visibility the panel reported; `false` until it says otherwise. */
   #panelVisible = false
+  /**
+   * What the panel process reported it can do, measured on its side.
+   *
+   * Empty until it reports, which is the honest default: an unreported panel must
+   * not be assumed capable of showing anything.
+   */
+  #panelCapabilities: readonly string[] = []
   /** True while a stop was requested, so the exit handler must not restart. */
   #stopping = false
 
@@ -149,6 +158,7 @@ export class QuorfloatSupervisor {
       lastError: this.#lastError,
       restartExhausted: this.#restartExhausted,
       panelVisible: this.#panelVisible,
+      panelCapabilities: this.#panelCapabilities,
     }
   }
 
@@ -247,6 +257,36 @@ export class QuorfloatSupervisor {
   }
 
   /**
+   * Ask the peer to show or hide its window.
+   *
+   * The missing direction of a two-way fact: the peer tells the host where its
+   * window is, so the host can route approvals; this tells the peer where the host
+   * wants it. Without it the panel would be summoned by the global hotkey only,
+   * and a host-side action such as opening a pending approval could not bring it
+   * into view.
+   *
+   * Sent as a notification rather than a request: the peer publishes its resulting
+   * visibility back through `window/visibility`, so a reply would be a second way
+   * to learn the same thing — and one that has to be timed out when the peer is
+   * slow to draw.
+   *
+   * @param visible - `true` to show the window, `false` to hide it.
+   * @returns `true` when the frame was written; `false` when there is no live peer,
+   *   which is not an error — the panel is optional and may not exist at all.
+   */
+  async setPanelVisible(visible: boolean): Promise<boolean> {
+    const channel = this.#channel
+    if (channel === undefined || channel.state !== 'started') return false
+    try {
+      await channel.notify('window/visibility', { visible })
+      return true
+    } catch (error) {
+      this.#deps.log.warn('failed to ask quorfloat to change window visibility', error)
+      return false
+    }
+  }
+
+  /**
    * Send one notification to the peer.
    *
    * Used by the session layer (frame forwarding) and by the interaction layer
@@ -300,8 +340,11 @@ export class QuorfloatSupervisor {
     this.#generation += 1
     const generation = this.#generation
     this.#stderrDelivered = 0
-    // A fresh process has not reported anything yet.
+    // A fresh process has not reported anything yet. Both facts are cleared
+    // together: a capability established by the process that just died says
+    // nothing about its replacement.
     this.#panelVisible = false
+    this.#panelCapabilities = []
     // A new attempt invalidates the previous failure reason: keeping it would
     // make a live process report the error that ended its predecessor.
     this.#lastError = undefined
@@ -591,8 +634,16 @@ export class QuorfloatSupervisor {
         // it is carried in the snapshot rather than only passed to one observer:
         // the approval authority reads it on every decision, not just when the
         // notification happens to arrive.
-        const visible = (params as { visible?: unknown } | null)?.visible === true
-        this.#deps.log.debug('quorfloat visibility changed', { visible })
+        const record = (params ?? {}) as { visible?: unknown; capabilities?: unknown }
+        const visible = record.visible === true
+        // What the peer has established it can do, measured on its side. Optional
+        // and additive, so an older peer that omits it simply leaves the last
+        // measurement standing rather than clearing it.
+        const reported = Array.isArray(record.capabilities)
+          ? record.capabilities.filter((entry): entry is string => typeof entry === 'string')
+          : undefined
+        if (reported !== undefined) this.#panelCapabilities = reported
+        this.#deps.log.debug('quorfloat visibility changed', { visible, capabilities: reported })
         this.#panelVisible = visible
         this.#emit({ kind: 'state', snapshot: this.snapshot(), detail: { visible } })
         return
@@ -692,6 +743,9 @@ function routerMethods(router: HostRouter): Map<string, (params: unknown, method
  * @returns an absolute directory path.
  */
 function safeWorkingDirectory(): string {
+  // `HOME` first so an explicit override wins, then the platform's own answer.
+  // On Windows `HOME` is usually absent and `homedir()` resolves `USERPROFILE` or
+  // `HOMEDRIVE`+`HOMEPATH`, which is the only way to get this right there.
   return process.env['HOME'] ?? homedir()
 }
 
@@ -727,7 +781,19 @@ function quorfloatEnvironment(config: QuorfloatConfig): NodeJS.ProcessEnv {
     DSH_QUORFLOAT_WINDOW_ALWAYS_ON_TOP: String(config.window.alwaysOnTop),
     DSH_QUORFLOAT_WINDOW_REDUCE_MOTION: String(config.window.reduceMotion),
   }
-  for (const key of ['HOME', 'USER', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'XDG_RUNTIME_DIR', 'DISPLAY', 'WAYLAND_DISPLAY']) {
+  // POSIX and Windows names for the same facts, both forwarded. The Windows
+  // entries are not decoration: `HOME` is normally unset there, and while the host
+  // can fall back to `os.homedir()` (which consults the passwd database on POSIX),
+  // a native child cannot — the GUI stack locates its caches through `USERPROFILE`
+  // and `LOCALAPPDATA`, so withholding them makes the window fail to appear for a
+  // reason nothing in the log explains.
+  for (const key of [
+    // POSIX
+    'HOME', 'USER', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE',
+    'XDG_RUNTIME_DIR', 'DISPLAY', 'WAYLAND_DISPLAY',
+    // Windows
+    'USERPROFILE', 'LOCALAPPDATA', 'APPDATA', 'TEMP', 'TMP', 'USERNAME', 'SystemRoot',
+  ]) {
     const value = process.env[key]
     if (value !== undefined) env[key] = value
   }

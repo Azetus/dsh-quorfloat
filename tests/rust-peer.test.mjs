@@ -239,3 +239,128 @@ test('a real accelerator registers and the session stays healthy', { skip }, asy
     console.log(`hotkey registered on this machine: ${String(recorded)}`)
   }
 })
+
+test('the sidecar reports a measured window capability and its hidden start', { skip }, async () => {
+  // The whole point of A3's second half: the peer must not claim a window it has
+  // not created. `hello` is written before any window exists, so the claim has to
+  // come later — and this checks it arrives, and arrives honest.
+  process.env['DSH_QUORFLOAT_HOTKEY'] = 'Control+Alt+Shift+F13'
+  const { QuorfloatSupervisor } = await import(new URL('../lib/host/supervisor.js', import.meta.url))
+  const { HostRouter } = await import(new URL('../lib/bridge/router.js', import.meta.url))
+  const { DEFAULT_CONFIG } = await import(new URL('../lib/config.js', import.meta.url))
+  const effective = {
+    ...DEFAULT_CONFIG,
+    heartbeatMs: 200,
+    heartbeatMissLimit: 3,
+    startupTimeoutMs: 8000,
+    shutdownGraceMs: 1000,
+    logLevel: 'debug',
+  }
+  const supervisor = new QuorfloatSupervisor({
+    config: () => effective,
+    resolveBinary: () => ({ path: binary, args: [], source: 'config', attempts: [] }),
+    createRouter: channelSessionId =>
+      new HostRouter({
+        config: () => effective,
+        channelSessionId: () => channelSessionId,
+        hostVersion: () => 'cross-language-test',
+        listWorkspaces: async () => ({ items: [] }),
+        listSessions: async () => ({ items: [] }),
+        createSession: async () => ({ sessionId: 's' }),
+        attachSession: async sessionId => ({ sessionId }),
+        readHistory: async () => ({ records: [], hasMore: false }),
+        prompt: async () => ({ accepted: true }),
+        cancel: async () => ({ accepted: true }),
+        answerInteraction: async () => ({ accepted: true }),
+        reportPresence: async () => ({ accepted: true }),
+        diagnostics: () => ({}),
+      }),
+    log: { info: () => {}, warn: () => {}, debug: () => {}, error: () => {} },
+    onEvent: () => {},
+  })
+  try {
+    await supervisor.start()
+    await waitFor('running', async () => supervisor.snapshot().state === 'running', { timeoutMs: 10000 })
+    // The startup report is sent as soon as the window exists, which is the first
+    // thing that happens after the handshake.
+    await waitFor(
+      'a window capability report',
+      async () => supervisor.snapshot().panelCapabilities.length > 0,
+      { timeoutMs: 8000 },
+    )
+    const snapshot = supervisor.snapshot()
+    assert.ok(
+      snapshot.panelCapabilities.includes('window'),
+      `the window exists, so it is reported: ${JSON.stringify(snapshot.panelCapabilities)}`,
+    )
+    assert.ok(snapshot.panelCapabilities.includes('hotkey'), 'and the hotkey registration succeeded')
+    assert.equal(snapshot.panelVisible, false, 'the panel starts hidden and says so')
+  } finally {
+    delete process.env['DSH_QUORFLOAT_HOTKEY']
+    const result = await supervisor.stop()
+    assert.equal(result.exited, true)
+    assert.equal(result.escalated, false)
+  }
+})
+
+test('the host can ask the sidecar to show and hide its window', { skip }, async () => {
+  // The direction that was missing. Asserted through the peer's own report rather
+  // than a promise, because the command is a notification: the host learns the
+  // result the same way it learns everything else about the panel's state.
+  const { QuorfloatSupervisor } = await import(new URL('../lib/host/supervisor.js', import.meta.url))
+  const { HostRouter } = await import(new URL('../lib/bridge/router.js', import.meta.url))
+  const { DEFAULT_CONFIG } = await import(new URL('../lib/config.js', import.meta.url))
+  const effective = {
+    ...DEFAULT_CONFIG,
+    heartbeatMs: 200,
+    heartbeatMissLimit: 3,
+    startupTimeoutMs: 8000,
+    shutdownGraceMs: 1000,
+    logLevel: 'debug',
+  }
+  const supervisor = new QuorfloatSupervisor({
+    config: () => effective,
+    resolveBinary: () => ({ path: binary, args: [], source: 'config', attempts: [] }),
+    createRouter: channelSessionId =>
+      new HostRouter({
+        config: () => effective,
+        channelSessionId: () => channelSessionId,
+        hostVersion: () => 'cross-language-test',
+        listWorkspaces: async () => ({ items: [] }),
+        listSessions: async () => ({ items: [] }),
+        createSession: async () => ({ sessionId: 's' }),
+        attachSession: async sessionId => ({ sessionId }),
+        readHistory: async () => ({ records: [], hasMore: false }),
+        prompt: async () => ({ accepted: true }),
+        cancel: async () => ({ accepted: true }),
+        answerInteraction: async () => ({ accepted: true }),
+        reportPresence: async () => ({ accepted: true }),
+        diagnostics: () => ({}),
+      }),
+    log: { info: () => {}, warn: () => {}, debug: () => {}, error: () => {} },
+    onEvent: () => {},
+  })
+  try {
+    await supervisor.start()
+    await waitFor('running', async () => supervisor.snapshot().state === 'running', { timeoutMs: 10000 })
+    await waitFor('the opening report', async () => supervisor.snapshot().panelVisible === false)
+
+    assert.equal(await supervisor.setPanelVisible(true), true, 'the command was written')
+    await waitFor(
+      'the panel to report itself visible',
+      async () => supervisor.snapshot().panelVisible === true,
+      { timeoutMs: 8000 },
+    )
+
+    assert.equal(await supervisor.setPanelVisible(false), true)
+    await waitFor(
+      'the panel to report itself hidden again',
+      async () => supervisor.snapshot().panelVisible === false,
+      { timeoutMs: 8000 },
+    )
+  } finally {
+    const result = await supervisor.stop()
+    assert.equal(result.exited, true)
+    assert.equal(result.escalated, false)
+  }
+})

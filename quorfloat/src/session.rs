@@ -45,6 +45,53 @@ pub trait FrameSource {
     fn next_frame(&mut self) -> Option<Inbound>;
 }
 
+/// What the host asked the window to do.
+///
+/// Parsed here and executed by the window layer, so the decision about *what* was
+/// asked is testable without a window and the decision about *how* to do it stays
+/// with the code that owns the viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowCommand {
+    /// Show the panel.
+    Show,
+    /// Hide the panel.
+    Hide,
+    /// Flip whichever state the panel is in.
+    ///
+    /// The hotkey is handled locally by this process, so this exists for a host
+    /// that wants the same behaviour from its own surface.
+    Toggle,
+}
+
+impl WindowCommand {
+    /// Read one `window/visibility` payload.
+    ///
+    /// Three spellings are accepted, and the tolerance is deliberate rather than
+    /// accidental: this method is a *request* from the peer's point of view and a
+    /// *notification* from the host's, so both `{visible}` and the command object
+    /// the host's own router validates can arrive on the same wire. Accepting both
+    /// costs one match arm; refusing one would make the two ends disagree about a
+    /// method they both already implement.
+    ///
+    /// @param params - the notification parameters.
+    /// @returns the command, or `None` when the payload asks for nothing
+    ///   recognisable — which is ignored rather than treated as an error, because
+    ///   a future host may extend this payload and an older peer must survive it.
+    #[must_use]
+    pub fn parse(params: Option<&Value>) -> Option<Self> {
+        let params = params?;
+        if let Some(visible) = params.get("visible").and_then(Value::as_bool) {
+            return Some(if visible { Self::Show } else { Self::Hide });
+        }
+        match params.as_str() {
+            Some("show") => Some(Self::Show),
+            Some("hide") => Some(Self::Hide),
+            Some("toggle") => Some(Self::Toggle),
+            _ => None,
+        }
+    }
+}
+
 /// Why the session ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionExit {
@@ -124,6 +171,12 @@ pub struct Session {
     identity: Identity,
     router: Router,
     host: HostConfig,
+    /// Window commands the host has sent but the window layer has not applied.
+    ///
+    /// Queued rather than applied on the spot because this type has no window:
+    /// keeping the two apart is what lets the whole command path be tested without
+    /// a viewport.
+    commands: Vec<WindowCommand>,
     next_request_id: i64,
     handshake_sent: bool,
     handshake_done: bool,
@@ -139,6 +192,7 @@ impl Session {
             identity,
             router: Router,
             host: HostConfig::default(),
+            commands: Vec::new(),
             next_request_id: 1,
             handshake_sent: false,
             handshake_done: false,
@@ -292,6 +346,10 @@ impl Session {
                 let payload = params.unwrap_or(Value::Null);
                 sink.log(&format!("interaction arrived before the window exists: {payload}"));
             }
+            "window/visibility" => match WindowCommand::parse(params.as_ref()) {
+                Some(command) => self.commands.push(command),
+                None => sink.log("ignoring an unrecognised window/visibility payload"),
+            },
             "interaction/hint" => {
                 let payload = params.unwrap_or(Value::Null);
                 sink.log(&format!("interaction belongs to the Harness window: {payload}"));
@@ -337,19 +395,46 @@ impl Session {
         }
     }
 
-    /// Report whether the panel is on screen.
+    /// Report whether the panel is on screen, and what this process can actually do.
     ///
     /// The host routes approvals by which surface the user is looking at, and this
     /// notification is how it learns that the panel is one of them. It is sent on
     /// every change including the first (hidden), because a panel that never
     /// reports is indistinguishable from one that is not running.
     ///
+    /// `capabilities` is additive and optional: the host's validator reads
+    /// `visible` and ignores the rest, so an older host keeps working. Sending it
+    /// here rather than only in `hello` is what makes it a *measurement*: `hello`
+    /// is written before any window exists, so a window capability in it would be a
+    /// claim, whereas this is sent once creation has actually succeeded.
+    ///
     /// @param visible - whether the window is currently shown.
+    /// @param capabilities - what this process has established it can do.
     /// @param sink - where the notification goes.
-    pub fn report_visibility(&self, visible: bool, sink: &mut dyn FrameSink) {
-        if let Err(error) = sink.send(&rpc::notification("window/visibility", json!({ "visible": visible }))) {
+    pub fn report_visibility(
+        &self,
+        visible: bool,
+        capabilities: &[&str],
+        sink: &mut dyn FrameSink,
+    ) {
+        let frame = rpc::notification(
+            "window/visibility",
+            json!({ "visible": visible, "capabilities": capabilities }),
+        );
+        if let Err(error) = sink.send(&frame) {
             sink.log(&format!("could not report window visibility: {error}"));
         }
+    }
+
+    /// Take every window command the host has sent since the last call.
+    ///
+    /// Draining rather than peeking: the caller applies them in order, and leaving
+    /// them in place would make a command run again on every pass.
+    ///
+    /// @returns the commands, oldest first.
+    #[must_use]
+    pub fn take_window_commands(&mut self) -> Vec<WindowCommand> {
+        std::mem::take(&mut self.commands)
     }
 
     /// Fold the host's configuration into the stored view.
@@ -640,19 +725,67 @@ mod tests {
     }
 
     #[test]
+    fn the_host_can_ask_for_the_window_to_change() {
+        // The missing direction: the peer reports where its window is, this is the
+        // host asking for it to move. Accepting both spellings matters because the
+        // host's router validates `{visible}` while a command object is the more
+        // natural thing for a host surface to send.
+        assert_eq!(WindowCommand::parse(Some(&json!({"visible": true}))), Some(WindowCommand::Show));
+        assert_eq!(WindowCommand::parse(Some(&json!({"visible": false}))), Some(WindowCommand::Hide));
+        assert_eq!(WindowCommand::parse(Some(&json!("show"))), Some(WindowCommand::Show));
+        assert_eq!(WindowCommand::parse(Some(&json!("toggle"))), Some(WindowCommand::Toggle));
+    }
+
+    #[test]
+    fn an_unrecognised_window_payload_is_ignored_rather_than_fatal() {
+        // A future host may extend this payload; an older peer must keep running
+        // rather than drop the channel over a field it does not know.
+        assert_eq!(WindowCommand::parse(Some(&json!({"opacity": 0.5}))), None);
+        assert_eq!(WindowCommand::parse(None), None);
+    }
+
+    #[test]
+    fn window_commands_are_queued_and_drained_in_order() {
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        let mut source = ScriptedSource::new(vec![
+            notification("window/visibility", json!({"visible": true})),
+            notification("window/visibility", json!({"visible": false})),
+            notification("window/visibility", json!({"visible": true})),
+        ]);
+        session.run(&mut source, &mut sink);
+        assert_eq!(
+            session.take_window_commands(),
+            vec![WindowCommand::Show, WindowCommand::Hide, WindowCommand::Show],
+        );
+        assert!(session.take_window_commands().is_empty(), "draining leaves nothing behind");
+    }
+
+    #[test]
     fn panel_visibility_is_reported_as_a_notification() {
         // A notification, not a request: the host handles it in its notification
         // path and the peer has nothing to wait for. It must also be sent when the
         // panel is hidden, since "hidden" is a fact the host routes on.
         let mut session = Session::new(identity());
         let mut sink = RecordingSink::default();
-        session.report_visibility(false, &mut sink);
-        session.report_visibility(true, &mut sink);
+        session.report_visibility(false, &["window", "hotkey"], &mut sink);
+        session.report_visibility(true, &["window", "hotkey"], &mut sink);
         assert_eq!(sink.frames.len(), 2);
         assert_eq!(sink.frames[0]["method"], "window/visibility");
         assert_eq!(sink.frames[0]["params"]["visible"], false);
         assert!(sink.frames[0].get("id").is_none(), "a notification carries no id");
         assert_eq!(sink.frames[1]["params"]["visible"], true);
+    }
+
+    #[test]
+    fn the_report_carries_what_the_process_can_actually_do() {
+        // `hello` is written before a window exists, so a capability there is a
+        // claim. This is the measurement, and it rides along with a notification the
+        // host already parses — one field it ignores, no new method.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        session.report_visibility(false, &["window", "hotkey"], &mut sink);
+        assert_eq!(sink.frames[0]["params"]["capabilities"], json!(["window", "hotkey"]));
     }
 
     #[test]

@@ -53,13 +53,18 @@ pub mod error_code {
     pub const PROTOCOL_VIOLATION: i64 = -32006;
 }
 
-/// Capabilities this subproject reports to the host in `hello`.
+/// Capabilities this **build** implements, reported once in `hello`.
 ///
-/// The host keeps whatever strings arrive and shows them in diagnostics, so this
-/// list is what a human reads when deciding whether the binary in front of them
-/// is the one they think it is. It is deliberately narrower than the host's own
-/// capability list: those describe what the host can serve, these describe what
-/// this process actually implements.
+/// Read this as a build inventory, not as a promise about this run. `hello` is
+/// written before any window exists, so nothing here can be a measurement: on a
+/// machine with no display server, `window` is listed and no window will ever
+/// appear.
+///
+/// The measured answer travels separately, in the `window/visibility` report
+/// (`capabilities`), which the window layer only sends once eframe has actually
+/// created a viewport. Hosts that need to decide whether a panel can appear must
+/// read that one; this list only says which binary is running, which is what a
+/// human reads in diagnostics to confirm the version in front of them.
 pub const CAPABILITIES: &[&str] = &["window", "hotkey", "egui"];
 
 #[cfg(test)]

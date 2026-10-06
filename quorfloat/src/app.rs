@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
-use crate::session::{FrameSink, Session, SessionExit};
+use crate::session::{FrameSink, Session, SessionExit, WindowCommand};
 use crate::transport::StdinSource;
 use crate::window::{Hotkey, WindowSettings};
 
@@ -230,6 +230,13 @@ pub struct App {
     context: Option<egui::Context>,
     /// Whether the post-startup hide has been issued.
     startup_hidden: bool,
+    /// What this process has established it can do, measured rather than declared.
+    ///
+    /// `hotkey` is known before the handshake (registration is synchronous);
+    /// `window` is added only once eframe has actually created one. A capability
+    /// reported before it is real would have the host promise the user a panel that
+    /// never appears.
+    capabilities: Vec<&'static str>,
 }
 
 impl App {
@@ -248,6 +255,7 @@ impl App {
         settings: WindowSettings,
         wake: Receiver<Wake>,
         outcome: Arc<Mutex<Option<SessionExit>>>,
+        hotkey_active: bool,
     ) -> Self {
         Self {
             session,
@@ -262,7 +270,25 @@ impl App {
             outcome,
             context: None,
             startup_hidden: false,
+            capabilities: measured_capabilities(hotkey_active),
         }
+    }
+
+    /// Record that the window was created, which is the moment `window` stops being
+    /// a claim and becomes a fact.
+    ///
+    /// Called from eframe's app creator, so it runs only after the viewport exists.
+    /// Nothing later can un-create it: a window that is closed ends the process.
+    pub fn note_window_created(&mut self) {
+        if !self.capabilities.contains(&"window") {
+            self.capabilities.push("window");
+        }
+    }
+
+    /// What this process can actually do.
+    #[must_use]
+    pub fn capabilities(&self) -> &[&'static str] {
+        &self.capabilities
     }
 
     /// Record why the session ended.
@@ -330,6 +356,7 @@ impl App {
     pub fn logic(&mut self) {
         self.hide_after_startup();
         self.pump();
+        self.apply_window_commands();
         self.report_visibility();
     }
 
@@ -347,16 +374,52 @@ impl App {
         self.adopt_host_config();
     }
 
-    /// Show or hide the panel.
+    /// Flip the panel's visibility.
     fn toggle(&mut self) {
-        self.visible = !self.visible;
+        self.set_visible(!self.visible);
+    }
+
+    /// Show or hide the panel.
+    ///
+    /// The single place visibility changes, so the global hotkey and a command from
+    /// the host cannot drift apart in what they do — including the focus behaviour,
+    /// which is easy to remember in one path and forget in the other.
+    ///
+    /// @param visible - the state to move to. Setting the state the panel is
+    ///   already in still re-issues the command, which is deliberate: after startup
+    ///   the framework has shown the window against this object's wishes, so
+    ///   re-asserting "hidden" is how that gets corrected.
+    pub fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
         if let Some(ctx) = &self.context {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(self.visible));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(visible));
             // Focusing on show is what makes the panel usable from the keyboard
             // immediately; without it the user has to click into a window that
             // already has their attention.
-            if self.visible {
+            if visible {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+        }
+    }
+
+    /// Apply every window command the host has sent.
+    ///
+    /// Drained through the session, so the command path is the same whether the
+    /// request came from the host or from the hotkey. Applying in order matters:
+    /// a show followed by a hide in the same batch must end hidden.
+    pub fn apply_window_commands(&mut self) {
+        let commands = {
+            let mut session = match self.session.lock() {
+                Ok(session) => session,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            session.take_window_commands()
+        };
+        for command in commands {
+            match command {
+                WindowCommand::Show => self.set_visible(true),
+                WindowCommand::Hide => self.set_visible(false),
+                WindowCommand::Toggle => self.toggle(),
             }
         }
     }
@@ -377,7 +440,8 @@ impl App {
             Ok(session) => session,
             Err(poisoned) => poisoned.into_inner(),
         };
-        session.report_visibility(visible, &mut BorrowedSink(&self.sink));
+        let capabilities = self.capabilities.clone();
+        session.report_visibility(visible, &capabilities, &mut BorrowedSink(&self.sink));
     }
 
     /// Pick up the window settings the host has published.
@@ -446,6 +510,23 @@ impl App {
     }
 }
 
+/// The capabilities known before any window exists.
+///
+/// A free function rather than a method because it is the input to construction:
+/// the hotkey is registered before the app is built, and its outcome is a fact by
+/// then. `window` is deliberately absent — see [`App::note_window_created`].
+///
+/// @param hotkey_active - whether the global hotkey registered.
+/// @returns the capability names established so far.
+#[must_use]
+fn measured_capabilities(hotkey_active: bool) -> Vec<&'static str> {
+    let mut capabilities = vec!["egui"];
+    if hotkey_active {
+        capabilities.push("hotkey");
+    }
+    capabilities
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,7 +582,7 @@ mod tests {
         let (tx, rx) = channel();
         let hotkey = Hotkey::Unavailable { reason: "test".to_owned(), spec: "Alt+Space".to_owned() };
         let outcome = Arc::new(Mutex::new(None));
-        let app = App::new(session, sink, hotkey, WindowSettings::default(), rx, outcome);
+        let app = App::new(session, sink, hotkey, WindowSettings::default(), rx, outcome, false);
         (app, recorded, tx)
     }
 
@@ -557,6 +638,87 @@ mod tests {
         app.logic();
         assert!(app.startup_hidden);
         assert!(!app.is_visible());
+    }
+
+    #[test]
+    fn a_host_command_shows_and_hides_the_panel() {
+        // The direction that was missing: without it the panel can only be summoned
+        // by the global hotkey, so a host-side action (opening a pending approval)
+        // has no way to bring it into view.
+        let (mut app, recorded, _tx) = app();
+        app.report_visibility();
+        {
+            let mut session = app.session.lock().expect("not poisoned");
+            let mut sink = RecordingSink(Recorded::default());
+            session.on_frame(
+                Inbound::Notification {
+                    method: "window/visibility".to_owned(),
+                    params: Some(serde_json::json!({"visible": true})),
+                },
+                &mut sink,
+            );
+        }
+        app.apply_window_commands();
+        assert!(app.is_visible());
+        app.report_visibility();
+        let frames = recorded.frames();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[1]["params"]["visible"], true);
+    }
+
+    #[test]
+    fn a_host_command_and_the_hotkey_take_the_same_path() {
+        // Both funnel through `set_visible`, so the focus behaviour cannot be
+        // present in one path and forgotten in the other.
+        let (mut app, _recorded, _tx) = app();
+        app.set_visible(true);
+        assert!(app.is_visible());
+        app.pump();
+        assert!(app.is_visible(), "a pump does not undo a host command");
+    }
+
+    #[test]
+    fn commands_are_applied_in_order() {
+        // A show followed by a hide in one batch must end hidden; collapsing the
+        // batch to "the last command" would also pass this, but applying in order is
+        // what makes a toggle in the middle mean what it says.
+        let (mut app, _recorded, _tx) = app();
+        {
+            let mut session = app.session.lock().expect("not poisoned");
+            let mut sink = RecordingSink(Recorded::default());
+            for visible in [true, false] {
+                session.on_frame(
+                    Inbound::Notification {
+                        method: "window/visibility".to_owned(),
+                        params: Some(serde_json::json!({"visible": visible})),
+                    },
+                    &mut sink,
+                );
+            }
+        }
+        app.apply_window_commands();
+        assert!(!app.is_visible(), "the last command wins");
+    }
+
+    #[test]
+    fn capabilities_are_measured_not_declared() {
+        // The failure this prevents: `hello` claims `window` because this build
+        // links a GUI toolkit, on a machine where no window can ever appear. The
+        // host would then offer the user a panel that never shows up.
+        let (mut app, recorded, _tx) = app();
+        assert_eq!(app.capabilities(), ["egui"], "nothing is claimed before it is known");
+        app.note_window_created();
+        assert!(app.capabilities().contains(&"window"));
+        app.report_visibility();
+        assert_eq!(recorded.frames()[0]["params"]["capabilities"], serde_json::json!(["egui", "window"]));
+    }
+
+    #[test]
+    fn a_registered_hotkey_is_reported_and_a_failed_one_is_not() {
+        // A taken accelerator is a normal outcome; reporting it as working would
+        // leave the user pressing a key that does nothing.
+        assert_eq!(measured_capabilities(false), ["egui"]);
+        assert_eq!(measured_capabilities(true), ["egui", "hotkey"]);
     }
 
     #[test]

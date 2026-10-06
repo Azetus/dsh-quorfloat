@@ -51,6 +51,7 @@ fn run() -> Result<SessionExit, String> {
     // and must be known before `hello` reports it, so the host shows the real state
     // rather than a key that silently does nothing.
     let hotkey = Hotkey::register(&configured_hotkey());
+    let hotkey_active = hotkey.is_active();
 
     let marker = Marker::from_env();
     marker.write("start");
@@ -128,7 +129,20 @@ fn run() -> Result<SessionExit, String> {
             if let Ok(mut slot) = app_slot.lock() {
                 *slot = Some(cc.egui_ctx.clone());
             }
-            let app = App::new(app_session, app_sink, hotkey, settings, wake_rx, app_outcome);
+            let mut app = App::new(
+                app_session,
+                app_sink,
+                hotkey,
+                settings,
+                wake_rx,
+                app_outcome,
+                hotkey_active,
+            );
+            // Reaching this point *is* the measurement: eframe calls the creator
+            // only after the viewport exists, so `window` stops being a claim here.
+            // If creation fails, `run_native` returns an error and this is never
+            // reached — the host hears nothing rather than hearing a promise.
+            app.note_window_created();
             Ok(Box::new(EguiApp { inner: app, context: cc.egui_ctx.clone() }))
         }),
     )
@@ -261,7 +275,11 @@ impl Marker {
         let Some(path) = &self.path else { return };
         use std::io::Write as _;
         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "{line}");
+            // Timestamped because this file is the only record of what this process
+            // did, and "was it restarted, or did it never start?" is the first
+            // question asked of it. A sequence of timestamps answers it immediately;
+            // a bare `start` line does not.
+            let _ = writeln!(file, "[{}] {line}", dsh_quorfloat::rpc::now_millis());
         }
     }
 }
