@@ -109,6 +109,14 @@ pub enum Action {
 pub(crate) struct PanelLayout {
     /// How tall the panel would like to be, in logical pixels.
     pub desired_height: f32,
+    /// Everything above the conversation: the top bar and the composer.
+    pub chrome_above: f32,
+    /// The conversation's own padding, top and bottom.
+    pub thread_padding: f32,
+    /// How tall the conversation's content turned out to be.
+    pub thread_content: f32,
+    /// The footer's predicted height.
+    pub footer: f32,
 }
 
 /// Draw the panel.
@@ -180,6 +188,10 @@ pub(crate) fn draw(
                     PanelLayout {
                         desired_height: (chrome_above + thread_padding + content + footer)
                             .clamp(MIN_PANEL_HEIGHT, state.max_height),
+                        chrome_above,
+                        thread_padding,
+                        thread_content: content,
+                        footer,
                     }
                 })
                 .inner

@@ -30,7 +30,13 @@ pub(super) fn conversation(ui: &mut egui::Ui, state: &PanelState, height: f32) -
     // thing to lose.
     let height = height.max(CONVERSATION_MIN_HEIGHT.min(height.max(0.0))).max(0.0);
     let output = egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
+        // Shrink to the content vertically, fill horizontally. This is what keeps the drawn
+        // panel the same height as the height the window was asked for: with
+        // `auto_shrink([false, false])` the area *fills* whatever it is offered, so a short
+        // conversation drew 57px of empty space where the layout had counted 17 — and the
+        // panel came out 40px taller than its window, with the footer clipped off the bottom
+        // (see `docs/prototype.md` §30).
+        .auto_shrink([false, true])
         .stick_to_bottom(true)
         .max_height(height)
         .show(ui, |ui| {

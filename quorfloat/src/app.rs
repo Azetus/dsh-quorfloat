@@ -76,6 +76,8 @@ pub struct App {
     pinned: crate::app::pinned::Pinned,
     /// Where the pin is remembered, or nowhere when there is no home to write to.
     pinned_path: Option<std::path::PathBuf>,
+    /// The last layout line written, so the record changes only when the numbers do.
+    last_layout: Option<String>,
     /// Whether the workspace list has been asked for in this run.
     workspaces_asked: bool,
     /// Whether the panel has held focus at least once since it was shown.
@@ -154,6 +156,7 @@ impl App {
             theme_seen: false,
             focused_once: false,
             workspaces_asked: false,
+            last_layout: None,
             pinned: crate::app::pinned::Pinned::load(
                 crate::app::pinned::path_from_env().as_deref().unwrap_or(std::path::Path::new("")),
             ),
@@ -815,7 +818,7 @@ impl App {
     /// @param ui - the root area, with no margin or background of its own.
     pub fn draw(&mut self, ui: &mut egui::Ui) {
         let layout = self.draw_panel(ui);
-        self.follow_content_height(ui.ctx(), layout.desired_height);
+        self.follow_content_height(ui.ctx(), layout);
     }
 
     /// Give the window the height the content asked for, one animation step at a time.
@@ -827,7 +830,9 @@ impl App {
     ///
     /// @param ctx - the context to send the resize through.
     /// @param desired - the panel height the drawing layer measured.
-    fn follow_content_height(&mut self, ctx: &egui::Context, desired: f32) {
+    fn follow_content_height(&mut self, ctx: &egui::Context, layout: crate::ui::PanelLayout) {
+        self.record_layout(ctx, layout);
+        let desired = layout.desired_height;
         let outer = desired
             + f32::from(crate::ui::theme::SHADOW_ROOM_TOP)
             + f32::from(crate::ui::theme::SHADOW_ROOM_BOTTOM);
@@ -845,6 +850,31 @@ impl App {
         }
         let width = self.settings.width + f32::from(crate::ui::theme::SHADOW_ROOM_SIDE) * 2.0;
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(width, animated)));
+    }
+
+    /// Put the panel's own arithmetic on the record, when it changes.
+    ///
+    /// "The panel is cut off at the bottom" is a question about four numbers, and a screenshot
+    /// can only show the answer: this says which of them is wrong.
+    ///
+    /// @param ctx - the context, for the window's actual size.
+    /// @param layout - what the drawing layer measured.
+    fn record_layout(&mut self, ctx: &egui::Context, layout: crate::ui::PanelLayout) {
+        let size = ctx.input(|input| input.viewport().inner_rect.map(|rect| rect.size()));
+        let rounded = |value: f32| (value * 10.0).round() / 10.0;
+        let line = format!(
+            "layout chrome={} thread_pad={} content={} footer={} panel={} window={}",
+            rounded(layout.chrome_above),
+            rounded(layout.thread_padding),
+            rounded(layout.thread_content),
+            rounded(layout.footer),
+            rounded(layout.desired_height),
+            size.map_or_else(|| "?".to_owned(), |size| format!("{}x{}", rounded(size.x), rounded(size.y))),
+        );
+        if self.last_layout.as_deref() != Some(line.as_str()) {
+            self.last_layout = Some(line.clone());
+            self.sink.mark(&line);
+        }
     }
 
     /// Draw the panel itself, and report what it measured.
@@ -1262,6 +1292,9 @@ mod tests {
         // the conversation can only have what is left. This test is what keeps that true if
         // someone later moves the composer back under the thread.
         let (mut app, recorded, session, _wake) = app_and_session();
+        // Attached, so the composer is in its normal state: its placeholder changes when there
+        // is no conversation, and this test is about the layout rather than about that.
+        attach_one(&mut app, &recorded, &session);
         deliver(&session, &recorded, conversation_frame());
 
         let size = egui::vec2(420.0, 300.0);
@@ -1386,6 +1419,193 @@ mod tests {
     /// The bug this test was written for: the bar's drag handle covered the whole bar, so a
     /// press on a picker was swallowed by the handle and the menu never opened. A handle is a
     /// control too, and controls must not sit on top of each other.
+    /// The whole way in: click the box, type, press Enter, and a prompt goes out.
+    ///
+    /// Written because "my input will not send" is a claim about a chain — the click reaching
+    /// the editor, the editor taking focus, Enter not being taken as a newline, the send
+    /// button's rule, and the session accepting the prompt — and every one of those links has
+    /// its own test except the first two. This is the one that says the chain holds.
+    #[test]
+    fn typing_and_pressing_enter_sends_a_prompt() {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        // A conversation to send to, attached the way the host attaches one. Without one the
+        // panel refuses *with a reason*, which is the failure this test exists to tell apart
+        // from a broken input path.
+        attach_one(&mut app, &recorded, &session);
+        assert_eq!(
+            // The *attached* conversation, not `target_conversation`, which is only the
+            // deliberate target and stays empty while the panel follows the newest one.
+            session.lock().expect("session").follow().session_id(),
+            Some("session-1"),
+            "the panel is attached before anything is typed",
+        );
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let size = egui::vec2(708.0, 620.0);
+        // Inside the composer's editor: past the search mark, below the top bar.
+        let editor = egui::pos2(
+            f32::from(crate::ui::theme::SHADOW_ROOM_SIDE + crate::ui::theme::PAD_COMPOSER.left) + 60.0,
+            f32::from(crate::ui::theme::SHADOW_ROOM_TOP) + 95.0,
+        );
+        let plan: Vec<Vec<egui::Event>> = vec![
+            vec![egui::Event::PointerMoved(editor)],
+            vec![egui::Event::PointerButton {
+                pos: editor,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            vec![egui::Event::PointerButton {
+                pos: editor,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            vec![egui::Event::Text("你好".to_owned())],
+            vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ];
+        for (index, events) in plan.into_iter().enumerate() {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    focused: true,
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            output.textures_delta.clear();
+            let _ = index;
+        }
+
+        let frames = recorded.frames.lock().expect("not poisoned").clone();
+        let sent: Vec<&serde_json::Value> = frames
+            .iter()
+            .filter(|frame| frame["method"] == "session/prompt")
+            .collect();
+        assert_eq!(sent.len(), 1, "one prompt went out: {frames:?}");
+        assert_eq!(sent[0]["params"]["text"], "你好");
+        assert_eq!(app.draft, "", "and the box was cleared");
+    }
+
+    /// With nothing attached, the panel must say so rather than swallow the keystroke.
+    ///
+    /// This is the state that produced the report "my input will not send": a panel with no
+    /// conversation looks ready, and the only thing wrong with it is the one thing it does not
+    /// say. The composer's placeholder and its disabled button carry that now, and the delivery
+    /// reason is on the status line for anyone who pressed the key anyway.
+    #[test]
+    fn with_no_conversation_the_refusal_is_on_the_record_and_on_the_panel() {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let size = egui::vec2(708.0, 620.0);
+        app.draft = "你好".to_owned();
+        let enter = egui::Event::Key {
+            key: egui::Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        };
+        // Focus the editor first: without focus an Enter belongs to something else, and this
+        // test would pass for that reason instead of the one it is about.
+        let editor = egui::pos2(
+            f32::from(crate::ui::theme::SHADOW_ROOM_SIDE + crate::ui::theme::PAD_COMPOSER.left) + 60.0,
+            f32::from(crate::ui::theme::SHADOW_ROOM_TOP) + 95.0,
+        );
+        let plan: Vec<Vec<egui::Event>> = vec![
+            vec![egui::Event::PointerMoved(editor)],
+            vec![egui::Event::PointerButton {
+                pos: editor,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            vec![egui::Event::PointerButton {
+                pos: editor,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            vec![enter],
+        ];
+        for events in plan {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    focused: true,
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            output.textures_delta.clear();
+        }
+
+        // Nothing was sent…
+        assert!(
+            !recorded.frames.lock().expect("frames").iter().any(|frame| frame["method"] == "session/prompt"),
+            "no prompt can leave without a conversation",
+        );
+        // …the text is still there for the user to send once there is one…
+        assert_eq!(app.draft, "你好");
+        // …and the panel knows why, which is what its status line shows.
+        let reason = session.lock().expect("session").prompt_delivery().describe();
+        assert!(
+            reason.as_deref().is_some_and(|reason| reason.contains("会话")),
+            "the refusal names its reason: {reason:?}",
+        );
+    }
+
+    /// The invariant behind "the panel looks cut off at the bottom".
+    ///
+    /// The window is sized from one number — what the drawing layer says the content wants —
+    /// so nothing may be drawn below it. The first version of the dynamic height broke this in
+    /// the compact case: the conversation area *filled* the space it was offered while the
+    /// height it reported was the height of its content, and the footer ended up 40 pixels
+    /// past the bottom of the panel's own window.
+    #[test]
+    fn nothing_is_drawn_below_the_height_the_panel_asked_its_window_for() {
+        let (mut app, _recorded, _session, _wake) = app_and_session();
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let size = egui::vec2(708.0, 620.0);
+        let mut lowest = f32::MIN;
+        let mut allowed = 0.0;
+        // A few passes: the first measures, the second draws with that answer, and the third
+        // is there so that "it settled" is part of what is asserted.
+        for _ in 0..3 {
+            let mut layout = None;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    focused: true,
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ui| layout = Some(app.draw_panel(ui)),
+            );
+            let layout = layout.expect("the panel was drawn");
+            allowed = f32::from(crate::ui::theme::SHADOW_ROOM_TOP) + layout.desired_height;
+            for clipped in &output.shapes {
+                if let egui::Shape::Text(text) = &clipped.shape {
+                    lowest = lowest.max(text.pos.y + text.galley.size().y);
+                }
+            }
+            output.textures_delta.clear();
+        }
+        assert!(
+            lowest <= allowed + 1.0,
+            "the lowest text is at {lowest}, but the panel asked for {allowed}",
+        );
+    }
+
     #[test]
     fn pressing_a_picker_opens_it_instead_of_dragging_the_window() {
         let (mut app, _recorded, _session, _wake) = app_and_session();
@@ -1521,6 +1741,51 @@ mod tests {
             crate::ui::WindowState::default(),
         );
         (app, recorded, session, tx)
+    }
+
+    /// Take the panel through a handshake and onto one conversation.
+    ///
+    /// @param app - the panel, whose follow loop is pumped the way `logic` pumps it.
+    /// @param recorded - the frames sent so far.
+    /// @param session - the session being driven.
+    fn attach_one(app: &mut App, recorded: &Recorded, session: &Arc<Mutex<Session>>) {
+        // The handshake is written by whoever owns the event loop — in the panel, that is
+        // `main` before the window exists — so the tests do it the way `main` does.
+        {
+            let mut sink = RecordingSink(recorded.clone());
+            session.lock().expect("session").start(&mut sink);
+        }
+        answer(session, recorded, "hello", serde_json::json!({"sessionId": "host-1", "hostVersion": "test"}));
+        app.logic();
+        answer(
+            session,
+            recorded,
+            "sessions/list",
+            serde_json::json!({"items": [{"sessionId": "session-1", "updatedAt": 1, "cwd": "/work/project"}]}),
+        );
+        answer(session, recorded, "session/attach", serde_json::json!({"generation": 1}));
+    }
+
+    /// Answer the last request the panel made for one method, the way the host would.
+    ///
+    /// The id is read off the wire rather than assumed: request ids are the session's, and a
+    /// test that guesses them is a test that stops testing anything the day they change.
+    fn answer(
+        session: &Arc<Mutex<Session>>,
+        recorded: &Recorded,
+        method: &str,
+        result: serde_json::Value,
+    ) {
+        let id = recorded
+            .frames
+            .lock()
+            .expect("frames")
+            .iter()
+            .rev()
+            .find(|frame| frame["method"] == method)
+            .unwrap_or_else(|| panic!("the panel asked for {method}"))["id"]
+            .clone();
+        deliver(session, recorded, Inbound::Response { id, outcome: Ok(result) });
     }
 
     /// Apply one action, the way the frame after a click does.

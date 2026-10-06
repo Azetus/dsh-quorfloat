@@ -569,6 +569,9 @@ const MARKER_PATH = join(DEV_HOME, 'sidecar.log')
 /** Where the sidecar remembers its window position, so dev never writes into $HOME. */
 const WINDOW_STATE_PATH = join(DEV_HOME, 'window.json')
 
+/** And where it remembers pinned conversations and workspaces, for the same reason. */
+const PINNED_PATH = join(DEV_HOME, 'pinned.json')
+
 /** Start dsh, and shut it down cleanly on an interrupt. */
 function start(options, home, sidecar, staged) {
   const args = ['--profile', options.profile, '--port', options.port]
@@ -589,6 +592,10 @@ function start(options, home, sidecar, staged) {
     // Where the panel remembers where the user put it. Pointed at the throwaway home so
     // that developing never edits the real user's remembered position.
     DSH_QUORFLOAT_WINDOW_STATE: WINDOW_STATE_PATH,
+    // Without this the panel's pins would be written to the developer's real
+    // `~/.dsh-quorfloat/`, and a pinned conversation from a throwaway session would follow
+    // them into every later run.
+    DSH_QUORFLOAT_PINNED: PINNED_PATH,
     // A deprecation warning from a dependency pollutes every line otherwise.
     NODE_NO_WARNINGS: '1',
   }
@@ -600,6 +607,7 @@ function start(options, home, sidecar, staged) {
     + `     sidecar=${sidecar ?? '(not built — no panel)'}\n`
     + `     panel log=${sidecar === undefined ? '(no panel)' : MARKER_PATH}\n`
     + `     window state=${sidecar === undefined ? '(no panel)' : WINDOW_STATE_PATH}\n`
+    + `     pins=${sidecar === undefined ? '(no panel)' : PINNED_PATH}\n`
     + `     panel font=${panelFonts(sidecar)}\n`
     + `     bundles=${profileBundles(home, options.profile).join(', ')}\n`
     + `     workspace=${join(DEV_HOME, 'workspace')}\n\n`)

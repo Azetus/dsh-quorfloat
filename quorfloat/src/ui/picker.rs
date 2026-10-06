@@ -134,10 +134,19 @@ pub(super) fn workspaces(ui: &mut egui::Ui, state: &PanelState) -> Outcome {
 /// @param state - everything the panel knows, including the conversation list.
 /// @returns what the user asked for, and where the button is.
 pub(super) fn conversations(ui: &mut egui::Ui, state: &PanelState) -> Outcome {
+    // A title beats an id wherever we have one: the harness names a conversation once it has
+    // something to name it after, and `6e089e47` is what the panel shows when it has nothing
+    // better — see `conversation_name` for why only the attached one has a title at all.
     let current = state
         .attached
         .as_deref()
-        .map(|id| short_id(id).to_owned())
+        .map(|id| {
+            state
+                .title
+                .as_deref()
+                .filter(|title| !title.trim().is_empty())
+                .map_or_else(|| short_id(id).to_owned(), str::to_owned)
+        })
         .unwrap_or_else(|| "新会话".to_owned());
     let button = picker_button(ui, Kind::Conversation, Icon::Chat, &current, state.pinned.is_some());
 
@@ -152,7 +161,11 @@ pub(super) fn conversations(ui: &mut egui::Ui, state: &PanelState) -> Outcome {
             popover_head(ui, "会话", &format!("{} 个", state.conversations.len()));
             if let Some(Row::Chosen) = option_row(ui, Icon::Plus, "新建会话", Some("在固定工作区中创建"), false, false, false)
             {
-                action = Some(Action::CreateConversation { workspace_id: state.pinned_workspace.clone() });
+                // Pinned workspace first, then the one the panel is showing: creating a
+                // conversation where the user is looking is the least surprising answer, and
+                // it means a fresh panel can start without pinning anything.
+                let workspace_id = state.pinned_workspace.clone().or_else(|| state.current_workspace.clone());
+                action = Some(Action::CreateConversation { workspace_id });
                 egui::Popup::close_id(ui.ctx(), Kind::Conversation.id());
             }
             if state.conversations.is_empty() {

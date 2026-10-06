@@ -61,7 +61,9 @@ pub(super) fn composer(
                     // egui's default would paint it `extreme_bg_color` — a near-black
                     // rectangle in the middle of a light panel.
                     .frame(egui::Frame::NONE)
-                    .hint_text("问点什么…"),
+                    // The placeholder is where a user looks when nothing happens, so it says
+                    // the one thing that would stop a send: there is no conversation yet.
+                    .hint_text(if state.attached.is_some() { "问点什么…" } else { "先新建一个会话…" }),
             );
 
             // Enter sends, unless the user is mid-composition, asking for a line break, or
@@ -77,8 +79,13 @@ pub(super) fn composer(
             // swaps its icon rather than showing both, which is also the honest thing: at any
             // moment only one of the two is what the user wants.
             let stop = state.turn_active;
-            let enabled = stop || !draft.trim().is_empty();
-            if submit_button(ui, stop, enabled).clicked() {
+            // Sending needs somewhere to send to. The button says so by being disabled, and a
+            // hover explains why — a button that looks ready and silently refuses is how "my
+            // input will not send" becomes a bug report about the input.
+            let ready = state.attached.is_some();
+            let enabled = stop || (ready && !draft.trim().is_empty());
+            let refusal = (!ready).then_some("还没有会话可以发送：先新建一个会话");
+            if submit_button(ui, stop, enabled, refusal).clicked() {
                 if stop {
                     *action = Some(Action::Cancel);
                 } else if !draft.trim().is_empty() {
@@ -95,7 +102,7 @@ pub(super) fn composer(
 /// @param stop - whether a turn is in flight, which turns the send into a stop.
 /// @param enabled - whether there is anything to do.
 /// @returns the response, so the caller can act on a click.
-fn submit_button(ui: &mut egui::Ui, stop: bool, enabled: bool) -> egui::Response {
+fn submit_button(ui: &mut egui::Ui, stop: bool, enabled: bool, refusal: Option<&str>) -> egui::Response {
     use crate::ui::theme;
 
     let size = egui::vec2(theme::SEND_BUTTON, theme::SEND_BUTTON);
@@ -111,6 +118,8 @@ fn submit_button(ui: &mut egui::Ui, stop: bool, enabled: bool) -> egui::Response
     crate::ui::icons::paint(ui, rect.center(), icon, theme::ICON, foreground);
     if enabled {
         response.on_hover_text(if stop { "停止生成" } else { "发送" })
+    } else if let Some(refusal) = refusal {
+        response.on_hover_text(refusal)
     } else {
         response
     }
