@@ -138,6 +138,7 @@ pub(crate) fn draw(
     state: &PanelState,
     draft: &mut String,
     action: &mut Option<Action>,
+    markdown: &mut egui_commonmark::CommonMarkCache,
 ) -> PanelLayout {
     open_picker_from_env(ui.ctx());
     // The window is transparent so that the panel can have rounded corners and a shadow of
@@ -181,12 +182,23 @@ pub(crate) fn draw(
                     // own padding is part of that arithmetic — forgetting it is how the
                     // first version drew prose against the panel's border.
                     let footer = footer_height(ui);
-                    let thread_padding =
-                        f32::from(theme::PAD_THREAD.top + theme::PAD_THREAD.bottom);
+                    // The rule above the thread is drawn inside this frame too, so its one pixel
+                    // is part of the height being counted.
+                    let thread_padding = f32::from(theme::PAD_THREAD.top + theme::PAD_THREAD.bottom)
+                        + theme::BORDER;
                     let thread = (ui.available_height() - footer - thread_padding).max(0.0);
                     let content = egui::Frame::NONE
                         .inner_margin(theme::PAD_THREAD)
-                        .show(ui, |ui| conversation(ui, state, thread))
+                        .show(ui, |ui| {
+                            // The line the design draws above the thread: it separates the
+                            // conversation from the composer without a heading.
+                            // One hairline, and nothing else: the frame's own inner margin is
+                            // the space above the thread, and adding to it here is how the panel
+                            // came out 20px taller than the height it had counted (§30, and the
+                            // invariant test that caught it again).
+                            rule(ui);
+                            conversation(ui, state, thread, markdown)
+                        })
                         .inner;
                     footer_bar(ui, state);
                     PanelLayout {
@@ -405,6 +417,23 @@ fn footer_height(ui: &egui::Ui) -> f32 {
     theme::TEXT_SMALL + 4.0 + f32::from(theme::PAD_FOOTER.top + theme::PAD_FOOTER.bottom) + ui.spacing().item_spacing.y
 }
 
+/// Which turn the panel is on, in the design's wording.
+fn turn_label(state: &PanelState) -> String {
+    let turns = state
+        .entries
+        .iter()
+        .filter(|entry| matches!(entry, crate::app::session::transcript::Entry::User { .. }))
+        .count();
+    format!("第 {turns} 轮")
+}
+
+/// A hairline across the panel, the design's separator between sections.
+fn rule(ui: &mut egui::Ui) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, theme::BORDER), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0, theme::line());
+}
+
 /// One keyboard hint: a chip with the key on it, and what it does.
 ///
 /// @param ui - where to draw.
@@ -446,6 +475,16 @@ fn footer_bar(ui: &mut egui::Ui, state: &PanelState) {
     let frame = egui::Frame::NONE.inner_margin(theme::PAD_FOOTER);
     frame.show(ui, |ui| {
         ui.horizontal(|ui| {
+            // While a turn is being worked on the hints give way to what is happening: the design does
+            // the same (its `shortcuts()` is restored when the turn ends), and a key hint is worth
+            // less than knowing whether the model is still going.
+            if state.turn_active {
+                ui.label(theme::meta(
+                    ui.ctx(),
+                    &format!("{} · 正在生成", turn_label(state)),
+                ));
+                return;
+            }
             ui.spacing_mut().item_spacing.x = theme::GAP_TIGHT;
             // The keys are drawn as chips, which is how the design shows them: a key is a thing
             // you press, and a bordered box says so at a glance. `KEY_RETURN` and a fat up arrow

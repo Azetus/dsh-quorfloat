@@ -104,6 +104,11 @@ pub struct App {
     /// Owned here rather than by the window layer: the window reports where it is, and the
     /// decision to write a file is application state, not drawing.
     window_state: crate::ui::WindowState,
+    /// The Markdown viewer's parse cache, kept across frames.
+    ///
+    /// It cannot live in `PanelState`: that is rebuilt from the session on every frame, so the
+    /// cache would be thrown away exactly as often as it is used.
+    markdown: egui_commonmark::CommonMarkCache,
     /// What the user has typed but not sent.
     ///
     /// Owned here rather than by the widget, because a widget forgets: this has to survive
@@ -167,6 +172,7 @@ impl App {
                 .filter(|path| !path.as_os_str().is_empty()),
             screenshot_asked: false,
             screenshot_written: false,
+            markdown: egui_commonmark::CommonMarkCache::default(),
             draft: String::new(),
             fonts_warning: None,
             fonts_checked: false,
@@ -935,7 +941,7 @@ impl App {
         }
         let state = self.state();
         let mut action: Option<crate::ui::Action> = None;
-        let layout = crate::ui::draw(ui, &state, &mut self.draft, &mut action);
+        let layout = crate::ui::draw(ui, &state, &mut self.draft, &mut action, &mut self.markdown);
         if let Some(action) = action {
             self.apply_card_action(action);
         }
@@ -1160,7 +1166,8 @@ mod tests {
                     {"type": "event", "event": {"type": "assistant/message", "seq": 1, "time": 2,
                      "data": {"message": {"role": "assistant",
                         "content": [{"type": "reasoning", "text": "想一下"},
-                                    {"type": "text", "text": "看到了"}]}}}},
+                                    {"type": "text",
+                                     "text": "看到了，**重点**是这一行：\n\n```rust\nlet name = String::from(\"Quorvox\");\n```\n"}]}}}},
                 ],
             })),
         }
@@ -1605,6 +1612,48 @@ mod tests {
     /// the compact case: the conversation area *filled* the space it was offered while the
     /// height it reported was the height of its content, and the footer ended up 40 pixels
     /// past the bottom of the panel's own window.
+    /// The three pieces of the design's thread: the question line, the separator between
+    /// turns, and the answer bar with its copy control.
+    #[test]
+    fn a_turn_is_a_question_a_separator_and_an_answer_bar() {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        deliver(&session, &recorded, conversation_frame());
+        let size = egui::vec2(708.0, 620.0);
+
+        let shown = drawn_text(&mut app, size);
+        let all: String = shown.iter().map(|(text, _)| text.as_str()).collect::<Vec<_>>().join("\n");
+        assert!(all.contains("你 · 帮我看看"), "the question is a signpost: {all}");
+        assert!(all.contains("回答完成"), "and the answer says whether it is finished: {all}");
+        assert!(all.contains("复制回答"), "with a copy control beside it: {all}");
+        assert!(!all.contains("正在生成"), "which is not offered while nothing is running: {all}");
+    }
+
+    /// A finished answer is rendered as Markdown.
+    ///
+    /// The markers are what tell the two renderings apart: a plain-text draw shows `**粗体**`
+    /// as written, and a Markdown draw shows the words without them.
+    #[test]
+    fn a_finished_answer_is_rendered_as_markdown() {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        deliver(&session, &recorded, conversation_frame());
+        let size = egui::vec2(708.0, 620.0);
+
+        let shown = drawn_text(&mut app, size);
+        let all: String = shown.iter().map(|(text, _)| text.as_str()).collect::<Vec<_>>().join("\n");
+        assert!(all.contains("看到了"), "the answer is on screen: {all}");
+        assert!(all.contains("重点"), "and its emphasis is rendered as text: {all}");
+        assert!(
+            !all.contains("**"),
+            "and its Markdown markers are not, because they were rendered: {all}",
+        );
+        assert!(
+            all.contains("let name"),
+            "including the code block's contents: {all}",
+        );
+    }
+
     /// Reasoning is folded away by default, and one click opens it.
     ///
     /// The request came from using the panel: a chain of thought on screen for every answer

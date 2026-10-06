@@ -407,7 +407,45 @@ pub fn family(weight: Weight, weighted: bool) -> egui::FontFamily {
 }
 
 /// A heading, for the session title and card titles.
+/// The egui style the Markdown viewer draws with.
+///
+/// The viewer takes its sizes and colours from `ui.style()`, so a rendered answer would
+/// otherwise arrive in egui's defaults — a different type scale, a different link colour, a
+/// different code background — and the same answer would look like two different things
+/// depending on whether it happened to contain Markdown.
+///
+/// @param base - the style in force, whose non-text choices are kept.
+/// @returns a style whose text matches the panel's own.
 #[must_use]
+pub fn markdown_style(base: &egui::Style) -> egui::Style {
+    let mut style = base.clone();
+    style.visuals.override_text_color = Some(text());
+    // Code draws on `extreme_bg_color`; without it, inline code is indistinguishable from the
+    // words around it.
+    style.visuals.extreme_bg_color = soft();
+    style.visuals.hyperlink_color = accent();
+    style.spacing.item_spacing = egui::vec2(0.0, 6.0);
+    let body = egui::FontId::new(TEXT_BODY, egui::FontFamily::Proportional);
+    let heading = egui::FontId::new(TEXT_HEADING, egui::FontFamily::Proportional);
+    let small = egui::FontId::new(TEXT_META, egui::FontFamily::Proportional);
+    style.text_styles = [
+        (egui::TextStyle::Body, body.clone()),
+        (egui::TextStyle::Monospace, egui::FontId::new(TEXT_BODY, egui::FontFamily::Monospace)),
+        (egui::TextStyle::Button, body.clone()),
+        (egui::TextStyle::Small, small.clone()),
+        // A heading inside an answer is a subheading of the answer, not of the panel: none of
+        // them may out-shout the composer, which is the largest text here by design.
+        (egui::TextStyle::Heading, heading.clone()),
+        (egui::TextStyle::Name("Heading2".into()), heading),
+        (egui::TextStyle::Name("Heading3".into()), body),
+        (egui::TextStyle::Name("Heading4".into()), small.clone()),
+        (egui::TextStyle::Name("Heading5".into()), small.clone()),
+        (egui::TextStyle::Name("Heading6".into()), small),
+    ]
+    .into();
+    style
+}
+
 pub fn heading(ctx: &egui::Context, text_value: impl Into<String>) -> egui::RichText {
     egui::RichText::new(text_value).font(font(ctx, Weight::SemiBold, TEXT_HEADING)).color(text())
 }
@@ -446,6 +484,15 @@ pub const RADIUS_SMALL_BUTTON: u8 = 5;
 
 /// The keyboard hints in the footer (`--q-footer kbd`, `border-radius:4px`).
 pub const RADIUS_KBD: u8 = 4;
+
+/// Space above a turn's separator, and below it — the design's `.q-turn + .q-turn`.
+pub const TURN_GAP_ABOVE: f32 = 20.0;
+/// @see TURN_GAP_ABOVE
+pub const TURN_GAP_BELOW: f32 = 18.0;
+/// Between a question and the answer it belongs to (`.q-question` margin-bottom).
+pub const QUESTION_GAP: f32 = 14.0;
+/// Between an answer and its bar (`.q-answerbar` margin-top).
+pub const ANSWER_BAR_GAP: f32 = 16.0;
 
 /// The window's border: `1px solid var(--q-line)`.
 pub const BORDER: f32 = 1.0;

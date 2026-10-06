@@ -7,7 +7,7 @@ use crate::ui::theme as theme;
 use crate::ui::theme::CONVERSATION_MIN_HEIGHT;
 
 use super::{icons, wrapped};
-use crate::app::session::transcript::Block;
+use crate::app::session::transcript::{Block, Entry};
 
 /// Draw the conversation.
 ///
@@ -25,7 +25,12 @@ use crate::app::session::transcript::Block;
 /// @returns how tall the conversation's content is, which is what the window's height is
 ///   grown from. The height handed in is the space it may *use*; this is the space it
 ///   *wants*, and the two differ exactly when the conversation is short.
-pub(super) fn conversation(ui: &mut egui::Ui, state: &PanelState, height: f32) -> f32 {
+pub(super) fn conversation(
+    ui: &mut egui::Ui,
+    state: &PanelState,
+    height: f32,
+    markdown: &mut egui_commonmark::CommonMarkCache,
+) -> f32 {
     // The floor is a floor for a *window*, not a claim on space that is not there: past it
     // the conversation is clipped at the bottom — above the composer, which is the right
     // thing to lose.
@@ -45,14 +50,113 @@ pub(super) fn conversation(ui: &mut egui::Ui, state: &PanelState, height: f32) -
                 ui.label(theme::meta(ui.ctx(), "尚无对话内容"));
                 return;
             }
+            // Turns are drawn as turns: the design separates them with a hairline, 20px above
+            // and 18px below, which is what makes a long conversation scannable — the eye finds
+            // the questions without reading the answers (`.q-turn + .q-turn`).
+            let mut first_turn = true;
             for entry in state.entries.iter() {
-                entry_ui(ui, entry);
+                if matches!(entry, Entry::User { .. }) {
+                    if !first_turn {
+                        ui.add_space(theme::TURN_GAP_ABOVE);
+                        separator(ui);
+                        ui.add_space(theme::TURN_GAP_BELOW);
+                    }
+                    first_turn = false;
+                }
+                entry_ui(ui, entry, markdown);
             }
             if let Some(live) = &state.live {
-                entry_ui(ui, live);
+                entry_ui(ui, live, markdown);
             }
         });
     output.content_size.y
+}
+
+/// The line under an answer: what happened to it, and the copy control.
+///
+/// @param ui - where to draw.
+/// @param blocks - the answer's blocks, whose text is what a copy takes.
+/// @param streaming - whether the answer is still arriving.
+/// @param markdown - the viewer's cache, unused here but kept for symmetry with the caller.
+fn answer_bar(
+    ui: &mut egui::Ui,
+    blocks: &[Block],
+    streaming: bool,
+    _markdown: &mut egui_commonmark::CommonMarkCache,
+) {
+    ui.add_space(theme::ANSWER_BAR_GAP);
+    ui.horizontal(|ui| {
+        // The status is what tells a finished answer from a stalled one, and the design words it
+        // as a fact rather than a spinner.
+        let status = if streaming { "正在生成" } else { "回答完成" };
+        ui.label(theme::meta(ui.ctx(), status));
+        // Nothing to copy while there is nothing to copy: the design hides the button rather
+        // than offering a control that would put an empty string on the clipboard.
+        let source = answer_source(blocks);
+        if source.is_empty() {
+            return;
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let id = copy_id(&source);
+            let copied = ui.memory(|memory| memory.data.get_temp::<bool>(id).unwrap_or(false));
+            let label = if copied { "已复制" } else { "复制回答" };
+            let button = ui.add(
+                egui::Button::new(
+                    egui::RichText::new(label).font(theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_META)).color(theme::muted()),
+                )
+                .frame(false)
+                .min_size(egui::vec2(0.0, 0.0)),
+            );
+            if button.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if button.clicked() {
+                // The *source*, not the rendered text: what a user pastes into an editor should
+                // be the Markdown the model wrote, not the words as this panel happens to lay
+                // them out. (The mockup copies rendered text because its answers are plain.)
+                ui.ctx().copy_text(source.clone());
+                ui.memory_mut(|memory| memory.data.insert_temp(id, true));
+            }
+        });
+    });
+}
+
+/// The text a copy of one answer takes: its prose, with the Markdown intact.
+///
+/// @param blocks - the answer's blocks.
+/// @returns the source text, or an empty string when the answer has no prose yet.
+#[must_use]
+pub(super) fn answer_source(blocks: &[Block]) -> String {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Text(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// The identity a "copied" state is remembered under.
+///
+/// @param source - the answer's text.
+/// @returns the egui id for its state.
+#[must_use]
+pub(super) fn copy_id(source: &str) -> egui::Id {
+    reasoning_id(source)
+}
+
+/// The who-said-it line, for the entries the design has no shape for.
+fn speaker_line(ui: &mut egui::Ui, entry: &crate::app::session::transcript::Entry) {
+    ui.label(egui::RichText::new(speaker(entry)).size(theme::TEXT_META).color(theme::muted()));
+    ui.add_space(2.0);
+}
+
+/// A hairline across the thread, the design's separator between turns.
+fn separator(ui: &mut egui::Ui) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, theme::BORDER), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 0, theme::line());
 }
 
 /// The reasoning blocks of one assistant message, joined.
@@ -117,15 +221,26 @@ fn answer(ctx: &egui::Context, text: &str) -> egui::RichText {
 ///
 /// @param ui - where to draw.
 /// @param entry - the line.
-pub(super) fn entry_ui(ui: &mut egui::Ui, entry: &crate::app::session::transcript::Entry) {
+pub(super) fn entry_ui(
+    ui: &mut egui::Ui,
+    entry: &crate::app::session::transcript::Entry,
+    markdown: &mut egui_commonmark::CommonMarkCache,
+) {
     use crate::app::session::transcript::{Block, Entry};
 
     ui.add_space(6.0);
-    ui.label(egui::RichText::new(speaker(entry)).size(theme::TEXT_META).color(theme::muted()));
-    ui.add_space(2.0);
     match entry {
+        // The design's own shape for a turn: the question is one muted line, prefixed with who
+        // asked it — `你 · …` — and the answer is not introduced at all. A label above every
+        // answer is a heading nobody reads, and the answer bar below already says what it is.
         Entry::User { text } => {
-            wrapped(ui, answer(ui.ctx(), text));
+            wrapped(
+                ui,
+                egui::RichText::new(format!("你 · {text}"))
+                    .font(theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_META))
+                    .color(theme::muted()),
+            );
+            ui.add_space(theme::QUESTION_GAP);
         }
         Entry::Assistant { blocks, streaming } => {
             // The model's working-out, folded away. It is kept rather than dropped — it is what
@@ -171,7 +286,21 @@ pub(super) fn entry_ui(ui: &mut egui::Ui, entry: &crate::app::session::transcrip
             }
             for block in blocks {
                 match block {
-                    Block::Text(text) => wrapped(ui, answer(ui.ctx(), text)),
+                    // Markdown, once the answer has stopped growing. While it streams the text
+                    // is drawn as it is: half a fence or an unclosed `**` renders as literal
+                    // punctuation for a moment and then reflows, and watching an answer
+                    // rearrange itself is worse than watching it arrive plainly.
+                    Block::Text(text) => {
+                        if *streaming {
+                            wrapped(ui, answer(ui.ctx(), text));
+                        } else {
+                            ui.scope(|ui| {
+                                let style = theme::markdown_style(ui.style());
+                                ui.style_mut().clone_from(&style);
+                                egui_commonmark::CommonMarkViewer::new().show(ui, markdown, text);
+                            });
+                        }
+                    }
                     // Drawn above, folded; never twice.
                     Block::Reasoning(_) => {}
                     Block::Call { name, arguments } => {
@@ -180,16 +309,27 @@ pub(super) fn entry_ui(ui: &mut egui::Ui, entry: &crate::app::session::transcrip
                 }
                 ui.add_space(2.0);
             }
-            if *streaming {
-                ui.label(egui::RichText::new("生成中…").size(theme::TEXT_SMALL).color(theme::muted()));
-            }
+            // The bar replaces the bare "生成中…" this used to be: the design puts the turn's
+            // status and the copy control on one line under the answer, and the status is what
+            // says whether the answer is finished (`.q-answerbar`).
+            answer_bar(ui, blocks, *streaming, markdown);
         }
         Entry::Tool { text, is_error, .. } => {
+            speaker_line(ui, entry);
             let colour = if *is_error { theme::bad_text() } else { theme::muted() };
             wrapped(ui, egui::RichText::new(text).size(theme::TEXT_META).color(colour).monospace());
         }
-        Entry::System { text } => wrapped(ui, theme::meta(ui.ctx(), text)),
-        Entry::Notice { text, .. } => wrapped(ui, theme::meta(ui.ctx(), text)),
+        // The panel's own additions, and the only entries that keep a who-said-it line: the
+        // design has no shape for a tool result or an unrecognised event, so they introduce
+        // themselves.
+        Entry::System { text } => {
+            speaker_line(ui, entry);
+            wrapped(ui, theme::meta(ui.ctx(), text));
+        }
+        Entry::Notice { text, .. } => {
+            speaker_line(ui, entry);
+            wrapped(ui, theme::meta(ui.ctx(), text));
+        }
     }
 }
 
