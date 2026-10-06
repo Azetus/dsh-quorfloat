@@ -24,6 +24,53 @@ use crate::app::session::interaction::{
     ApprovalVerdict, Handoff, Interaction, InteractionKind, InteractionState, MAX_INTERACTIONS,
 };
 use crate::app::session::transcript::Transcript;
+
+/// Which outbound request a response settles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sending {
+    /// A `session/prompt`.
+    Prompt,
+    /// A `session/cancel`.
+    Cancel,
+}
+
+/// What became of an outbound request.
+///
+/// `Accepted` is the host's own word: it means the request was taken, not that the turn
+/// is over. The composer shows it for exactly that reason — "已提交" and "已完成" are
+/// different claims, and only the conversation can make the second one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delivery {
+    /// Nothing has been sent.
+    Idle,
+    /// Sent, and the host has not answered yet.
+    Sending,
+    /// The host took it.
+    Accepted,
+    /// The host refused it, or it could not be written. The reason is shown as it came.
+    Failed {
+        /// Why, in the host's words when it came from the host.
+        reason: String,
+    },
+}
+
+impl Delivery {
+    /// Whether a request is awaiting a verdict.
+    #[must_use]
+    pub fn is_sending(&self) -> bool {
+        matches!(self, Self::Sending)
+    }
+
+    /// One line for the composer, or `None` when there is nothing to say.
+    #[must_use]
+    pub fn describe(&self) -> Option<String> {
+        match self {
+            Self::Idle | Self::Accepted => None,
+            Self::Sending => Some("已提交，等待 Harness 确认…".to_owned()),
+            Self::Failed { reason } => Some(format!("未发送：{reason}")),
+        }
+    }
+}
 use crate::ipc::protocol::{CAPABILITIES, PROTOCOL_VERSION, error_code};
 use crate::ipc::rpc::{self, Inbound, Outcome, RpcError, Router};
 use crate::runtime::diag::dump::Dump;
@@ -220,6 +267,17 @@ pub struct Session {
     follow: Follow,
     /// The conversation, folded from the records and streams the host sent.
     transcript: Transcript,
+    /// What became of the last prompt, and of the last stop request.
+    ///
+    /// Kept because a send has two outcomes and only one of them is visible: the user
+    /// types, the composer clears, and whether the host *took* it is a separate fact
+    /// that has to be shown rather than assumed.
+    prompt: Delivery,
+    cancel: Delivery,
+    /// Requests awaiting a verdict, so a response can be attributed to what asked.
+    sends_in_flight: BTreeMap<i64, Sending>,
+    /// Idempotency keys issued so far, so a retry after a failure uses a fresh one.
+    prompts_issued: u64,
     /// Where raw conversation frames are captured, when a capture was asked for.
     ///
     /// Owned here rather than read from the environment in [`Session::new`] so tests
@@ -248,6 +306,10 @@ impl Session {
             handoff: None,
             follow: Follow::default(),
             transcript: Transcript::new(),
+            prompt: Delivery::Idle,
+            cancel: Delivery::Idle,
+            sends_in_flight: BTreeMap::new(),
+            prompts_issued: 0,
             dump: Dump::default(),
             follow_request: None,
             next_request_id: 1,
@@ -473,6 +535,14 @@ impl Session {
 
     /// Record what the handshake produced, or the host's verdict on an answer.
     fn on_response(&mut self, id: &Value, outcome: Result<Value, RpcError>, sink: &mut dyn FrameSink) {
+        // Prompts and stops first, for the same reason the answers below are: a response
+        // attributed to the wrong request leaves the composer claiming "sending…" forever.
+        if let Some(value) = id.as_i64() {
+            if self.sends_in_flight.contains_key(&value) {
+                self.resolve_send(value, outcome, sink);
+                return;
+            }
+        }
         // In-flight answers are checked before the handshake id: they are the only
         // responses this process solicits after `hello`, and a mismatch here would
         // leave a card stuck on "sending…" with nothing to explain why.
@@ -766,6 +836,122 @@ impl Session {
     ///
     /// @param interaction_id - which card to drop.
     /// @returns whether a card was dropped.
+    /// Send what the user typed to the conversation this panel follows.
+    ///
+    /// The key is generated here and is one-shot: the host admits a given key once, and a
+    /// retry after a failure deliberately gets a *new* one, because reusing the failed key
+    /// is what the host refuses ("submit it again to retry deliberately").
+    ///
+    /// @param text - the user's text. Blank input is refused here rather than sent: the
+    ///   host would accept it and the conversation would gain an empty turn.
+    /// @param sink - where the frame goes.
+    /// @returns what is known now; the host's verdict arrives later and is reported
+    ///   through [`Session::prompt_delivery`].
+    pub fn send_prompt(&mut self, text: &str, sink: &mut dyn FrameSink) -> Delivery {
+        let text = text.trim();
+        if text.is_empty() {
+            self.prompt = Delivery::Failed { reason: "内容为空".to_owned() };
+            return self.prompt.clone();
+        }
+        if self.prompt.is_sending() {
+            // The host would refuse a *different* key for the same moment anyway, and a
+            // second copy of the same text is not what the user asked for.
+            return self.prompt.clone();
+        }
+        let Some(session_id) = self.follow.session_id().map(str::to_owned) else {
+            self.prompt = Delivery::Failed { reason: "尚未跟随任何会话".to_owned() };
+            return self.prompt.clone();
+        };
+        self.prompts_issued += 1;
+        let key = format!("{session_id}:prompt-{}", self.prompts_issued);
+        let request_id = self.take_request_id();
+        let frame = rpc::request(
+            request_id,
+            "session/prompt",
+            json!({ "sessionId": session_id, "requestId": key, "text": text }),
+        );
+        self.prompt = Delivery::Sending;
+        self.sends_in_flight.insert(request_id, Sending::Prompt);
+        sink.mark(&format!("prompt {key} sending {} bytes", text.len()));
+        if let Err(error) = sink.send(&frame) {
+            self.sends_in_flight.remove(&request_id);
+            self.prompt = Delivery::Failed { reason: format!("写入失败：{error}") };
+            sink.log(&format!("could not send a prompt: {error}"));
+        }
+        self.prompt.clone()
+    }
+
+    /// Ask the host to stop the turn in flight.
+    ///
+    /// @param sink - where the frame goes.
+    /// @returns whether the request was written; the host's answer arrives later.
+    pub fn cancel_turn(&mut self, sink: &mut dyn FrameSink) -> bool {
+        if self.cancel.is_sending() {
+            return false;
+        }
+        let Some(session_id) = self.follow.session_id().map(str::to_owned) else {
+            self.cancel = Delivery::Failed { reason: "尚未跟随任何会话".to_owned() };
+            return false;
+        };
+        let request_id = self.take_request_id();
+        let frame = rpc::request(request_id, "session/cancel", json!({ "sessionId": session_id }));
+        self.cancel = Delivery::Sending;
+        self.sends_in_flight.insert(request_id, Sending::Cancel);
+        sink.mark("cancel requested");
+        if let Err(error) = sink.send(&frame) {
+            self.sends_in_flight.remove(&request_id);
+            self.cancel = Delivery::Failed { reason: format!("写入失败：{error}") };
+            sink.log(&format!("could not ask the host to stop: {error}"));
+            return false;
+        }
+        true
+    }
+
+    /// What became of the last prompt.
+    #[must_use]
+    pub fn prompt_delivery(&self) -> &Delivery {
+        &self.prompt
+    }
+
+    /// What became of the last stop request.
+    #[must_use]
+    pub fn cancel_delivery(&self) -> &Delivery {
+        &self.cancel
+    }
+
+    /// Read the host's verdict on an outbound request.
+    fn resolve_send(&mut self, id: i64, outcome: Result<Value, RpcError>, sink: &mut dyn FrameSink) {
+        let Some(kind) = self.sends_in_flight.remove(&id) else { return };
+        let delivery = match outcome {
+            Ok(_) => Delivery::Accepted,
+            Err(error) => Delivery::Failed { reason: error.message.clone() },
+        };
+        match kind {
+            Sending::Prompt => {
+                // A prompt that was accepted is also the point at which the panel stops
+                // offering to send it again; a failure keeps the reason the host gave,
+                // because "unavailable: the same prompt is still awaiting confirmation"
+                // is something the user can act on and "failed" is not.
+                let line = match &delivery {
+                    Delivery::Accepted => "prompt accepted".to_owned(),
+                    Delivery::Failed { reason } => format!("prompt refused: {reason}"),
+                    Delivery::Idle | Delivery::Sending => "prompt state unclear".to_owned(),
+                };
+                sink.mark(&line);
+                self.prompt = delivery;
+            }
+            Sending::Cancel => {
+                let line = match &delivery {
+                    Delivery::Accepted => "cancel accepted".to_owned(),
+                    Delivery::Failed { reason } => format!("cancel refused: {reason}"),
+                    Delivery::Idle | Delivery::Sending => "cancel state unclear".to_owned(),
+                };
+                sink.mark(&line);
+                self.cancel = delivery;
+            }
+        }
+    }
+
     pub fn dismiss_interaction(&mut self, interaction_id: &str) -> bool {
         let before = self.interactions.len();
         self.interactions.retain(|held| held.id() != interaction_id);
@@ -1346,4 +1532,147 @@ mod tests {
             "session traffic is handled, not reported as an unknown notification",
         );
     }
+
+    /// A sink whose writes fail, for the paths that have to survive a broken stdout.
+    struct DeafSink;
+
+    impl FrameSink for DeafSink {
+        fn send(&mut self, _frame: &Value) -> std::io::Result<()> {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "closed"))
+        }
+
+        fn log(&mut self, _line: &str) {}
+    }
+
+    /// A session that has followed `session-1`, which is the precondition for sending.
+    fn followed() -> (Session, RecordingSink) {
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        follow_a_conversation(&mut session, &mut sink);
+        (session, sink)
+    }
+
+    /// The request the session last wrote.
+    fn last_request(sink: &RecordingSink) -> serde_json::Value {
+        sink.frames.last().expect("a request was written").clone()
+    }
+
+    #[test]
+    fn a_prompt_carries_a_fresh_idempotency_key() {
+        // The host admits a given key once; two prompts sharing one are one prompt, and
+        // the second thing the user typed would vanish.
+        let (mut session, mut sink) = followed();
+        session.send_prompt("第一句", &mut sink);
+        let first = last_request(&sink);
+        session.on_frame(
+            Inbound::Response { id: first["id"].clone(), outcome: Ok(json!({"accepted": true})) },
+            &mut sink,
+        );
+        session.send_prompt("第二句", &mut sink);
+        let second = last_request(&sink);
+
+        assert_eq!(first["method"], "session/prompt");
+        assert_eq!(first["params"]["sessionId"], "session-1");
+        assert_eq!(first["params"]["text"], "第一句");
+        assert_ne!(first["params"]["requestId"], second["params"]["requestId"]);
+        assert_eq!(second["params"]["text"], "第二句");
+    }
+
+    #[test]
+    fn a_prompt_without_a_followed_conversation_is_refused() {
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        let delivery = session.send_prompt("在吗", &mut sink);
+        assert!(matches!(delivery, Delivery::Failed { .. }), "{delivery:?}");
+        assert!(sink.frames.is_empty(), "nothing is sent with nowhere to send it");
+    }
+
+    #[test]
+    fn a_blank_prompt_is_refused_rather_than_sent() {
+        // The host would accept it and the conversation would gain an empty turn.
+        let (mut session, mut sink) = followed();
+        let before = sink.frames.len();
+        let delivery = session.send_prompt("   \n ", &mut sink);
+        assert_eq!(delivery, Delivery::Failed { reason: "内容为空".to_owned() });
+        assert_eq!(sink.frames.len(), before);
+    }
+
+    #[test]
+    fn a_second_prompt_waits_for_the_first_verdict() {
+        let (mut session, mut sink) = followed();
+        session.send_prompt("第一句", &mut sink);
+        let sent = sink.frames.len();
+        session.send_prompt("第二句", &mut sink);
+        assert_eq!(sink.frames.len(), sent, "the second is not written while the first is unanswered");
+        assert!(session.prompt_delivery().is_sending());
+    }
+
+    #[test]
+    fn the_hosts_verdict_on_a_prompt_is_reported() {
+        let (mut session, mut sink) = followed();
+        session.send_prompt("你好", &mut sink);
+        let id = last_request(&sink)["id"].clone();
+        session.on_frame(Inbound::Response { id, outcome: Ok(json!({"accepted": true})) }, &mut sink);
+        assert_eq!(*session.prompt_delivery(), Delivery::Accepted);
+        assert!(session.prompt_delivery().describe().is_none(), "accepted needs no line");
+    }
+
+    #[test]
+    fn a_refused_prompt_keeps_the_hosts_reason_and_the_retry_uses_a_new_key() {
+        // The host remembers a failed key and refuses to reuse it ("submit it again to
+        // retry deliberately"), so a retry is a new submission — and the reason has to
+        // survive, because it is the only thing that tells the user what to change.
+        let (mut session, mut sink) = followed();
+        session.send_prompt("你好", &mut sink);
+        let first = last_request(&sink);
+        let key = first["params"]["requestId"].clone();
+        session.on_frame(
+            Inbound::Response {
+                id: first["id"].clone(),
+                outcome: Err(RpcError {
+                    code: error_code::UNAVAILABLE,
+                    message: "still awaiting confirmation".to_owned(),
+                    data: None,
+                }),
+            },
+            &mut sink,
+        );
+        let described = session.prompt_delivery().describe().expect("a line for the user");
+        assert!(described.contains("still awaiting confirmation"), "{described}");
+
+        session.send_prompt("你好", &mut sink);
+        assert_ne!(last_request(&sink)["params"]["requestId"], key, "a retry is a new submission");
+    }
+
+    #[test]
+    fn a_prompt_that_could_not_be_written_is_not_left_sending() {
+        let (mut session, _) = followed();
+        let mut deaf = DeafSink;
+        let delivery = session.send_prompt("你好", &mut deaf);
+        assert!(matches!(delivery, Delivery::Failed { .. }), "{delivery:?}");
+        assert!(!session.prompt_delivery().is_sending(), "a failed write must not look pending");
+    }
+
+    #[test]
+    fn a_stop_request_asks_the_host_and_reports_its_verdict() {
+        let (mut session, mut sink) = followed();
+        assert!(session.cancel_turn(&mut sink));
+        let frame = last_request(&sink);
+        assert_eq!(frame["method"], "session/cancel");
+        assert_eq!(frame["params"]["sessionId"], "session-1");
+        session.on_frame(
+            Inbound::Response { id: frame["id"].clone(), outcome: Ok(json!({"accepted": true})) },
+            &mut sink,
+        );
+        assert_eq!(*session.cancel_delivery(), Delivery::Accepted);
+    }
+
+    #[test]
+    fn a_stop_without_a_conversation_is_refused() {
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        assert!(!session.cancel_turn(&mut sink));
+        assert!(matches!(session.cancel_delivery(), Delivery::Failed { .. }));
+    }
+
 }

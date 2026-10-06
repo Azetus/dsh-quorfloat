@@ -7,28 +7,11 @@
 use eframe::egui;
 
 use crate::app::session::interaction::{ApprovalVerdict, Handoff, Interaction, InteractionKind, InteractionState};
+
+use super::Action;
 use crate::ui::theme::{ALLOW, BAD, BANNER, CARD, DISPLAY_LOCALE, MUTED, OK, REJECT, TEXT, WARN};
 
 use super::wrapped;
-
-/// What a painted card asked the user to do.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CardAction {
-    /// Answer one approval.
-    Answer {
-        /// Which interaction.
-        id: String,
-        /// What the user decided.
-        verdict: ApprovalVerdict,
-    },
-    /// Stop showing a card.
-    Dismiss {
-        /// Which interaction.
-        id: String,
-    },
-    /// Stop showing the hand-off banner.
-    DismissHandoff,
-}
 
 /// Draw a label that wraps, so peer-supplied text cannot widen the panel.
 ///
@@ -46,7 +29,7 @@ pub enum CardAction {
 /// @param ui - where to draw.
 /// @param handoff - what the host announced.
 /// @param action - collects the dismissal if the user asks for one.
-pub(super) fn handoff_banner(ui: &mut egui::Ui, handoff: &Handoff, action: &mut Option<CardAction>) {
+pub(super) fn handoff_banner(ui: &mut egui::Ui, handoff: &Handoff, action: &mut Option<Action>) {
     let live = !handoff.surfaces().is_empty();
     let (headline, instruction) = match (handoff.kind(), live) {
         (InteractionKind::Question, true) => ("追问待回答", "请切到 Harness 窗口输入"),
@@ -64,7 +47,7 @@ pub(super) fn handoff_banner(ui: &mut egui::Ui, handoff: &Handoff, action: &mut 
                 ui.label(egui::RichText::new(instruction).size(12.0).color(TEXT));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("知道了").clicked() {
-                        *action = Some(CardAction::DismissHandoff);
+                        *action = Some(Action::DismissHandoff);
                     }
                 });
             });
@@ -76,7 +59,7 @@ pub(super) fn handoff_banner(ui: &mut egui::Ui, handoff: &Handoff, action: &mut 
 /// @param ui - where to draw.
 /// @param card - the interaction to render.
 /// @param action - collects what the user clicked.
-pub(super) fn approval_card(ui: &mut egui::Ui, card: &Interaction, action: &mut Option<CardAction>) {
+pub(super) fn approval_card(ui: &mut egui::Ui, card: &Interaction, action: &mut Option<Action>) {
     egui::Frame::NONE
         .fill(CARD)
         .inner_margin(egui::Margin::same(12))
@@ -102,14 +85,14 @@ pub(super) fn approval_card(ui: &mut egui::Ui, card: &Interaction, action: &mut 
                     ui.horizontal(|ui| {
                         let allow = egui::Button::new(egui::RichText::new("允许一次").color(TEXT)).fill(ALLOW);
                         if ui.add(allow).clicked() {
-                            *action = Some(CardAction::Answer {
+                            *action = Some(Action::Answer {
                                 id: card.id().to_owned(),
                                 verdict: ApprovalVerdict::AllowOnce,
                             });
                         }
                         let reject = egui::Button::new(egui::RichText::new("拒绝").color(TEXT)).fill(REJECT);
                         if ui.add(reject).clicked() {
-                            *action = Some(CardAction::Answer {
+                            *action = Some(Action::Answer {
                                 id: card.id().to_owned(),
                                 verdict: ApprovalVerdict::Reject,
                             });
@@ -154,7 +137,7 @@ pub(super) fn approval_card(ui: &mut egui::Ui, card: &Interaction, action: &mut 
 /// @param ui - where to draw.
 /// @param card - the interaction to render.
 /// @param action - collects what the user clicked.
-pub(super) fn question_card(ui: &mut egui::Ui, card: &Interaction, action: &mut Option<CardAction>) {
+pub(super) fn question_card(ui: &mut egui::Ui, card: &Interaction, action: &mut Option<Action>) {
     let questions = card.questions();
     egui::Frame::NONE
         .fill(CARD)
@@ -186,7 +169,7 @@ pub(super) fn question_card(ui: &mut egui::Ui, card: &Interaction, action: &mut 
             }
             ui.add_space(8.0);
             if ui.button("知道了").clicked() {
-                *action = Some(CardAction::Dismiss { id: card.id().to_owned() });
+                *action = Some(Action::Dismiss { id: card.id().to_owned() });
             }
         });
 }
@@ -196,8 +179,8 @@ pub(super) fn question_card(ui: &mut egui::Ui, card: &Interaction, action: &mut 
 /// @param ui - where to draw.
 /// @param card - the card being closed.
 /// @param action - collects the dismissal.
-pub(super) fn close_button(ui: &mut egui::Ui, card: &Interaction, action: &mut Option<CardAction>) {
+pub(super) fn close_button(ui: &mut egui::Ui, card: &Interaction, action: &mut Option<Action>) {
     if ui.small_button("关闭").clicked() {
-        *action = Some(CardAction::Dismiss { id: card.id().to_owned() });
+        *action = Some(Action::Dismiss { id: card.id().to_owned() });
     }
 }

@@ -557,6 +557,9 @@ function countFiles(directory) {
 /** Where the sidecar appends its breadcrumbs during a dev run. */
 const MARKER_PATH = join(DEV_HOME, 'sidecar.log')
 
+/** Where the sidecar remembers its window position, so dev never writes into $HOME. */
+const WINDOW_STATE_PATH = join(DEV_HOME, 'window.json')
+
 /** Start dsh, and shut it down cleanly on an interrupt. */
 function start(options, home, sidecar, staged) {
   const args = ['--profile', options.profile, '--port', options.port]
@@ -574,6 +577,9 @@ function start(options, home, sidecar, staged) {
     // shows it nowhere, so without this file "did the approval reach the panel, and
     // did the click leave it" has no answer after the fact.
     DSH_QUORFLOAT_RUST_MARKER: MARKER_PATH,
+    // Where the panel remembers where the user put it. Pointed at the throwaway home so
+    // that developing never edits the real user's remembered position.
+    DSH_QUORFLOAT_WINDOW_STATE: WINDOW_STATE_PATH,
     // A deprecation warning from a dependency pollutes every line otherwise.
     NODE_NO_WARNINGS: '1',
   }
@@ -584,6 +590,7 @@ function start(options, home, sidecar, staged) {
     + ` entry points checked: ${staged.entryPoints.join(', ')})\n`
     + `     sidecar=${sidecar ?? '(not built — no panel)'}\n`
     + `     panel log=${sidecar === undefined ? '(no panel)' : MARKER_PATH}\n`
+    + `     window state=${sidecar === undefined ? '(no panel)' : WINDOW_STATE_PATH}\n`
     + `     panel font=${panelFonts(sidecar)}\n`
     + `     bundles=${profileBundles(home, options.profile).join(', ')}\n`
     + `     workspace=${join(DEV_HOME, 'workspace')}\n\n`)

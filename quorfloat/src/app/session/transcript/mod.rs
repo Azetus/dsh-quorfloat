@@ -114,6 +114,12 @@ pub struct Transcript {
     calls: Vec<(String, String)>,
     /// Title the harness chose, when it has announced one.
     title: Option<String>,
+    /// Whether a turn is being worked on right now.
+    ///
+    /// Set by `turn/start` and cleared by `turn/end`, which are the host's own
+    /// boundaries. The composer needs it to offer "stop" only when there is something to
+    /// stop: a stop button in an idle conversation is a button that does nothing.
+    turn_active: bool,
     dropped: usize,
     duplicates: usize,
     stale: usize,
@@ -164,6 +170,12 @@ impl Transcript {
         self.live.is_some()
     }
 
+    /// Whether the host says a turn is in progress.
+    #[must_use]
+    pub fn is_turn_active(&self) -> bool {
+        self.turn_active
+    }
+
     /// The subscription generation the current entries belong to.
     #[must_use]
     pub fn generation(&self) -> Option<i64> {
@@ -201,6 +213,7 @@ impl Transcript {
         self.cursor = -1;
         self.seeded = false;
         self.dropped = 0;
+        self.turn_active = false;
     }
 
     /// Fold in a `session/snapshot`: the conversation as of a cursor.
@@ -372,17 +385,6 @@ impl Transcript {
                     self.title = Some(title.to_owned());
                 }
             }
-            "turn/end" => {
-                let reason = data
-                    .get("reason")
-                    .and_then(|reason| reason.get("kind"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown");
-                self.push(Entry::Notice {
-                    kind: kind.to_owned(),
-                    text: format!("本轮结束（{reason}）"),
-                });
-            }
             "approval/asked" => {
                 let tool = data.get("toolName").and_then(Value::as_str).unwrap_or("unknown");
                 self.push(Entry::Notice {
@@ -394,9 +396,13 @@ impl Transcript {
                 let outcome = data.get("outcome").and_then(Value::as_str).unwrap_or("unknown");
                 self.push(Entry::Notice { kind: kind.to_owned(), text: format!("提权请求：{outcome}") });
             }
+            // A turn boundary is state rather than a line: the composer reads it, and a
+            // rule drawn between every turn would be noise in a panel this short.
+            "turn/start" => self.turn_active = true,
+            "turn/end" => self.turn_active = false,
             // Machinery. Counted, never drawn: a panel that shows `request/header` has
             // stopped being a conversation window.
-            "step/start" | "step/end" | "turn/start" | "command/run" | "command/done" | "workspace/changes"
+            "step/start" | "step/end" | "command/run" | "command/done" | "workspace/changes"
             | "session/end-seed" | "permission/preset" | "sandbox/mode" | "approval/policy" | "agent/inbox/spliced"
             | "request/header" | "request/context" | "session/title-llm-request" => {
                 self.internal += 1;
@@ -773,6 +779,33 @@ mod tests {
             &[Entry::Notice { kind: "something/new".to_owned(), text: "新的东西".to_owned() }],
         );
         assert_eq!(transcript.skipped().unknown, 1);
+    }
+
+    #[test]
+    fn a_turn_in_progress_is_visible_to_the_composer() {
+        // The composer offers "stop" only while this is true: a stop button in an idle
+        // conversation is a button that does nothing.
+        let mut transcript = Transcript::new();
+        transcript.apply_snapshot(&snapshot(vec![], 3, 1));
+        assert!(!transcript.is_turn_active());
+
+        transcript.apply_event(&json!({"sessionId": "session-1", "generation": 1, "seq": 4,
+            "type": "turn/start", "time": 1, "data": {"turn": 2}}));
+        assert!(transcript.is_turn_active());
+
+        transcript.apply_event(&json!({"sessionId": "session-1", "generation": 1, "seq": 5,
+            "type": "turn/end", "time": 2, "data": {"turn": 2, "reason": {"kind": "completed"}}}));
+        assert!(!transcript.is_turn_active());
+    }
+
+    #[test]
+    fn a_turn_boundary_is_state_rather_than_a_line() {
+        // Drawn, it would put a rule between every exchange in a panel this short.
+        let mut transcript = Transcript::new();
+        transcript.apply_snapshot(&snapshot(vec![], 3, 1));
+        transcript.apply_event(&json!({"sessionId": "session-1", "generation": 1, "seq": 4,
+            "type": "turn/end", "time": 2, "data": {"turn": 2, "reason": {"kind": "completed"}}}));
+        assert!(transcript.entries().is_empty(), "{:?}", transcript.entries());
     }
 
     #[test]

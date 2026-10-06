@@ -77,7 +77,10 @@ impl WindowSettings {
 /// @param settings - geometry and appearance.
 /// @returns the builder to hand to `NativeOptions`.
 #[must_use]
-pub fn viewport(settings: &WindowSettings) -> egui::ViewportBuilder {
+///
+/// @param settings - size and layering, from the environment and the host's `ready`.
+/// @param remembered - where the window was last time, if anywhere.
+pub fn viewport(settings: &WindowSettings, remembered: Option<(f32, f32)>) -> egui::ViewportBuilder {
     let builder = egui::ViewportBuilder::default()
         // Undecorated: this is a panel that appears over the user's work, not a
         // document window competing for space in the window list.
@@ -96,7 +99,14 @@ pub fn viewport(settings: &WindowSettings) -> egui::ViewportBuilder {
         .with_inner_size([settings.width, settings.max_height])
         .with_min_inner_size([settings.width.min(320.0), 80.0])
         .with_title("quorfloat");
-    builder
+    // Where the user left it — or nowhere, which is a real difference rather than a
+    // default: `ViewportBuilder` has to be *told* a position to place the window, so a
+    // panel that always opened at the origin would be one the user moves every launch.
+    // Unset means the platform chooses, which is what a first run should look like.
+    match remembered {
+        Some((x, y)) => builder.with_position(egui::Pos2::new(x, y)),
+        None => builder,
+    }
 }
 
 /// Read a float-valued environment variable.
@@ -164,7 +174,7 @@ mod tests {
         // every automatic restart, and decorations would make it a document window
         // that takes a slot in the window list and the taskbar.
         let settings = WindowSettings::default();
-        let viewport = viewport(&settings);
+        let viewport = viewport(&settings, None);
         assert_eq!(viewport.visible, Some(false));
         assert_eq!(viewport.decorations, Some(false));
         assert_eq!(viewport.window_level, Some(egui::WindowLevel::AlwaysOnTop));
@@ -173,10 +183,26 @@ mod tests {
     }
 
     #[test]
+    fn a_remembered_position_is_where_the_window_opens() {
+        let settings = WindowSettings::default();
+        assert_eq!(
+            viewport(&settings, Some((120.0, 64.0))).position,
+            Some(egui::Pos2::new(120.0, 64.0)),
+        );
+    }
+
+    #[test]
+    fn with_nothing_remembered_the_platform_chooses_where_to_open() {
+        // Not the origin: a panel that always appears in the top-left corner is a panel the
+        // user has to move every single time.
+        assert_eq!(viewport(&WindowSettings::default(), None).position, None);
+    }
+
+    #[test]
     fn turning_always_on_top_off_selects_the_normal_level() {
         // There is no "off" flag to clear, so the configured value has to pick the
         // level — otherwise the setting would look accepted and do nothing.
         let settings = WindowSettings { always_on_top: false, ..WindowSettings::default() };
-        assert_eq!(viewport(&settings).window_level, Some(egui::WindowLevel::Normal));
+        assert_eq!(viewport(&settings, None).window_level, Some(egui::WindowLevel::Normal));
     }
 }

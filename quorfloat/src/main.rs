@@ -50,6 +50,9 @@ fn install_panic_hook() {
 /// @returns why the session ended, or a message describing a startup failure.
 fn run() -> Result<SessionExit, String> {
     let settings = WindowSettings::from_env();
+    // Read before the window exists: the viewport is created with this, and the app keeps
+    // the same value so that what it writes back is what the window was opened with.
+    let window_state = dsh_quorfloat::ui::WindowState::load();
     // Registered before the window exists: a taken accelerator is a normal outcome
     // and must be known before `hello` reports it, so the host shows the real state
     // rather than a key that silently does nothing.
@@ -58,6 +61,12 @@ fn run() -> Result<SessionExit, String> {
 
     let marker = Marker::from_env();
     marker.write("start");
+    // Where the panel opens, on the record: "the window came back somewhere odd" is a
+    // question about this line and the file behind it.
+    marker.write(&match window_state.position() {
+        Some((x, y)) => format!("window restored at {x:.0},{y:.0}"),
+        None => "window position not remembered".to_owned(),
+    });
 
     let session = Arc::new(Mutex::new(Session::new(Identity {
         quorfloat_version: VERSION.to_owned(),
@@ -136,7 +145,7 @@ fn run() -> Result<SessionExit, String> {
     }
 
     let options = eframe::NativeOptions {
-        viewport: window::viewport(&settings),
+        viewport: window::viewport(&settings, window_state.position()),
         ..Default::default()
     };
     let app_session = Arc::clone(&session);
@@ -161,6 +170,7 @@ fn run() -> Result<SessionExit, String> {
                 wake_rx,
                 app_outcome,
                 hotkey_active,
+                window_state,
             );
             // Reaching this point *is* the measurement: eframe calls the creator
             // only after the viewport exists, so `window` stops being a claim here.

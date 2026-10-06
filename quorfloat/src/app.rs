@@ -29,7 +29,7 @@ pub mod sink;
 use crate::ui::fonts::{self, FontStatus};
 use crate::app::session::interaction::{Handoff, Interaction};
 use crate::app::sink::{BorrowedSink, SharedSink, Wake};
-use crate::app::session::{Session, SessionExit, WindowCommand};
+use crate::app::session::{Delivery, Session, SessionExit, WindowCommand};
 use crate::runtime::hotkey::Hotkey;
 use crate::ui::window::WindowSettings;
 
@@ -67,6 +67,18 @@ pub struct App {
     /// reported before it is real would have the host promise the user a panel that
     /// never appears.
     capabilities: Vec<&'static str>,
+    /// Whether the window's position has been observed at least once this run.
+    window_seen: bool,
+    /// Where the window is, and where that is remembered.
+    ///
+    /// Owned here rather than by the window layer: the window reports where it is, and the
+    /// decision to write a file is application state, not drawing.
+    window_state: crate::ui::WindowState,
+    /// What the user has typed but not sent.
+    ///
+    /// Owned here rather than by the widget, because a widget forgets: this has to survive
+    /// the frames in which the panel does not paint, and a send the host refused.
+    draft: String,
     /// What to tell the user about the fonts, when there is something to tell.
     ///
     /// A panel that cannot draw its own text has to say so: silent boxes look like a
@@ -94,6 +106,7 @@ impl App {
         wake: Receiver<Wake>,
         outcome: Arc<Mutex<Option<SessionExit>>>,
         hotkey_active: bool,
+        window_state: crate::ui::WindowState,
     ) -> Self {
         Self {
             session,
@@ -109,6 +122,9 @@ impl App {
             context: None,
             startup_hidden: false,
             capabilities: measured_capabilities(hotkey_active),
+            window_state,
+            window_seen: false,
+            draft: String::new(),
             fonts_warning: None,
             fonts_checked: false,
         }
@@ -169,10 +185,41 @@ impl App {
         self.fonts_warning = Some(message);
     }
 
+    /// Report where the window is, so the next run can open there.
+    ///
+    /// Called from every pass rather than from the drag handler: the window can also be
+    /// moved by the system (a display change, a window manager shortcut), and a panel that
+    /// only remembers the moves it made itself is a panel that forgets the others.
+    fn remember_window_position(&mut self) {
+        let Some(ctx) = &self.context else { return };
+        // `outer_rect` is the whole window; the user thinks of the panel's top-left corner,
+        // and that is what comes back from the file.
+        let Some((x, y)) = ctx.input(|input| input.viewport().outer_rect.map(|rect| (rect.min.x, rect.min.y)))
+        else {
+            return;
+        };
+        let now = crate::ipc::rpc::now_millis();
+        if !self.window_seen {
+            // The first sighting is the interesting one: it says whether the platform
+            // honoured the position this process asked for, which is the difference
+            // between "the memory works" and "we keep asking and keep being overruled".
+            self.window_seen = true;
+            let requested = self
+                .window_state
+                .requested()
+                .map_or_else(|| "none".to_owned(), |(x, y)| format!("{x:.0},{y:.0}"));
+            self.sink.mark(&format!("window first seen at {x:.0},{y:.0} (requested {requested})"));
+        }
+        if self.window_state.observe((x, y), now) {
+            self.sink.mark(&format!("window position remembered {x:.0},{y:.0}"));
+        }
+    }
+
     /// Record why the session ended.
     ///
     /// @param exit - the ending to remember.
     fn record(&mut self, exit: SessionExit) {
+        self.window_state.flush(crate::ipc::rpc::now_millis());
         let mut outcome = match self.outcome.lock() {
             Ok(outcome) => outcome,
             Err(poisoned) => poisoned.into_inner(),
@@ -234,6 +281,7 @@ impl App {
     pub fn logic(&mut self) {
         self.hide_after_startup();
         self.verify_fonts();
+        self.remember_window_position();
         self.pump();
         self.apply_window_commands();
         self.pump_follow();
@@ -375,6 +423,9 @@ impl App {
         let transcript = session.transcript();
         PanelState {
             hotkey: self.hotkey_status(),
+            prompt_line: session.prompt_delivery().describe(),
+            prompt_sending: session.prompt_delivery().is_sending(),
+            turn_active: transcript.is_turn_active(),
             fonts_warning: self.fonts_warning.clone(),
             interactions: session.interactions().to_vec(),
             handoff: session.handoff().cloned(),
@@ -398,21 +449,35 @@ impl App {
     /// and this only supplies the sink it must write through.
     ///
     /// @param action - what the user asked for.
-    fn apply_card_action(&mut self, action: crate::ui::CardAction) {
-        use crate::ui::CardAction;
+    fn apply_card_action(&mut self, action: crate::ui::Action) {
+        use crate::ui::Action;
         let mut session = match self.session.lock() {
             Ok(session) => session,
             Err(poisoned) => poisoned.into_inner(),
         };
         let mut sink = BorrowedSink(&self.sink);
         match action {
-            CardAction::Answer { id, verdict } => {
+            Action::Answer { id, verdict } => {
                 session.answer_interaction(&id, verdict, &mut sink);
             }
-            CardAction::Dismiss { id } => {
+            Action::Dismiss { id } => {
                 session.dismiss_interaction(&id);
             }
-            CardAction::DismissHandoff => session.dismiss_handoff(),
+            Action::DismissHandoff => session.dismiss_handoff(),
+            Action::Send { text } => {
+                // The draft is cleared only when the host may actually have it: a refused
+                // send leaves the text where the user can fix it, which is the difference
+                // between "that failed" and "my message vanished".
+                if matches!(session.send_prompt(&text, &mut sink), Delivery::Failed { .. }) {
+                    // The session has already logged why. Keeping the text is the point:
+                    // the user can fix a refusal, and cannot fix a vanished message.
+                } else {
+                    self.draft.clear();
+                }
+            }
+            Action::Cancel => {
+                session.cancel_turn(&mut sink);
+            }
         }
     }
 }
@@ -423,6 +488,12 @@ impl App {
 pub(crate) struct PanelState {
     /// The hotkey line: which key hides the panel, or why none does.
     pub(crate) hotkey: String,
+    /// One line about the last prompt, when there is something to say.
+    pub(crate) prompt_line: Option<String>,
+    /// Whether a prompt is awaiting the host's verdict.
+    pub(crate) prompt_sending: bool,
+    /// Whether the host says a turn is in progress, which is when "stop" is offered.
+    pub(crate) turn_active: bool,
     /// What to tell the user about the fonts, when there is something to tell.
     pub(crate) fonts_warning: Option<String>,
     /// Requests waiting for the user, oldest first.
@@ -512,8 +583,8 @@ impl App {
     /// @param ui - the root area, with no margin or background of its own.
     pub fn draw(&mut self, ui: &mut egui::Ui) {
         let state = self.state();
-        let mut action: Option<crate::ui::CardAction> = None;
-        crate::ui::draw(ui, &state, &mut action);
+        let mut action: Option<crate::ui::Action> = None;
+        crate::ui::draw(ui, &state, &mut self.draft, &mut action);
         if let Some(action) = action {
             self.apply_card_action(action);
         }
@@ -620,7 +691,7 @@ mod tests {
     use super::*;
     use crate::app::session::interaction::{ApprovalVerdict, InteractionKind, InteractionState};
     use crate::app::sink::BorrowedSink;
-    use crate::ui::{CardAction, DISPLAY_LOCALE, speaker};
+    use crate::ui::{Action, DISPLAY_LOCALE, speaker};
     use std::sync::mpsc::Sender;
     use crate::ipc::rpc::Inbound;
     use crate::app::session::{FrameSink, HotkeyReport, Identity};
@@ -842,6 +913,91 @@ mod tests {
     }
 
     #[test]
+    fn a_send_with_no_conversation_keeps_the_text() {
+        // No session is followed in this app, so the send is refused. The draft is the
+        // only copy of what the user typed: clearing it would lose the message and tell
+        // them nothing.
+        let (mut app, _recorded, _session, _wake) = app_and_session();
+        app.draft = "还没发出去".to_owned();
+        app.apply_card_action(Action::Send { text: app.draft.clone() });
+        assert_eq!(app.draft, "还没发出去");
+    }
+
+    #[test]
+    fn the_composer_stays_visible_when_the_conversation_fills_the_panel() {
+        // The reported bug: the conversation was laid out before the composer and took
+        // every pixel it was offered, so the input box — the one control that must always
+        // be reachable — ended up below the bottom edge of the window.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        deliver(&session, &recorded, conversation_frame());
+
+        let size = egui::vec2(420.0, 300.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let texts = drawn_text(&mut app, size);
+        let visible = |needle: &str| {
+            texts.iter().any(|(text, rect)| {
+                text.contains(needle) && rect.height() > 1.0 && rect.max.y <= screen.max.y + 1.0
+            })
+        };
+        assert!(visible("发送"), "the send button is inside the window: {texts:#?}");
+        assert!(visible("输入消息"), "and so is the box it belongs to: {texts:#?}");
+        // The conversation is still there — the fix reserves the composer's strip, it does
+        // not simply drop the content above it.
+        assert!(visible("帮我看看"), "the conversation did not vanish: {texts:#?}");
+    }
+
+    #[test]
+    fn dragging_the_header_asks_the_platform_to_move_the_window() {
+        // An undecorated window has no title bar, so without this the panel cannot be moved
+        // at all — which is exactly what a user reported. The drag is handed to the
+        // platform rather than implemented by moving the viewport ourselves: a window moved
+        // by its own contents lags the pointer and fights the compositor.
+        let (mut app, _recorded, _session, _wake) = app_and_session();
+        let ctx = egui::Context::default();
+        let size = egui::vec2(420.0, 320.0);
+
+        // Three passes, because egui hit-tests a press against the widget rects registered
+        // by the *previous* pass: one pass to register the handle and place the pointer,
+        // one to press, one to move. A two-pass version of this test proved nothing — it
+        // passed with the drag handle removed.
+        let plan: Vec<Vec<egui::Event>> = vec![
+            vec![egui::Event::PointerMoved(egui::pos2(40.0, 16.0))],
+            vec![egui::Event::PointerButton {
+                pos: egui::pos2(40.0, 16.0),
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            vec![egui::Event::PointerMoved(egui::pos2(90.0, 40.0))],
+        ];
+
+        let mut asked = false;
+        for events in plan {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    // Without this the window is not interactive at all: egui ignores the
+                    // pointer for an unfocused window, and the drag never reaches a widget.
+                    // (The first version of this test omitted it and proved nothing.)
+                    focused: true,
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            // Viewport commands travel in the per-viewport output, not in the platform
+            // output: platform commands are clipboard and URL actions.
+            asked |= output
+                .viewport_output
+                .values()
+                .flat_map(|viewport| &viewport.commands)
+                .any(|command| matches!(command, egui::ViewportCommand::StartDrag));
+            output.textures_delta.clear();
+        }
+        assert!(asked, "a drag on the header asks the platform to start moving the window");
+    }
+
+    #[test]
     fn a_notice_names_its_event_kind() {
         // The label is where an unrecognised event announces itself.
         let notice = crate::app::session::transcript::Entry::Notice {
@@ -867,6 +1023,8 @@ mod tests {
             rx,
             outcome,
             false,
+            // No path, so the tests cannot touch the real user's remembered position.
+            crate::ui::WindowState::default(),
         );
         (app, recorded, session, tx)
     }
@@ -1162,7 +1320,7 @@ mod tests {
         // the window layer can get the host's answer wrong.
         let (mut app, recorded, session, _wake) = app_and_session();
         deliver(&session, &recorded, approval_open("approval-1"));
-        app.apply_card_action(CardAction::Answer {
+        app.apply_card_action(Action::Answer {
             id: "approval-1".to_owned(),
             verdict: ApprovalVerdict::AllowOnce,
         });
@@ -1180,11 +1338,11 @@ mod tests {
     fn one_card_cannot_be_answered_twice() {
         let (mut app, recorded, session, _wake) = app_and_session();
         deliver(&session, &recorded, approval_open("approval-1"));
-        app.apply_card_action(CardAction::Answer {
+        app.apply_card_action(Action::Answer {
             id: "approval-1".to_owned(),
             verdict: ApprovalVerdict::Reject,
         });
-        app.apply_card_action(CardAction::Answer {
+        app.apply_card_action(Action::Answer {
             id: "approval-1".to_owned(),
             verdict: ApprovalVerdict::AllowOnce,
         });
@@ -1201,7 +1359,7 @@ mod tests {
     fn the_hosts_verdict_reaches_the_card() {
         let (mut app, recorded, session, _wake) = app_and_session();
         deliver(&session, &recorded, approval_open("approval-1"));
-        app.apply_card_action(CardAction::Answer {
+        app.apply_card_action(Action::Answer {
             id: "approval-1".to_owned(),
             verdict: ApprovalVerdict::AllowOnce,
         });
@@ -1214,7 +1372,7 @@ mod tests {
         let cards = app.state().interactions;
         assert_eq!(cards[0].state(), &InteractionState::Applied { verdict: ApprovalVerdict::AllowOnce });
         assert!(!cards[0].is_actionable(), "a resolved card offers no buttons");
-        app.apply_card_action(CardAction::Dismiss { id: "approval-1".to_owned() });
+        app.apply_card_action(Action::Dismiss { id: "approval-1".to_owned() });
         assert!(app.state().interactions.is_empty());
     }
 
@@ -1232,7 +1390,7 @@ mod tests {
         let state = app.state();
         assert!(state.interactions.is_empty(), "a hint is not a card: it has no id and cannot be answered");
         assert_eq!(state.handoff.expect("the banner is shown").kind(), InteractionKind::Question);
-        app.apply_card_action(CardAction::DismissHandoff);
+        app.apply_card_action(Action::DismissHandoff);
         assert!(app.state().handoff.is_none());
     }
 }
