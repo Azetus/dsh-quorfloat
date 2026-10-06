@@ -190,14 +190,69 @@ pub(super) fn reasoning_text(
 /// @returns the egui id for its fold.
 #[must_use]
 pub(super) fn reasoning_id(reasoning: &str) -> egui::Id {
-    // FNV-1a, which is enough for this: the id only has to separate the handful of answers on
-    // screen, and a collision would fold two together rather than lose anything.
+    egui::Id::new(("quorfloat-reasoning", text_hash(reasoning)))
+}
+
+/// Give the layout somewhere to break inside long unbroken runs.
+///
+/// egui wraps at word boundaries and, deliberately, never inside a word unless it is truncating
+/// (`egui::Label` sets `break_anywhere` only for `TextWrapMode::Truncate`). Chinese text is
+/// unaffected — it breaks between characters — but a code block full of JSON is one long word per
+/// line, and it is laid out at its full width however narrow the panel is.
+///
+/// Inserting U+200B (zero-width space) every [`SOFT_WRAP_EVERY`] characters of a run that has no
+/// whitespace gives the wrapper a candidate. It draws nothing, and it is *not* what a copy takes:
+/// the copy control uses the untouched source, so a pasted answer is byte-for-byte the model's.
+///
+/// @param text - the answer's Markdown source.
+/// @returns the same text, with break opportunities added to its long runs.
+#[must_use]
+pub(crate) fn soft_wrap_for_display(text: &str) -> String {
+    /// How far a run may go before it is given a break opportunity. Wide enough that ordinary
+    /// words and short identifiers are never touched.
+    const SOFT_WRAP_EVERY: usize = 24;
+    let mut out = String::with_capacity(text.len() + text.len() / SOFT_WRAP_EVERY);
+    let mut run = 0;
+    for character in text.chars() {
+        // Whitespace is already a break opportunity, and a newline is a hard one.
+        if character.is_whitespace() {
+            run = 0;
+        } else {
+            run += 1;
+            if run > SOFT_WRAP_EVERY {
+                out.push('\u{200b}');
+                run = 1;
+            }
+        }
+        out.push(character);
+    }
+    out
+}
+
+/// The id scope one rendered answer's widgets live under.
+///
+/// The Markdown viewer ids its tables from the `Ui` they are drawn into plus a counter that
+/// **restarts with every call** (`ui.id().with("_table").with(curr_table)`, `pulldown.rs`), so two
+/// answers sharing a `Ui` id collide on their first table — which egui reports on screen as
+/// "Second use of Grid ID …". An id keyed by the answer's own text gives each one its own
+/// namespace, however many answers the frame happens to draw (see `docs/prototype.md` §39).
+///
+/// @param text - the answer's Markdown source.
+/// @returns the egui id to scope it with.
+#[must_use]
+pub(super) fn answer_id(text: &str) -> egui::Id {
+    egui::Id::new(("quorfloat-answer", text_hash(text)))
+}
+
+/// FNV-1a, which is enough for these: the ids only have to separate the handful of answers on
+/// screen, and a collision would fold two of them together rather than lose anything.
+fn text_hash(value: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in reasoning.as_bytes() {
+    for byte in value.as_bytes() {
         hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    egui::Id::new(("quorfloat-reasoning", hash))
+    hash
 }
 
 /// A model's answer, in the design's own proportion.
@@ -294,10 +349,46 @@ pub(super) fn entry_ui(
                         if *streaming {
                             wrapped(ui, answer(ui.ctx(), text));
                         } else {
-                            ui.scope(|ui| {
+                            // An id scope per answer, because `ui.scope` is *not* one: it restores
+                            // the style but shares the id namespace, and the Markdown viewer draws
+                            // tables with an auto-id `Grid`. Two of them in one frame collide, and
+                            // egui says so on screen — "Second use of Grid ID 2A87 … Sometimes the
+                            // solution is to use ui.push_id", which is exactly this (see
+                            // `docs/prototype.md` §39).
+                            ui.push_id(answer_id(text), |ui| {
                                 let style = theme::markdown_style(ui.style());
                                 ui.style_mut().clone_from(&style);
-                                egui_commonmark::CommonMarkViewer::new().show(ui, markdown, text);
+                                // Bounded, because a code block is a wall of unbreakable text: a
+                                // long JSON blob or URL inside one asked for more width than the
+                                // panel has, and the panel — whose width is fixed — drew it out
+                                // past its own edge. `default_width` is what the viewer measures
+                                // its blocks against; the scope's maximum keeps anything that
+                                // still asks for more inside the frame (see §40).
+                                let available = ui.available_width().max(1.0);
+                                ui.set_max_width(available);
+                                // Soft-wrapped for display only: the viewer builds its own
+                                // `LayoutJob` and never sets `break_anywhere`, and egui only does
+                                // that when truncating — so a long JSON blob, URL or base64 run
+                                // inside a code block is laid out at its full width and paints out
+                                // past the panel's edge. A zero-width space inside long runs gives
+                                // the layout somewhere to break; it is invisible, and the text a
+                                // copy takes is the untouched source (`answer_source`), so nothing
+                                // machine-readable is changed by it (see §40).
+                                let wrapped = soft_wrap_for_display(text);
+                                // Bounded horizontally, and bounded *here* rather than trusted to
+                                // the viewer: a table is an `egui::Grid`, which measures its columns
+                                // from the content and has no horizontal scroll of its own, so one
+                                // wide cell asks for more width than the panel has and paints past
+                                // its edge. A scroll area the width of the panel is a boundary the
+                                // viewer cannot cross, whatever it draws (§40).
+                                let scroll = egui::ScrollArea::horizontal()
+                                    .max_width(available)
+                                    .auto_shrink([false, true]);
+                                scroll.show(ui, |ui| {
+                                    egui_commonmark::CommonMarkViewer::new()
+                                        .default_width(Some(available as usize))
+                                        .show(ui, markdown, &wrapped);
+                                });
                             });
                         }
                     }

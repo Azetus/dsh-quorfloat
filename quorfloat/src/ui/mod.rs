@@ -24,6 +24,9 @@ mod picker;
 /// The one thing the app needs from the picker: the id of the workspace menu, so a send that
 /// has no workspace to create in can open the menu that chooses one.
 pub(crate) use picker::{Kind as PickerKind, popup_id as picker_popup_id};
+/// The display-only soft wrapper, reachable from the panel's tests.
+#[cfg(test)]
+pub(crate) use conversation::soft_wrap_for_display;
 pub mod fonts;
 pub mod icons;
 pub mod screenshot;
@@ -366,7 +369,11 @@ fn drag_regions(bar: egui::Rect, occupied: &[egui::Rect]) -> Vec<egui::Rect> {
 /// @param icon - which picture.
 /// @param tooltip - what it does, shown on hover.
 /// @returns the response, so the caller can act on a click.
-fn icon_button(ui: &mut egui::Ui, icon: icons::Icon, tooltip: &str) -> egui::Response {
+pub(super) fn icon_button(
+    ui: &mut egui::Ui,
+    icon: icons::Icon,
+    tooltip: &str,
+) -> egui::Response {
     let size = egui::vec2(theme::ICON_BUTTON, theme::ICON_BUTTON);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let visuals = ui.style().interact(&response);
@@ -389,17 +396,23 @@ fn cards(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
     // screen, but a year-old card must not push the conversation out of the panel — which
     // is exactly what an `auto_shrink([false, false])` area does even when it is empty.
     let cards = (ui.available_height() * 0.6).max(120.0);
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, true])
-        .max_height(cards)
+    // The section's own padding: every other section has one, and this one went without, which
+    // is why the card's box sat closer to the panel's edge than the composer's content did.
+    egui::Frame::NONE
+        .inner_margin(theme::PAD_CARDS)
         .show(ui, |ui| {
-            for card in &state.interactions {
-                match card.kind() {
-                    InteractionKind::Approval => approval_card(ui, card, action),
-                    InteractionKind::Question => question_card(ui, card, action),
-                }
-                ui.add_space(SECTION_GAP);
-            }
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, true])
+                .max_height(cards)
+                .show(ui, |ui| {
+                    for card in &state.interactions {
+                        match card.kind() {
+                            InteractionKind::Approval => approval_card(ui, card, action),
+                            InteractionKind::Question => question_card(ui, card, action),
+                        }
+                        ui.add_space(SECTION_GAP);
+                    }
+                });
         });
 }
 

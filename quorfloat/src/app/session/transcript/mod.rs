@@ -910,7 +910,6 @@ mod tests {
         assert!(is_error);
     }
 
-    #[test]
     /// The bug this filter was written for: the panel showed the harness's own instructions as
     /// if the user had typed them.
     #[test]

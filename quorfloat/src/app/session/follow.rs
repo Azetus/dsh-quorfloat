@@ -312,7 +312,12 @@ impl Follow {
     /// A pin outranks a choice, and a choice outranks "the newest".
     #[must_use]
     pub fn target(&self) -> Option<&str> {
-        self.pinned.as_deref().or(self.choice.as_deref())
+        // The choice first, then the pin — and the pin is only ever *adopted into* the choice, at
+        // startup. The other order is a panel that fights its user: picking another conversation
+        // in the picker would last until the next poll, three seconds later, when the pin would
+        // take the panel back. The pin means "where to open next time"; the choice means "where I
+        // am now", and while the panel is open the second one wins.
+        self.choice.as_deref().or(self.pinned.as_deref())
     }
 
     /// Open one conversation, now, and keep it until the panel is reopened.
@@ -363,7 +368,10 @@ impl Follow {
     ///
     /// @param session_id - the pinned conversation, if one was remembered.
     pub fn adopt_pinned(&mut self, session_id: Option<String>) {
-        self.pinned = session_id;
+        self.pinned = session_id.clone();
+        // Opened *into* the choice, which is what makes the pin a starting point rather than a
+        // standing order (see `target`).
+        self.choice = session_id;
     }
 
     /// Go back to "new conversation" mode: nothing pinned, nothing chosen, nothing attached.
@@ -925,29 +933,33 @@ mod tests {
         assert_eq!(follow.next(POLL_INTERVAL_MS * 4), Some(Outgoing::ListSessions), "and discovery keeps refreshing the list");
     }
 
-    /// A pin outranks a choice, and outlives the run.
+    /// The pin is where the panel opens, and the choice is where it goes next.
+    ///
+    /// The other order — pin always first — is a panel that fights its user: picking another
+    /// conversation lasted until the next poll, three seconds later, when the pin took the
+    /// panel back. Reported from using it, and this is the rule that came out of it.
     #[test]
-    fn a_pinned_conversation_outranks_a_choice_and_the_newest() {
+    fn a_pin_decides_where_the_panel_opens_and_the_choice_decides_where_it_goes() {
         let mut follow = started();
         let mut sink = Recorded::default();
-        assert_eq!(follow.next(0), Some(Outgoing::ListSessions));
-        let _ = follow.resolve(Ok(sessions(&[("newest", 99)])), 10, &mut sink);
-        // Pinning one that is not on screen switches to it.
-        assert_eq!(
-            follow.set_pinned(Some("pinned".to_owned()), 20),
-            Some(Outgoing::Attach { session_id: "pinned".to_owned() }),
-        );
-        assert_eq!(follow.pinned(), Some("pinned"));
-        assert_eq!(follow.target(), Some("pinned"));
-        let _ = follow.resolve(Ok(json!({})), 20, &mut sink);
 
-        // A choice does not displace a pin…
-        let _ = follow.choose("somewhere-else", 30);
-        assert_eq!(follow.target(), Some("pinned"), "the pin still wins");
-        // …and unpinning falls back to the newest, which is what the panel did before pins.
-        follow.set_pinned(None, 40);
-        follow.clear_choice();
-        assert_eq!(follow.target(), None);
+        // Opened with a pin: the pin is adopted as the choice, so the panel attaches to it.
+        follow.adopt_pinned(Some("session-1".to_owned()));
+        assert_eq!(follow.target(), Some("session-1"));
+
+        // And it is still the preference for the next launch.
+        assert_eq!(follow.pinned(), Some("session-1"));
+
+        // The user picks another conversation: the panel goes there, and the pin does not
+        // take it back on the next poll.
+        follow.next(0);
+        let _ = follow.resolve(Ok(sessions(&[("session-1", 10), ("session-2", 20)])), 1, &mut sink);
+        follow.choose("session-2", 2);
+        assert_eq!(follow.target(), Some("session-2"));
+        assert_eq!(follow.pinned(), Some("session-1"), "the preference is untouched");
+        follow.next(2 + POLL_INTERVAL_MS);
+        let _ = follow.resolve(Ok(sessions(&[("session-1", 10), ("session-2", 20)])), 3 + POLL_INTERVAL_MS, &mut sink);
+        assert_eq!(follow.target(), Some("session-2"), "and the poll leaves it alone");
     }
 
     /// Creating a conversation means being in it, without waiting for the next poll.

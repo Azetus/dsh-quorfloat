@@ -183,7 +183,18 @@ pub(super) fn conversations(ui: &mut egui::Ui, state: &PanelState) -> Outcome {
             if state.conversations.is_empty() {
                 popover_note(ui, "Harness 里还没有会话。");
             }
-            for conversation in &state.conversations {
+            // Conversations nobody has said anything in are left out: the harness keeps a record for
+            // every session that was opened and abandoned, and a list of untitled, empty entries is a
+            // list the user has to read to find the one they meant. The exception is the conversation the
+            // panel is in — a session created by sending the first message is blank for exactly one
+            // moment, and hiding the row the panel is attached to would be worse than a spare row.
+            let attached = state.attached.as_deref();
+            let pinned = state.pinned.as_deref();
+            for conversation in state.conversations.iter().filter(|conversation| {
+                !conversation.blank
+                    || attached == Some(conversation.session_id.as_str())
+                    || pinned == Some(conversation.session_id.as_str())
+            }) {
                 let attached = state.attached.as_deref() == Some(conversation.session_id.as_str());
                 let pinned = state.pinned.as_deref() == Some(conversation.session_id.as_str());
                 let name = conversation_name(state, conversation);

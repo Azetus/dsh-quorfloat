@@ -1211,13 +1211,61 @@ mod tests {
         assert!(matches!(&live, crate::app::session::transcript::Entry::Assistant { streaming: true, .. }));
     }
 
+    /// Drawing a conversation with a frame this build cannot read must not panic.
+    ///
+    /// A panic inside the layout closure takes the panel down with no message the user can act
+    /// on, and the code that draws blocks, tool output and notices is the code with the most ways
+    /// Draw the panel at a given size and return every piece of text it produced, with where on
+    /// screen it landed.
+    ///
+    /// Read from the painted shapes rather than from the widget tree: what matters in these tests
+    /// is what a user could see, and a widget that exists but paints nothing is not that.
+    fn drawn_text(app: &mut App, size: egui::Vec2) -> Vec<(String, egui::Rect)> {
+        let ctx = egui::Context::default();
+        // The way `main` does it: before the first frame, because egui builds its font atlas when a
+        // pass starts, and a family named in the same frame it was added is not in it.
+        crate::ui::fonts::ensure_icons(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+        // epaint refuses to drop a texture delta nobody applied, and a test has no renderer to
+        // apply it to: saying so here is the difference between a helper and a panic.
+        output.textures_delta.clear();
+        let mut texts = Vec::new();
+        for shape in output.shapes {
+            collect_text(&shape.shape, &mut texts);
+        }
+        texts
+    }
+
+    /// Walk a shape tree, collecting every piece of text and the rectangle it occupies.
+    fn collect_text(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+        match shape {
+            egui::Shape::Text(text) => {
+                out.push((text.galley.text().to_owned(), text.visual_bounding_rect()));
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_text(shape, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+
+    /// to get an index wrong.
     #[test]
     fn drawing_a_conversation_does_not_panic() {
-        // A panic inside the layout closure takes the panel down with no message the
-        // user can act on, and the code that draws blocks, tool output and notices is
-        // the code with the most ways to get an index wrong.
         let (mut app, recorded, session, _wake) = app_and_session();
         deliver(&session, &recorded, conversation_frame());
+        let drawn = drawn_text(&mut app, egui::vec2(708.0, 620.0));
+        assert!(!drawn.is_empty(), "the panel draws a conversation at all");
+
+        // Deliberately a delta kind this build does not know, and an unterminated tool input:
+        // the two shapes most likely to be mis-indexed by a drawer.
         deliver(
             &session,
             &recorded,
@@ -1225,44 +1273,13 @@ mod tests {
                 method: "session/stream".to_owned(),
                 params: Some(serde_json::json!({
                     "sessionId": "session-1", "generation": 1,
-                    // Deliberately a delta kind this build does not know: the drawing
-                    // path has to survive an event it cannot interpret, because that is
-                    // what a harness upgrade looks like from here.
                     "frame": {"type": "chunk", "revision": 9, "index": 4, "time": 5,
                               "chunk": {"type": "tool-input-delta", "index": 2, "delta": "{\"command\":"}},
                 })),
             },
         );
-
-        let ctx = egui::Context::default();
-        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.draw(ui));
-        output.textures_delta.clear();
-    }
-
-    /// Draw the panel at a given size and return every piece of text it produced, with
-    /// where on screen it landed.
-    fn drawn_text(app: &mut App, size: egui::Vec2) -> Vec<(String, egui::Rect)> {
-        let ctx = egui::Context::default();
-        // The way `main` does it: before the first frame, because egui builds its font atlas
-        // when a pass starts and a family named in the same frame it was added is not in it.
-        crate::ui::fonts::ensure_icons(&ctx);
-        let input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
-            ..Default::default()
-        };
-        let mut output = ctx.run_ui(input, |ui| app.draw(ui));
-        let texts = output
-            .shapes
-            .iter()
-            .filter_map(|clipped| match &clipped.shape {
-                egui::Shape::Text(text) => {
-                    Some((text.galley.text().to_owned(), egui::Rect::from_min_size(text.pos, text.galley.size())))
-                }
-                _ => None,
-            })
-            .collect();
-        output.textures_delta.clear();
-        texts
+        let after = drawn_text(&mut app, egui::vec2(708.0, 620.0));
+        assert!(!after.is_empty(), "and it still draws with a frame it cannot interpret");
     }
 
     #[test]
@@ -1923,6 +1940,51 @@ mod tests {
         let mut sink = RecordingSink(recorded.clone());
         let mut guard = session.lock().expect("not poisoned");
         guard.on_frame(frame, &mut sink);
+    }
+
+    /// Long unbroken runs get break opportunities, and only for display.
+    ///
+    /// The panel's width is fixed, and egui never breaks inside a word unless it is truncating,
+    /// so a code block holding one long JSON line painted past the panel's edge. The break
+    /// opportunities are zero-width, and the text a copy takes is untouched.
+    #[test]
+    fn long_runs_are_given_something_to_break_on() {
+        let source = "{\"key\":\"value\"}";
+        let long = format!("```json\\n{}\\n```", source.repeat(6));
+        let wrapped = crate::ui::soft_wrap_for_display(&long);
+        assert!(wrapped.contains('\u{200b}'), "a break opportunity was added");
+        assert!(
+            wrapped.chars().filter(|c| *c != '\u{200b}').eq(long.chars()),
+            "and nothing else changed: same characters, in the same order",
+        );
+        // Ordinary text is left alone, including the Chinese that already breaks per character.
+        let prose = "这是一段普通的话，长度不足以需要断行。";
+        assert_eq!(crate::ui::soft_wrap_for_display(prose), prose);
+        assert_eq!(crate::ui::soft_wrap_for_display("a short line"), "a short line");
+    }
+
+    /// A card is built from the panel's own tokens, and its two actions are one shape.
+    ///
+    /// The design draws exactly one filled control per view and leaves the rest as surfaces
+    /// or text; the approval card used to have two filled buttons, a green and a red, which is
+    /// a second vocabulary inside one panel. Asserted on the widgets rather than on a rendering:
+    /// the introspection helper reports text galleys, not control rects, so button *geometry* is
+    /// not something it can see — but the choices themselves are.
+    #[test]
+    fn a_card_is_built_from_the_panels_own_tokens() {
+        let frame = crate::ui::theme::card_frame();
+        assert_eq!(frame.fill, crate::ui::theme::soft(), "the surface every other one uses");
+        assert_eq!(
+            frame.corner_radius,
+            egui::CornerRadius::same(crate::ui::theme::RADIUS_POPOVER),
+            "a card is a surface inside the panel, like a popover",
+        );
+        assert_eq!(frame.inner_margin, crate::ui::theme::PAD_CARD, "its own padding, from the tokens");
+
+        // The two actions are one shape because the same pair of helpers builds both, and they
+        // are the only buttons a card constructs. `egui::Button`'s fields are private, so the
+        // shape itself is verified by looking at the panel — which is what a real approval was
+        // for (see `docs/prototype.md` §38).
     }
 
     /// The host's `interaction/open` for one approval.

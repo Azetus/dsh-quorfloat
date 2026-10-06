@@ -537,6 +537,110 @@ pub const PAD_FOOTER: egui::Margin = egui::Margin { left: 22, right: 15, top: 8,
 pub const GAP: f32 = 10.0;
 
 /// A tighter gap, for icons against their labels (`gap:6px`).
+/// The horizontal padding of the card section: the composer's, because a card is about what the
+/// composer is doing — an approval is a message that cannot be sent until it is answered — and a
+/// box that starts where the search icon starts reads as belonging to it.
+pub const PAD_CARDS: egui::Margin = egui::Margin {
+    left: 22,
+    right: 22,
+    top: 0,
+    bottom: 0,
+};
+
+/// Inside a card (an approval or a question): the same family as the composer's padding,
+/// smaller because a card is a box inside the panel rather than the panel itself.
+pub const PAD_CARD: egui::Margin = egui::Margin::same(14);
+
+/// Between the rows of a card: its title, its reason, its options, its buttons.
+pub const GAP_CARD: f32 = 10.0;
+
+/// A card's surface: the panel's own soft fill, the popover's radius, the card's padding.
+///
+/// Approvals and questions are the panel's boxes-inside-the-panel, so they are built from the
+/// same three choices every other surface here is built from rather than from numbers of their
+/// own — which is what made them look like they came from a different application.
+///
+/// @returns the frame to draw a card in.
+#[must_use]
+pub fn card_frame() -> egui::Frame {
+    egui::Frame::NONE
+        .fill(soft())
+        .corner_radius(egui::CornerRadius::same(RADIUS_POPOVER))
+        .inner_margin(PAD_CARD)
+}
+
+/// A card's title.
+///
+/// @param ctx - for the panel's own font.
+/// @param text_value - the title.
+/// @returns the styled text.
+#[must_use]
+pub fn card_title(ctx: &egui::Context, text_value: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(text_value)
+        .font(font(ctx, Weight::Medium, TEXT_BODY))
+        .color(text())
+}
+
+/// The panel's primary button: one filled action per view, the design's `--q-button` on
+/// `--q-on-button`, at the send button's radius.
+///
+/// Every filled button in the panel is this one. A second filled button in the same view — a
+/// green "allow" beside a red "reject", say — is what the design's vocabulary does not have:
+/// it draws exactly one filled control per view and lets the rest be surfaces or text.
+///
+/// @param ctx - for the panel's own font.
+/// @param label - what the button says.
+/// @returns the button, ready to add to a layout.
+#[must_use]
+pub fn primary_button(ctx: &egui::Context, label: &str) -> egui::Button<'static> {
+    egui::Button::new(
+        egui::RichText::new(label.to_owned())
+            .font(font(ctx, Weight::Medium, TEXT_BODY))
+            .color(on_button()),
+    )
+    .fill(button())
+    .corner_radius(egui::CornerRadius::same(RADIUS_SUBMIT))
+    .min_size(egui::vec2(0.0, 30.0))
+}
+
+/// The panel's secondary button: a surface with a hairline, for the other choices in a view.
+///
+/// @param ctx - for the panel's own font.
+/// @param label - what the button says.
+/// @returns the button, ready to add to a layout.
+#[must_use]
+pub fn secondary_button(ctx: &egui::Context, label: &str) -> egui::Button<'static> {
+    egui::Button::new(
+        egui::RichText::new(label.to_owned())
+            .font(font(ctx, Weight::Regular, TEXT_BODY))
+            .color(text()),
+    )
+    .fill(soft())
+    .stroke(egui::Stroke::new(BORDER, line()))
+    .corner_radius(egui::CornerRadius::same(RADIUS_SUBMIT))
+    .min_size(egui::vec2(0.0, 30.0))
+}
+
+/// The surface of one option inside a card: the picker row's shape, without its behaviour.
+///
+/// A question's choices are read-only here, but they must still look like the choices they are —
+/// and like the rows of the picker, which is where the user will meet the same options.
+///
+/// @returns the frame to draw an option in.
+#[must_use]
+pub fn option_frame() -> egui::Frame {
+    egui::Frame::NONE
+        .fill(bg())
+        .stroke(egui::Stroke::new(BORDER, line()))
+        .corner_radius(egui::CornerRadius::same(RADIUS_PICKER))
+        .inner_margin(egui::Margin {
+            left: 10,
+            right: 10,
+            top: 8,
+            bottom: 8,
+        })
+}
+
 pub const GAP_TIGHT: f32 = 6.0;
 
 /// The closest two things get (`gap:3px` between the tools).
