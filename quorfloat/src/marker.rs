@@ -61,7 +61,7 @@ impl Marker {
         let Some(path) = &self.path else { return };
         use std::io::Write as _;
         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "[{}] {line}", crate::rpc::now_millis());
+            let _ = writeln!(file, "[{}] {line}", crate::ipc::rpc::now_millis());
         }
     }
 }

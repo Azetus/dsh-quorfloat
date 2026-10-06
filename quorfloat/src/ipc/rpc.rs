@@ -9,7 +9,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::protocol::{CAPABILITIES, PROTOCOL_VERSION, error_code};
+use crate::ipc::protocol::{CAPABILITIES, PROTOCOL_VERSION, error_code};
 
 /// One inbound message, classified the way JSON-RPC classifies it.
 #[derive(Debug, Clone, PartialEq)]
@@ -194,8 +194,8 @@ impl Router {
             "hello" => Outcome::ok(json!({
                 "protocol": PROTOCOL_VERSION,
                 "quorfloatVersion": crate::VERSION,
-                "platform": crate::platform::host_platform(),
-                "arch": crate::platform::host_arch(),
+                "platform": crate::ipc::platform::host_platform(),
+                "arch": crate::ipc::platform::host_arch(),
                 "capabilities": CAPABILITIES,
             })),
             _ => Outcome::unknown_method(method),

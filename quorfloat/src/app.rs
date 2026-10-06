@@ -25,7 +25,7 @@ use eframe::egui;
 
 use crate::fonts::{self, FontStatus};
 use crate::session::{ApprovalVerdict, FrameSink, Handoff, Interaction, InteractionKind, InteractionState, Session, SessionExit, WindowCommand};
-use crate::transport::StdinSource;
+use crate::ipc::transport::StdinSource;
 use crate::window::{Hotkey, WindowSettings};
 
 /// Something that needs the main thread's attention.
@@ -1141,7 +1141,7 @@ fn measured_capabilities(hotkey_active: bool) -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rpc::Inbound;
+    use crate::ipc::rpc::Inbound;
     use crate::session::{FrameSink, HotkeyReport, Identity};
     use std::sync::mpsc::channel;
 

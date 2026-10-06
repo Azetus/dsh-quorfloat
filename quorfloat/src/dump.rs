@@ -66,7 +66,7 @@ impl Dump {
     pub fn record(&self, method: &str, params: Option<&Value>) {
         let Some(path) = &self.path else { return };
         let line = serde_json::json!({
-            "at": crate::rpc::now_millis(),
+            "at": crate::ipc::rpc::now_millis(),
             "method": method,
             "params": params.cloned().unwrap_or(Value::Null),
         });

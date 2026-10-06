@@ -15,9 +15,9 @@
 
 use std::io::{BufReader, Read, Write};
 
-use crate::frame::{Decoded, FrameReader};
+use crate::ipc::frame::{Decoded, FrameReader};
 use crate::marker::Marker;
-use crate::rpc::{self, Inbound};
+use crate::ipc::rpc::{self, Inbound};
 use crate::session::{FrameSink, FrameSource};
 
 /// Writes frames to stdout, log lines to stderr, breadcrumbs to the marker file.
@@ -94,7 +94,7 @@ impl StdinSource {
 
     /// Counters of frames seen so far, for the exit summary.
     #[must_use]
-    pub fn stats(&self) -> crate::frame::FrameStats {
+    pub fn stats(&self) -> crate::ipc::frame::FrameStats {
         self.frames.stats()
     }
 
@@ -173,11 +173,11 @@ impl FrameSource for StdinSource {
 /// up in practice.
 #[cfg(test)]
 mod tests {
-    use crate::frame::Decoded;
+    use crate::ipc::frame::Decoded;
 
     #[test]
     fn a_reader_that_returns_one_byte_at_a_time_still_frames_correctly() {
-        let mut frames = crate::frame::FrameReader::new();
+        let mut frames = crate::ipc::frame::FrameReader::new();
         let mut collected = Vec::new();
         for byte in b"{\"id\":1}\n{\"id\":2}\n" {
             for entry in frames.push(&[*byte]) {

@@ -229,7 +229,7 @@ impl Follow {
     /// @returns the follow-up request, when the answer calls for one.
     pub fn resolve(
         &mut self,
-        outcome: Result<Value, crate::rpc::RpcError>,
+        outcome: Result<Value, crate::ipc::rpc::RpcError>,
         now: i64,
         sink: &mut dyn FrameSink,
     ) -> Option<Outgoing> {
@@ -583,7 +583,7 @@ mod tests {
         follow.next(0);
         follow.resolve(Ok(sessions(&[("session-1", 10)])), 1, &mut sink);
         let refused = follow.resolve(
-            Err(crate::rpc::RpcError { code: -32004, message: "no such session".to_owned(), data: None }),
+            Err(crate::ipc::rpc::RpcError { code: -32004, message: "no such session".to_owned(), data: None }),
             2,
             &mut sink,
         );
@@ -625,7 +625,7 @@ mod tests {
         let mut sink = Recorded::default();
         follow.next(0);
         follow.resolve(
-            Err(crate::rpc::RpcError { code: -32601, message: "unsupported".to_owned(), data: None }),
+            Err(crate::ipc::rpc::RpcError { code: -32601, message: "unsupported".to_owned(), data: None }),
             1,
             &mut sink,
         );

@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use dsh_quorfloat::app::{self, App, Reader, SharedSink};
 use dsh_quorfloat::marker::Marker;
 use dsh_quorfloat::session::{FrameSink, HotkeyReport, Identity, Session, SessionExit};
-use dsh_quorfloat::transport::{StdinSource, StdioSink};
+use dsh_quorfloat::ipc::transport::{StdinSource, StdioSink};
 use dsh_quorfloat::window::{self, Hotkey, WindowSettings};
 use dsh_quorfloat::VERSION;
 use eframe::egui;
@@ -61,8 +61,8 @@ fn run() -> Result<SessionExit, String> {
         quorfloat_version: VERSION.to_owned(),
         // The host's spelling, not Rust's: it compares these against its own
         // `process.platform` / `process.arch` (see `platform.rs`).
-        platform: dsh_quorfloat::platform::host_platform().to_owned(),
-        arch: dsh_quorfloat::platform::host_arch().to_owned(),
+        platform: dsh_quorfloat::ipc::platform::host_platform().to_owned(),
+        arch: dsh_quorfloat::ipc::platform::host_arch().to_owned(),
         hotkey: HotkeyReport {
             requested: hotkey.spec().to_owned(),
             registered: hotkey.is_active(),
