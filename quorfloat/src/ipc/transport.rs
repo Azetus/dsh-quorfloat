@@ -15,26 +15,30 @@
 
 use std::io::{BufReader, Read, Write};
 
-use crate::frame::{Decoded, FrameReader};
-use crate::rpc::{self, Inbound};
-use crate::session::{FrameSink, FrameSource};
+use crate::ipc::frame::{Decoded, FrameReader};
+use crate::runtime::diag::marker::Marker;
+use crate::ipc::rpc::{self, Inbound};
+use crate::app::session::{FrameSink, FrameSource};
 
-/// Writes frames to stdout and log lines to stderr.
+/// Writes frames to stdout, log lines to stderr, breadcrumbs to the marker file.
 pub struct StdioSink {
     out: std::io::Stdout,
+    marker: Marker,
 }
 
 impl Default for StdioSink {
     fn default() -> Self {
-        Self::new()
+        Self::new(Marker::disabled())
     }
 }
 
 impl StdioSink {
-    /// Create a sink over the process's stdout.
+    /// Create a sink over the process's stdout and stderr.
+    ///
+    /// @param marker - where durable breadcrumbs go; a disabled marker writes none.
     #[must_use]
-    pub fn new() -> Self {
-        Self { out: std::io::stdout() }
+    pub fn new(marker: Marker) -> Self {
+        Self { out: std::io::stdout(), marker }
     }
 }
 
@@ -54,6 +58,10 @@ impl FrameSink for StdioSink {
         // is not actionable — stderr is allowed to be closed — so it is dropped
         // rather than escalated into the session's control flow.
         let _ = writeln!(std::io::stderr(), "{line}");
+    }
+
+    fn mark(&mut self, line: &str) {
+        self.marker.write(line);
     }
 }
 
@@ -86,7 +94,7 @@ impl StdinSource {
 
     /// Counters of frames seen so far, for the exit summary.
     #[must_use]
-    pub fn stats(&self) -> crate::frame::FrameStats {
+    pub fn stats(&self) -> crate::ipc::frame::FrameStats {
         self.frames.stats()
     }
 
@@ -165,11 +173,11 @@ impl FrameSource for StdinSource {
 /// up in practice.
 #[cfg(test)]
 mod tests {
-    use crate::frame::Decoded;
+    use crate::ipc::frame::Decoded;
 
     #[test]
     fn a_reader_that_returns_one_byte_at_a_time_still_frames_correctly() {
-        let mut frames = crate::frame::FrameReader::new();
+        let mut frames = crate::ipc::frame::FrameReader::new();
         let mut collected = Vec::new();
         for byte in b"{\"id\":1}\n{\"id\":2}\n" {
             for entry in frames.push(&[*byte]) {

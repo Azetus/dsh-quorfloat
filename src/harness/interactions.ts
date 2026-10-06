@@ -6,8 +6,11 @@
  * claims a request only when all of the following hold, and delegates the rest:
  *
  * 1. the owning session is one this host is currently tracking;
- * 2. the peer is connected and the channel is handshaken;
- * 3. the request has not already been settled by someone else.
+ * 2. the panel is the surface that should answer *and* is showing that session —
+ *    a panel that is open but working on another conversation defers, because a
+ *    card the user cannot see the context of is worse than the window answering;
+ * 3. the peer is connected and the channel is handshaken;
+ * 4. the request has not already been settled by someone else.
  *
  * The third rule is what makes "the main window and the floating panel both show
  * the same request, but only one answer takes effect" true rather than hopeful:
@@ -29,6 +32,8 @@ export interface ApprovalRequestEvent {
   readonly toolName?: unknown
   readonly callId?: unknown
   readonly reason?: unknown
+  /** Localized prompt text the asker wrote for a human, keyed by locale. */
+  readonly displayReason?: unknown
   readonly signal?: AbortSignal
 }
 
@@ -87,9 +92,27 @@ export interface InteractionsDeps {
    *
    * A session being owned is necessary but not sufficient: the request must also
    * belong to the surface the user is looking at. See `presence.ts` for the rules
-   * and `docs/prototype.md` §18 for the measurements behind them.
+   * and `docs/progress.md` §18 for the measurements behind them.
    */
   authority(): AuthorityVerdict
+  /**
+   * The conversation the panel is currently showing, if any.
+   *
+   * Read from the last `session/attach` the peer made: the panel answers for the
+   * conversation it is displaying and for no other, so this is what turns "the
+   * panel is open" into "the panel is open *on this request*".
+   */
+  panelSession(): string | undefined
+  /**
+   * Whether the panel can render and answer this kind of request.
+   *
+   * Read from what the peer declared in `hello`, because claiming is exclusive: a
+   * panel that claims a request it cannot answer does not delay the answer, it
+   * delays the *question* — for the whole claim deadline, after which the request is
+   * handed back having been invisible the entire time. A request nobody can render
+   * must go straight to the answerer that can.
+   */
+  canAnswer(kind: 'approval' | 'question'): boolean
   /** Send one notification to the peer. */
   notify(method: string, params: unknown): Promise<void>
   /** Publish a status change for the status/settings surface. */
@@ -130,6 +153,7 @@ export class Interactions {
   /** Counters that make answer routing visible in diagnostics. */
   readonly #counters = {
     claimed: 0,
+    deferredForAnotherSession: 0,
     delegated: 0,
     answered: 0,
     refused: 0,
@@ -137,6 +161,7 @@ export class Interactions {
     registrationFailures: 0,
     authorityChecks: 0,
     deferredByAuthority: 0,
+    deferredUnsupported: 0,
   }
   #registered = false
   readonly #deadlineMs: number
@@ -286,6 +311,11 @@ export class Interactions {
             toolName: typeof request.toolName === 'string' ? request.toolName : 'unknown',
             callId: typeof request.callId === 'string' ? request.callId : null,
             reason: typeof request.reason === 'string' ? request.reason : null,
+            // The asker's own human-readable text, when it supplied one. Carried
+            // because `reason` is written for the audit log ("escalate sandbox to
+            // danger-full-access: …") while this is written to be *shown*, and the
+            // user deciding whether to widen a sandbox deserves the second one.
+            displayReason: projectDisplayReason(request.displayReason),
           },
         },
         request.signal,
@@ -465,20 +495,32 @@ export class Interactions {
       fresh: verdict.fresh,
     })
     if (verdict.authority === 'panel') {
-      this.#counters.claimed += 1
-      // A hint is advisory, but it is the only way the panel learns *what kind*
-      // of interaction it is holding, and that matters for questions: their
-      // answer shape has no "cancelled" member, so a question that times out is
-      // handed back rather than settled. Without the kind the panel cannot say
-      // "go type this into the Harness window" while there is still time.
-      //
-      // For approvals a hint when the window is hidden would only be noise —
-      // there is nothing to point at and the card is right there — so that case
-      // stays silent.
-      if (kind === 'question' || verdict.reason === 'harness-open-but-idle') {
-        await this.#announceHandoff(sessionId, kind, verdict)
+      // …and only for the conversation it is showing. An open panel that is working on a
+      // different conversation cannot answer this one: the user would be looking at a card
+      // with no visible context, and the window — which is showing the request in its own
+      // transcript — is the surface that can.
+      if (this.#deps.panelSession() !== sessionId) {
+        this.#counters.deferredForAnotherSession += 1
+        this.#deps.log.debug('the panel is showing another conversation; deferring', {
+          kind,
+          request: sessionId,
+          panel: this.#deps.panelSession() ?? null,
+        })
+        return 'defer'
       }
-      return 'claim'
+      // A panel answers what it can render. For anything else the request goes to the
+      // next answerer *now* rather than after the claim deadline: the user would
+      // otherwise be told to go and answer something that is not there yet.
+      if (this.#deps.canAnswer(kind)) {
+        this.#counters.claimed += 1
+        return 'claim'
+      }
+      this.#counters.deferredUnsupported += 1
+      this.#deps.log.info('the panel cannot answer this kind of interaction; deferring', { kind })
+      // The hint is the panel's only notice, and the user is looking at the panel, so
+      // it is the only surface that can say where the request went.
+      await this.#announceHandoff(sessionId, kind, verdict)
+      return 'defer'
     }
     this.#counters.deferredByAuthority += 1
     if (verdict.authority === 'none') {
@@ -518,6 +560,26 @@ export class Interactions {
 /** Choose the indefinite article for an interaction kind, for readable messages. */
 function articleFor(kind: 'approval' | 'question'): string {
   return kind === 'approval' ? 'an' : 'a'
+}
+
+/**
+ * Project the asker's localized prompt text onto the wire.
+ *
+ * Flattened to a plain `locale -> text` map rather than forwarded as received, so
+ * the peer is never handed a nested structure to interpret: it reads one key and
+ * falls back to `en`. Entries whose value is not a non-empty string are dropped
+ * rather than coerced — a locale the asker filled with something else is not text
+ * to put in front of a user deciding whether to widen a sandbox.
+ *
+ * @param value - the upstream `displayReason`, of unknown shape.
+ * @returns the usable entries, or `null` when there are none.
+ */
+function projectDisplayReason(value: unknown): Record<string, string> | null {
+  if (typeof value !== 'object' || value === null) return null
+  const entries = Object.entries(value as Record<string, unknown>).filter(
+    (entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].trim() !== '',
+  )
+  return entries.length > 0 ? Object.fromEntries(entries) : null
 }
 
 /**

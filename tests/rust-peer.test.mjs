@@ -133,7 +133,12 @@ test('the real supervisor completes a handshake with the Rust binary', { skip },
     // facts spelled uselessly, and nothing on the host branches on them.
     assert.equal(recorded.platform, process.platform, 'platform uses process.platform spelling')
     assert.equal(recorded.arch, process.arch, 'arch uses process.arch spelling')
-    assert.deepEqual(recorded.capabilities, ['window', 'hotkey', 'egui'])
+    assert.deepEqual(recorded.capabilities, ['window', 'hotkey', 'tauri', 'approval'])
+    // The same fact through the supervisor, because that is the path the plugin's
+    // claim gate reads. A declaration the snapshot failed to carry would silently
+    // defer every approval to the Harness window while the real binary was ready to
+    // render it.
+    assert.deepEqual(supervisor.snapshot().peerCapabilities, ['window', 'hotkey', 'tauri', 'approval'])
     // The reported flag is the *real* outcome of the grab, which is what makes a
     // conflict visible in the host's settings surface instead of leaving the user
     // pressing a key that does nothing.
@@ -300,6 +305,250 @@ test('the sidecar reports a measured window capability and its hidden start', { 
     const result = await supervisor.stop()
     assert.equal(result.exited, true)
     assert.equal(result.escalated, false)
+  }
+})
+
+test('the real host publishes an approval the panel records as a card', { skip }, async () => {
+  // The delivery half of A4, over the real wire. What cannot be tested here is the
+  // click that answers it — that needs a human and a window — so this asserts the
+  // part a machine can: the frame leaves the host's real channel, is framed by the
+  // real Rust reader, parsed by the real session, and turned into a card.
+  //
+  // Observed through the marker file rather than the host's logs, because the host
+  // captures the peer's stderr and never shows it. `DSH_QUORFLOAT_RUST_MARKER` is
+  // the one surface a developer or a test can read afterwards.
+  const { mkdtemp, readFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const directory = await mkdtemp(join(tmpdir(), 'quorfloat-marker-'))
+  const markerPath = join(directory, 'marker.log')
+
+  process.env['DSH_QUORFLOAT_RUST_MARKER'] = markerPath
+  process.env['DSH_QUORFLOAT_HOTKEY'] = 'Alt+Banana'
+  const { QuorfloatSupervisor } = await import(new URL('../lib/host/supervisor.js', import.meta.url))
+  const { HostRouter } = await import(new URL('../lib/bridge/router.js', import.meta.url))
+  const { DEFAULT_CONFIG } = await import(new URL('../lib/config.js', import.meta.url))
+  const effective = {
+    ...DEFAULT_CONFIG,
+    heartbeatMs: 200,
+    heartbeatMissLimit: 3,
+    startupTimeoutMs: 8000,
+    shutdownGraceMs: 1000,
+    logLevel: 'debug',
+  }
+  const supervisor = new QuorfloatSupervisor({
+    config: () => effective,
+    resolveBinary: () => ({ path: binary, args: [], source: 'config', attempts: [] }),
+    createRouter: channelSessionId =>
+      new HostRouter({
+        config: () => effective,
+        channelSessionId: () => channelSessionId,
+        hostVersion: () => 'cross-language-test',
+        listWorkspaces: async () => ({ items: [] }),
+        listSessions: async () => ({ items: [] }),
+        createSession: async () => ({ sessionId: 's' }),
+        attachSession: async sessionId => ({ sessionId }),
+        readHistory: async () => ({ records: [], hasMore: false }),
+        prompt: async () => ({ accepted: true }),
+        cancel: async () => ({ accepted: true }),
+        answerInteraction: async () => ({ accepted: true }),
+        reportPresence: async () => ({ accepted: true }),
+        diagnostics: () => ({}),
+      }),
+    log: { info: () => {}, warn: () => {}, debug: () => {}, error: () => {} },
+    onEvent: () => {},
+  })
+
+  /** Everything the binary has written so far. */
+  const breadcrumbs = async () => {
+    try {
+      return await readFile(markerPath, 'utf8')
+    } catch {
+      return ''
+    }
+  }
+
+  try {
+    await supervisor.start()
+    await waitFor('running', async () => supervisor.snapshot().state === 'running', { timeoutMs: 10000 })
+    await waitFor('the startup breadcrumb', async () => (await breadcrumbs()).includes('start'))
+
+    // The host's own payload shape, exactly as `Interactions` publishes it.
+    const published = await supervisor.notify('interaction/open', {
+      interactionId: 'approval-cross-1',
+      sessionId: 'session-cross',
+      kind: 'approval',
+      payload: {
+        toolName: 'bash',
+        callId: 'call-1',
+        reason: 'escalate sandbox to danger-full-access: cross-language test',
+        displayReason: { zh: '允许本次操作使用 danger-full-access 权限：跨语言测试' },
+      },
+    })
+    assert.equal(published, true, 'the host wrote the notification')
+
+    await waitFor(
+      'the panel to record the card',
+      async () => (await breadcrumbs()).includes('interaction approval-cross-1 approval arrived'),
+      { timeoutMs: 8000 },
+    )
+
+    // A hint is a different animal: no card, no id, and it must not be answerable.
+    await supervisor.notify('interaction/hint', {
+      sessionId: 'session-cross',
+      kind: 'question',
+      reason: 'harness-not-visible',
+      surfaces: ['desktop'],
+    })
+    await waitFor(
+      'the panel to record the hand-off',
+      async () => (await breadcrumbs()).includes('handoff question harness-not-visible surfaces=1'),
+      { timeoutMs: 8000 },
+    )
+    const written = await breadcrumbs()
+    assert.ok(
+      !written.includes('interaction approval-cross-1 answering'),
+      'nothing was answered: a card waits for a human, and no human clicked',
+    )
+
+    // Now paint them. A hidden window never runs the drawing code, so this is the
+    // only test that exercises the card layout against real payloads — including the
+    // question card, which has no answer widgets and must still lay out text the
+    // peer chose the length of.
+    await supervisor.notify('interaction/open', {
+      interactionId: 'question-cross-1',
+      sessionId: 'session-cross',
+      kind: 'question',
+      payload: {
+        questions: [
+          { id: 'q1', header: '部署目标', question: '部署到哪个环境？', options: [{ label: 'staging' }] },
+          { id: 'q2', question: '需要通知谁？' },
+        ],
+      },
+    })
+    await waitFor(
+      'the panel to record the question',
+      async () => (await breadcrumbs()).includes('interaction question-cross-1 question arrived'),
+      { timeoutMs: 8000 },
+    )
+
+    assert.equal(await supervisor.setPanelVisible(true), true)
+    await waitFor(
+      'the panel to report itself visible',
+      async () => supervisor.snapshot().panelVisible === true,
+      { timeoutMs: 8000 },
+    )
+    // Several frames' worth, so the cards are laid out rather than merely queued.
+    await sleep(400)
+    assert.equal(supervisor.snapshot().state, 'running', 'drawing the cards did not take the loop down')
+    await supervisor.setPanelVisible(false)
+    await waitFor(
+      'the panel to hide again',
+      async () => supervisor.snapshot().panelVisible === false,
+      { timeoutMs: 8000 },
+    )
+
+    // The session stayed healthy throughout, which is what says the frames were
+    // parsed rather than merely delivered.
+    assert.equal(supervisor.snapshot().consecutiveMissedHeartbeats, 0, 'pings were answered throughout')
+  } finally {
+    delete process.env['DSH_QUORFLOAT_RUST_MARKER']
+    delete process.env['DSH_QUORFLOAT_HOTKEY']
+    const result = await supervisor.stop()
+    assert.equal(result.exited, true)
+    assert.equal(result.escalated, false)
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
+test('the panel reads the conversation list and attaches to nothing on its own', { skip }, async () => {
+  // This test used to assert the opposite — that the panel attached to the newest
+  // conversation by itself — and the design changed: a panel attaches to the conversation
+  // the user pinned or chose, and otherwise waits to be given something to say (the
+  // conversation is created when they submit). Asserted here because it is a claim about
+  // two programs: the host must still be asked what exists, and must not be asked to
+  // attach to anything until a person decides.
+  const { mkdtemp, readFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const directory = await mkdtemp(join(tmpdir(), 'quorfloat-follow-'))
+  const markerPath = join(directory, 'marker.log')
+
+  process.env['DSH_QUORFLOAT_RUST_MARKER'] = markerPath
+  process.env['DSH_QUORFLOAT_HOTKEY'] = 'Alt+Banana'
+  const { QuorfloatSupervisor } = await import(new URL('../lib/host/supervisor.js', import.meta.url))
+  const { HostRouter } = await import(new URL('../lib/bridge/router.js', import.meta.url))
+  const { DEFAULT_CONFIG } = await import(new URL('../lib/config.js', import.meta.url))
+  const effective = {
+    ...DEFAULT_CONFIG,
+    heartbeatMs: 200,
+    heartbeatMissLimit: 3,
+    startupTimeoutMs: 8000,
+    shutdownGraceMs: 1000,
+    logLevel: 'debug',
+  }
+  /** Every session the binary asked to attach, in order. */
+  const attaches = []
+  let listCalls = 0
+  const supervisor = new QuorfloatSupervisor({
+    config: () => effective,
+    resolveBinary: () => ({ path: binary, args: [], source: 'config', attempts: [] }),
+    createRouter: channelSessionId =>
+      new HostRouter({
+        config: () => effective,
+        channelSessionId: () => channelSessionId,
+        hostVersion: () => 'cross-language-test',
+        listWorkspaces: async () => ({ items: [] }),
+        listSessions: async () => {
+          listCalls += 1
+          // Deliberately not in "newest first" order: the choice is by `updatedAt`,
+          // which is the only ordering the protocol actually promises.
+          return {
+            items: [
+              { sessionId: 'session-older', cwd: '/work/project', updatedAt: 10, running: false, blank: false },
+              { sessionId: 'session-newest', cwd: '/work/project', updatedAt: 90, running: true, blank: false },
+            ],
+          }
+        },
+        createSession: async () => ({ sessionId: 's' }),
+        attachSession: async sessionId => {
+          attaches.push(sessionId)
+          return { sessionId, generation: 7, replaced: false }
+        },
+        readHistory: async () => ({ records: [], hasMore: false }),
+        prompt: async () => ({ accepted: true }),
+        cancel: async () => ({ accepted: true }),
+        answerInteraction: async () => ({ accepted: true }),
+        reportPresence: async () => ({ accepted: true }),
+        diagnostics: () => ({}),
+      }),
+    log: { info: () => {}, warn: () => {}, debug: () => {}, error: () => {} },
+    onEvent: () => {},
+  })
+
+  try {
+    await supervisor.start()
+    await waitFor('running', async () => supervisor.snapshot().state === 'running', { timeoutMs: 10000 })
+    // The list is read — the picker draws it, and a pinned conversation is validated against
+    // it — and no attach follows, however busy the conversations in it are.
+    await waitFor('the panel to read the conversation list', async () => listCalls >= 1, { timeoutMs: 10000 })
+    assert.deepEqual(attaches, [], 'nothing is attached without a decision')
+
+    // And the record says the same thing: whatever the list contained, the panel never claims
+    // to be following anything — which is the durable evidence that it is waiting for a person
+    // rather than for the host to touch another conversation.
+    const marker = await readFile(markerPath, 'utf8').catch(() => '')
+    assert.ok(!marker.includes('follow '), `nothing is claimed as followed: ${marker}`)
+
+    // Discovery keeps running: it is how a conversation started later is noticed.
+    await waitFor('a second look for conversations', async () => listCalls >= 2, { timeoutMs: 10000 })
+    assert.deepEqual(attaches, [], 'and the steady state still attaches to nothing')
+    assert.equal(supervisor.snapshot().consecutiveMissedHeartbeats, 0, 'the polling did not disturb liveness')
+  } finally {
+    delete process.env['DSH_QUORFLOAT_RUST_MARKER']
+    delete process.env['DSH_QUORFLOAT_HOTKEY']
+    const result = await supervisor.stop()
+    assert.equal(result.exited, true)
+    assert.equal(result.escalated, false)
+    await rm(directory, { recursive: true, force: true })
   }
 })
 

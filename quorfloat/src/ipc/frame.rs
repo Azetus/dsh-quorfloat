@@ -16,7 +16,7 @@
 //! exists only so a frame written by a Windows tool (or a human debugging with
 //! `printf`) is not silently glued to the next one.
 
-use crate::protocol::MAX_FRAME_BYTES;
+use crate::ipc::protocol::MAX_FRAME_BYTES;
 
 /// What one decoded line turned out to be.
 #[derive(Debug, Clone, PartialEq, Eq)]

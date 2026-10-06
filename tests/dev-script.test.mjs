@@ -86,3 +86,34 @@ test('a previous registry of the wrong shape is replaced rather than trusted', (
     assert.equal(registry.tables.workspaces[DEV_WORKSPACE_ID].path, '/tmp/dev/workspace')
   }
 })
+
+// A performance run must never silently fall back to the debug binary.
+test('release/perf are dev flags, not Harness flags', async () => {
+  const { parseArgs } = await import('../scripts/dev.mjs')
+  const options = parseArgs(['--release', '--perf', '--no-build', '--port', '1234'])
+  assert.equal(options.rustProfile, 'release')
+  assert.equal(options.perf, true)
+  assert.equal(options.build, false)
+  assert.deepEqual(options.passthrough, [])
+  assert.equal(parseArgs([]).rustProfile, 'debug')
+})
+
+test('sidecar selection requires the requested profile even when another build exists', async () => {
+  const { sidecarSource } = await import('../scripts/dev.mjs')
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const root = mkdtempSync(join(tmpdir(), 'qf-profile-'))
+  const binary = process.platform === 'win32' ? 'dsh-quorfloat.exe' : 'dsh-quorfloat'
+  try {
+    const debug = join(root, 'quorfloat', 'target', 'debug')
+    const release = join(root, 'quorfloat', 'target', 'release')
+    mkdirSync(debug, { recursive: true })
+    writeFileSync(join(debug, binary), 'debug')
+    assert.throws(() => sidecarSource(root, 'release'), /cargo build.*--release/)
+    mkdirSync(release, { recursive: true })
+    writeFileSync(join(release, binary), 'release')
+    assert.equal(sidecarSource(root, 'release'), join(release, binary))
+    assert.equal(sidecarSource(root, 'debug'), join(debug, binary))
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})

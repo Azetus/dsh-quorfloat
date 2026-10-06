@@ -78,6 +78,12 @@ export interface RouterHost {
   attachSession(sessionId: string, fromSeq?: number): Promise<{ sessionId: string }>
   /** Read one page of durable history. */
   readHistory(sessionId: string, beforeSeq?: number): Promise<HistoryPageView>
+  /** Read the model and permission choices for a session. */
+  readOptions(sessionId?: string): Promise<unknown>
+  /** Switch a session's model and reasoning effort together. */
+  selectModel(sessionId: string, selection: unknown): Promise<void>
+  /** Apply a permission preset to a session. */
+  setPermission(sessionId: string, value: string): Promise<void>
   /** Admit one prompt; `requestId` is the caller's idempotency key. */
   prompt(sessionId: string, requestId: string, text: string): Promise<{ accepted: true }>
   /** Request cancellation of the active turn. */
@@ -97,6 +103,32 @@ export interface RouterHost {
   /** Free-form diagnostics for the settings/status surface. */
   diagnostics(): Record<string, unknown>
 }
+
+/** Every method this host answers, in one place.
+ *
+ * **The single source of truth for the protocol.** The supervisor used to keep its own copy of this
+ * list in order to register channel handlers, and the two drifted the first time a method was added:
+ * the router knew `session/options`, the copy did not, and the peer was told "unsupported method"
+ * for a method that was implemented. A list of names that must agree with a `switch` is a list that
+ * will not; `conformance.test.mjs` walks this one and fails if any entry is not answerable.
+ */
+export const METHODS = [
+  'hello',
+  'window/visibility',
+  'workspaces/list',
+  'sessions/list',
+  'session/create',
+  'session/attach',
+  'session/history',
+  'session/prompt',
+  'session/cancel',
+  'session/options',
+  'session/select',
+  'session/permission',
+  'interaction/answer',
+  'presence/report',
+  'diag/snapshot',
+] as const
 
 /** Fields the router validates out of an inbound parameter object. */
 function requireString(params: unknown, field: string, context: string): string {
@@ -185,6 +217,20 @@ export class HostRouter {
           requireString(params, 'sessionId', 'session/prompt'),
           requireString(params, 'requestId', 'session/prompt'),
           requireString(params, 'text', 'session/prompt'),
+        )
+      case 'session/options':
+        // `sessionId` is **optional** here, unlike every other session method: the catalogs are
+        // process-wide, so a panel that has not attached yet can still be ready to show them.
+        return await this.#host.readOptions(this.#optionalString(params, 'sessionId'))
+      case 'session/select':
+        return await this.#host.selectModel(
+          requireString(params, 'sessionId', 'session/select'),
+          params,
+        )
+      case 'session/permission':
+        return await this.#host.setPermission(
+          requireString(params, 'sessionId', 'session/permission'),
+          requireString(params, 'value', 'session/permission'),
         )
       case 'session/cancel':
         return await this.#host.cancel(requireString(params, 'sessionId', 'session/cancel'))

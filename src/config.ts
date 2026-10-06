@@ -102,6 +102,11 @@ export interface QuorfloatConfig {
    * without reporting — and a stale report is treated as "not looking", so a
    * shorter value fails towards the panel rather than towards a window nobody
    * is watching.
+   *
+   * Keep it comfortably above the browser half's report heartbeat (5s): that
+   * heartbeat is what stops a live, focused page from looking expired. A value close
+   * to the heartbeat makes the authority flap between the two surfaces; four missed
+   * beats is the practical floor, which the 30s default gives.
    */
   readonly presenceMaxAgeMs: number
   /** Grace period between the shutdown request and escalating signals. */

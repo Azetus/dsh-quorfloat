@@ -72,6 +72,16 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 /** The executable name, matching what the host half resolves per platform. */
 const SIDECAR_NAME = process.platform === 'win32' ? 'dsh-quorfloat.exe' : 'dsh-quorfloat'
 
+/** The font the panel loads. The egui-era lookup (`quorfloat/src/ui/fonts.rs`) is
+ *  gone with the view layer; the web frontend (M4) consumes it from the bundled
+ *  assets, and the staged `fonts/` directory stays so the shipped layout rule
+ *  keeps being exercised. */
+const FONT_NAME = 'NotoSansSC-VF.otf'
+
+/** The licence that must sit beside it. Same directory, so they travel together. */
+const FONT_LICENCE = 'OFL.txt'
+
+
 /** Whether `npm` and `dsh` need a shell to be resolved (they do on Windows). */
 const NEEDS_SHELL = process.platform === 'win32'
 
@@ -118,11 +128,13 @@ const CORE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
 const DEV_WORKSPACE_ID = '00000000-0000-4000-8000-000000000001'
 
 /** Parse the options this script owns; anything else is passed through to dsh. */
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const options = {
     profile: DEFAULT_PROFILE,
     port: '0',
     build: true,
+    rustProfile: 'debug',
+    perf: false,
     open: false,
     dshHome: undefined,
     passthrough: [],
@@ -139,6 +151,12 @@ function parseArgs(argv) {
         break
       case '--port':
         options.port = argv[++index]
+        break
+      case '--release':
+        options.rustProfile = 'release'
+        break
+      case '--perf':
+        options.perf = true
         break
       case '--no-build':
         options.build = false
@@ -167,7 +185,9 @@ Options:
   --port <port>      listen port; 0 lets the OS pick a free one (default: 0)
   --dsh-home <path>  where to read model credentials from
                      (default: ${join(homedir(), '.dsh')})
-  --no-build         skip the pre-flight build
+  --release          build and run the release Rust sidecar (default: debug)
+  --perf             record CPU/active-frame timing; disable screenshot capture
+  --no-build         skip both JS and Rust builds; require the chosen Rust binary
   --open             let dsh open a browser (default: do not)
   -h, --help         this text
 
@@ -273,26 +293,19 @@ function stagePackage() {
   return { destination, entryPoints }
 }
 
-/**
- * Copy the Rust sidecar next to the staged package.
- *
- * Copied rather than referenced, because the host pins whatever path it is given:
- * pointing at `quorfloat/target/debug` would tie the running sidecar to a directory
- * another `cargo` invocation may be rewriting.
- *
- * A failed refresh is tolerated rather than fatal: Windows refuses to replace a
- * running executable, and the JavaScript half is what changes most of the time.
- *
- * @returns the staged executable's path, or `undefined` when none is built.
- */
-function stageSidecar() {
-  const candidates = [
-    join(ROOT, 'quorfloat', 'target', 'debug', SIDECAR_NAME),
-    join(ROOT, 'quorfloat', 'target', 'release', SIDECAR_NAME),
-  ]
-  const source = candidates.find(candidate => existsSync(candidate))
-  if (source === undefined) return undefined
+/** Resolve exactly one profile; a missing release build is never a debug run. */
+export function sidecarSource(root, profile) {
+  if (!['debug', 'release'].includes(profile)) throw new Error(`unknown Rust profile: ${profile}`)
+  const source = join(root, 'quorfloat', 'target', profile, SIDECAR_NAME)
+  if (!existsSync(source)) {
+    throw new Error(`missing ${profile} sidecar; run cargo build --manifest-path quorfloat/Cargo.toml${profile === 'release' ? ' --release' : ''}`)
+  }
+  return source
+}
 
+/** Copy the chosen build; fail rather than retaining a stale executable. */
+function stageSidecar(profile) {
+  const source = sidecarSource(ROOT, profile)
   const directory = join(DEV_HOME, 'sidecar')
   mkdirSync(directory, { recursive: true })
   const destination = join(directory, SIDECAR_NAME)
@@ -300,13 +313,71 @@ function stageSidecar() {
     try {
       rmSync(destination, { force: true })
     } catch {
-      process.stdout.write('dev: keeping the previous sidecar copy (it is in use)\n')
-      return destination
+      throw new Error('cannot replace the staged sidecar; stop the existing dev instance and retry')
     }
   }
   cpSync(source, destination, { force: true })
+  stageFonts(directory)
   return destination
 }
+
+/**
+ * Put the font and its licence where the sidecar looks for them.
+ *
+ * The sidecar resolves `fonts/<file>` next to its own executable, which is exactly the
+ * layout the platform package ships (`bin/`, `fonts/`) — so the development harness
+ * exercises the same lookup rule as production rather than a special case. Both files
+ * are copied together because they ship together: a font without its licence is the
+ * packaging mistake this layout is meant to make impossible.
+ */
+function stageFonts(sidecarDirectory) {
+  const groups = [{ directory: 'fonts', names: [FONT_NAME, FONT_LICENCE] }]
+  // An asset directory the repository no longer has is removed rather than left behind:
+  // a stale copy in the dev home is how a panel keeps working on a machine whose checkout
+  // would not — the same reason each file below is mirrored, not merely added.
+  for (const stale of ['icons']) {
+    rmSync(join(sidecarDirectory, stale), { recursive: true, force: true })
+  }
+  const missing = []
+  for (const group of groups) {
+    const target = join(sidecarDirectory, group.directory)
+    for (const name of group.names) {
+      const source = join(ROOT, 'quorfloat', 'assets', group.directory, name)
+      const destination = join(target, name)
+      if (!existsSync(source)) {
+        missing.push(name)
+        // Mirror the repository rather than keeping a copy from an earlier run: a staged
+        // asset the repository no longer has would let the panel look healthy while a
+        // fresh checkout is broken — and it is the very failure this harness exists to
+        // show you.
+        rmSync(destination, { force: true })
+        continue
+      }
+      mkdirSync(target, { recursive: true })
+      cpSync(source, destination, { force: true })
+    }
+  }
+  if (missing.length > 0) {
+    process.stdout.write(
+      `dev: missing ${missing.join(' and ')} in quorfloat/assets/fonts/\n`
+      + 'dev: the panel will fall back to Latin only — run `npm run fonts` to fetch them\n',
+    )
+    return
+  }
+  process.stdout.write(`dev: staged the font and its licence in ${sidecarDirectory}\n`)
+}
+
+/** One line describing what the staged sidecar will find. */
+function panelFonts(sidecar) {
+  if (sidecar === undefined) return '(no panel)'
+  const directory = join(dirname(sidecar), 'fonts')
+  const font = join(directory, FONT_NAME)
+  if (!existsSync(font)) return '(missing: run `npm run fonts`)'
+  const megabytes = (statSync(font).size / 1_048_576).toFixed(1)
+  const licence = existsSync(join(directory, FONT_LICENCE)) ? `+ ${FONT_LICENCE}` : '(licence missing)'
+  return `${font} (${megabytes} MB) ${licence}`
+}
+
 
 /**
  * Write the workspace registry the generated profile starts from.
@@ -497,6 +568,18 @@ function countFiles(directory) {
   return files
 }
 
+/** Where the sidecar appends its breadcrumbs during a dev run. */
+const MARKER_PATH = join(DEV_HOME, 'sidecar.log')
+
+/** Where the sidecar remembers its window position, so dev never writes into $HOME. */
+const WINDOW_STATE_PATH = join(DEV_HOME, 'window.json')
+
+/** And where it remembers pinned conversations and workspaces, for the same reason. */
+const PINNED_PATH = join(DEV_HOME, 'pinned.json')
+
+/** And the settings chosen in the panel, so a dev run cannot change the real user's theme. */
+const PREFERENCES_PATH = join(DEV_HOME, 'preferences.json')
+
 /** Start dsh, and shut it down cleanly on an interrupt. */
 function start(options, home, sidecar, staged) {
   const args = ['--profile', options.profile, '--port', options.port]
@@ -510,6 +593,25 @@ function start(options, home, sidecar, staged) {
     // The published package carries no binary yet, so without this the host has
     // nothing to resolve.
     ...(sidecar === undefined ? {} : { DSH_QUORFLOAT_PATH: sidecar }),
+    // The panel's only durable record. The host captures the sidecar's stderr and
+    // shows it nowhere, so without this file "did the approval reach the panel, and
+    // did the click leave it" has no answer after the fact.
+    DSH_QUORFLOAT_RUST_MARKER: MARKER_PATH,
+    ...(options.perf ? {
+      DSH_QUORFLOAT_PERF: '1',
+      DSH_QUORFLOAT_SCREENSHOT: '',
+      DSH_QUORFLOAT_ANIMATION_CAPTURE: '',
+    } : {}),
+    // Where the panel remembers where the user put it. Pointed at the throwaway home so
+    // that developing never edits the real user's remembered position.
+    DSH_QUORFLOAT_WINDOW_STATE: WINDOW_STATE_PATH,
+    // Without this the panel's pins would be written to the developer's real
+    // `~/.dsh-quorfloat/`, and a pinned conversation from a throwaway session would follow
+    // them into every later run.
+    DSH_QUORFLOAT_PINNED: PINNED_PATH,
+    // Same reasoning again: the theme and the keep-open switch are the user's, and a dev run
+    // that turned the panel dark would leave it dark in every later real run.
+    DSH_QUORFLOAT_PREFERENCES: PREFERENCES_PATH,
     // A deprecation warning from a dependency pollutes every line otherwise.
     NODE_NO_WARNINGS: '1',
   }
@@ -518,7 +620,12 @@ function start(options, home, sidecar, staged) {
     + `     DSH_HOME=${home}\n`
     + `     staged=${staged.destination} (${countFiles(staged.destination)} files,`
     + ` entry points checked: ${staged.entryPoints.join(', ')})\n`
+    + `     Rust profile=${options.rustProfile} source=${sidecarSource(ROOT, options.rustProfile)} perf=${options.perf}\n`
     + `     sidecar=${sidecar ?? '(not built — no panel)'}\n`
+    + `     panel log=${sidecar === undefined ? '(no panel)' : MARKER_PATH}\n`
+    + `     window state=${sidecar === undefined ? '(no panel)' : WINDOW_STATE_PATH}\n`
+    + `     pins=${sidecar === undefined ? '(no panel)' : PINNED_PATH}\n`
+    + `     panel font=${panelFonts(sidecar)}\n`
     + `     bundles=${profileBundles(home, options.profile).join(', ')}\n`
     + `     workspace=${join(DEV_HOME, 'workspace')}\n\n`)
 
@@ -563,18 +670,19 @@ function main() {
     process.exit(1)
   }
 
+  if (options.build && !run('cargo', ['build', '--manifest-path', 'quorfloat/Cargo.toml',
+    ...(options.rustProfile === 'release' ? ['--release'] : [])])) {
+    throw new Error('the Rust build failed; not starting')
+  }
+  // Fail before staging any profile if --no-build selected a missing binary.
+  sidecarSource(ROOT, options.rustProfile)
+
   const credentialsHome = options.dshHome ?? join(homedir(), '.dsh')
   // Inside the throwaway home so the whole environment stays one deletable
   // directory and session data cannot land in a real project.
   const workspacePath = join(DEV_HOME, 'workspace')
   const { home, staged } = stageHome(credentialsHome, options.profile, workspacePath)
-  const sidecar = stageSidecar()
-  if (sidecar === undefined) {
-    process.stdout.write(
-      'dev: the Rust sidecar is not built; the plugin will start without a panel\n'
-      + '     build it with: cargo build --manifest-path quorfloat/Cargo.toml\n',
-    )
-  }
+  const sidecar = stageSidecar(options.rustProfile)
   start(options, home, sidecar, staged)
 }
 

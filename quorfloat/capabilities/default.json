@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "The panel window: core defaults only. Custom commands are not gated by the ACL.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

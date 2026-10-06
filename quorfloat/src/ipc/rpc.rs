@@ -1,7 +1,7 @@
 //! JSON-RPC 2.0 message shapes and the router.
 //!
 //! Standard JSON-RPC, with the project's own narrowing: ids are integers only,
-//! and the method set is fixed by `docs/protocol.md`. The host's router is the
+//! and the method set is fixed by `docs/dsh-quorfloat.md`. The host's router is the
 //! reference implementation — a method it does not know is answered
 //! `METHOD_NOT_FOUND`, and so is one this side does not know, because both ends
 //! are expected to tolerate a peer newer than themselves.
@@ -9,7 +9,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::protocol::{CAPABILITIES, PROTOCOL_VERSION, error_code};
+use crate::ipc::protocol::{CAPABILITIES, PROTOCOL_VERSION, error_code};
 
 /// One inbound message, classified the way JSON-RPC classifies it.
 #[derive(Debug, Clone, PartialEq)]
@@ -194,8 +194,8 @@ impl Router {
             "hello" => Outcome::ok(json!({
                 "protocol": PROTOCOL_VERSION,
                 "quorfloatVersion": crate::VERSION,
-                "platform": crate::platform::host_platform(),
-                "arch": crate::platform::host_arch(),
+                "platform": crate::ipc::platform::host_platform(),
+                "arch": crate::ipc::platform::host_arch(),
                 "capabilities": CAPABILITIES,
             })),
             _ => Outcome::unknown_method(method),

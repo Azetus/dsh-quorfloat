@@ -12,7 +12,16 @@
  * guards, dedup keys, sequence checks) are unit-testable without a runtime.
  */
 
-import type { FollowFrame, FollowHandle, QuorfloatHarness, SessionSummaryView, WorkspaceView } from './adapter.js'
+import type {
+  FollowFrame,
+  FollowHandle,
+  ModelChoiceView,
+  QuorfloatHarness,
+  SessionOptionsView,
+  SessionStatsView,
+  SessionSummaryView,
+  WorkspaceView,
+} from './adapter.js'
 import { HarnessError } from './adapter.js'
 
 /** Minimal logger shape used here. */
@@ -70,10 +79,52 @@ interface PromptRecord {
   detail?: unknown
 }
 
+/**
+ * The prompt key a user message was created from, when it has one.
+ *
+ * The shape is the Harness's own: a `user/message` carries `source: {kind: 'user', rpcId}`, and `rpcId`
+ * is the `requestId` the prompt was sent with (`packages/api/session-controller/src/commands.ts`).
+ *
+ * @param data - one event's `data`.
+ * @returns the key, or `undefined` for anything that is not a keyed user message.
+ */
+function promptKeyIn(data: unknown): string | undefined {
+  if (typeof data !== 'object' || data === null) return undefined
+  const source = (data as Record<string, unknown>)['source']
+  if (typeof source !== 'object' || source === null) return undefined
+  const { kind, rpcId } = source as { kind?: unknown; rpcId?: unknown }
+  if (kind !== 'user' || typeof rpcId !== 'string' || rpcId === '') return undefined
+  return rpcId
+}
+
+/**
+ * The `data` of the event inside one snapshot record.
+ *
+ * A snapshot's `records` are event envelopes (`{type, event}`), while a live frame *is* the event, so
+ * the two arrive in different shapes and are reduced to one here.
+ *
+ * @param record - one entry of a snapshot's `records`.
+ * @returns the event's `data`, or `undefined` if the record is not an event envelope.
+ */
+function eventDataIn(record: unknown): unknown {
+  if (typeof record !== 'object' || record === null) return undefined
+  const event = (record as Record<string, unknown>)['event']
+  if (typeof event !== 'object' || event === null) return undefined
+  return (event as Record<string, unknown>)['data']
+}
+
 export class SessionLayer {
   readonly #deps: SessionLayerDeps
   readonly #follows = new Map<string, FollowState>()
   readonly #prompts = new Map<string, PromptRecord>()
+  /**
+   * Prompt keys each conversation has *already used*, as seen in its own history.
+   *
+   * Separate from {@link SessionLayer.#prompts}, which remembers only what this process sent: the
+   * Harness remembers a key for the life of the conversation, so a key can be spent by a **previous
+   * run of the panel**. See {@link SessionLayer.prompt} for what a spent key costs.
+   */
+  readonly #usedKeys = new Map<string, Set<string>>()
   /** Session ids the user is currently looking at, newest attach wins. */
   #activeSessionId: string | undefined
   /** Monotonic generation source, per layer (not per session). */
@@ -204,6 +255,49 @@ export class SessionLayer {
     return true
   }
 
+  /**
+   * Push one session's statistics to the peer.
+   *
+   * Called on attach and once per finished turn rather than per frame: the numbers only change when
+   * a step closes, and the read is a projection walk. It is also fired after a prompt is admitted,
+   * because that is when `running` flips and the panel's footer starts showing progress.
+   *
+   * A failure is logged and swallowed — statistics are an adornment, and no session call may fail
+   * because a counter could not be read.
+   *
+   * @param sessionId - the session to report on.
+   */
+  async refreshStats(sessionId: string): Promise<void> {
+    let stats: SessionStatsView | undefined
+    try {
+      stats = await this.#deps.harness.stats(sessionId)
+    } catch (error) {
+      this.#deps.log.debug('statistics read failed', { sessionId, error: String(error) })
+      return
+    }
+    if (stats === undefined) return
+    await this.#deps.notify('session/stats', { sessionId, stats })
+  }
+
+  /** Read the model and permission choices the panel offers. */
+  async readOptions(sessionId?: string): Promise<SessionOptionsView> {
+    return await this.#deps.harness.options(sessionId)
+  }
+
+  /** Switch one session's model and reasoning effort. */
+  async selectModel(sessionId: string, selection: ModelChoiceView): Promise<void> {
+    await this.#deps.harness.selectModel(sessionId, selection)
+    // The picker's own answer is the projection the host just wrote; re-reading it here means the
+    // panel shows what was *accepted* rather than what it asked for.
+    this.#deps.onStateChange?.(sessionId, 'model-selected', selection)
+  }
+
+  /** Apply one permission preset. */
+  async setPermission(sessionId: string, value: string): Promise<void> {
+    await this.#deps.harness.setPermission(sessionId, value)
+    this.#deps.onStateChange?.(sessionId, 'permission-set', { value })
+  }
+
   /** Stop every subscription; used on plugin unload and on channel loss. */
   detachAll(reason: string): void {
     for (const state of this.#follows.values()) this.#closeFollow(state, reason)
@@ -259,6 +353,29 @@ export class SessionLayer {
         detail: existing.detail,
       })
     }
+    // **A key this conversation has already spent can never be admitted**, whatever the peer believes.
+    // The Harness's session controller answers `{accepted: true}` to a repeated `requestId` *without
+    // admitting anything* — `hasPromptRequest` matches the `user/message` whose `source.rpcId` is that
+    // key — so forwarding it would tell the peer a message was delivered that never was. Measured
+    // 2026-10-08: a restarted panel reused `session-…:prompt-1` for a conversation that already had it,
+    // its input was cleared, and nothing was ever sent. The peer keeps the text when it hears a refusal,
+    // so refusing is the half that makes the mistake recoverable; the log line is the half that makes it
+    // findable.
+    if (this.#usedKeys.get(sessionId)?.has(requestId) === true) {
+      this.#deps.log.warn('refused a prompt whose key this conversation has already used', {
+        sessionId,
+        requestId,
+      })
+      this.#deps.onStateChange?.(sessionId, 'prompt-key-reused', { requestId })
+      // The message is Chinese and leads with the action, because it is read in the panel's status line,
+      // which is Chinese and truncates on the right — the same surface the layer's other reasons reach
+      // ("正在获取工作区，请稍候再发送"). The log line above stays English, like every other host log.
+      throw new HarnessError(
+        'stale',
+        '请再按一次发送：这条消息的幂等键本会话已经用过，Harness 会丢弃它',
+        { sessionId, requestId },
+      )
+    }
     const record: PromptRecord = { requestId, sessionId, text, state: 'pending' }
     this.#prompts.set(requestId, record)
     try {
@@ -271,6 +388,41 @@ export class SessionLayer {
       record.detail = error instanceof Error ? error.message : String(error)
       throw error
     }
+  }
+
+  /**
+   * Remember the prompt keys a conversation's history carries.
+   *
+   * Best effort on purpose: the opening snapshot is paged (it reports `hasMore`), so a key spent far
+   * enough back may never be seen, and a guard that cannot see a key lets it through. That direction is
+   * the safe one — a missed refusal costs what a refusal would have saved, while a *wrong* refusal would
+   * refuse a message that could have been sent.
+   *
+   * @param sessionId - the conversation the records belong to.
+   * @param datas - event `data` values, from a snapshot's records or from one event frame.
+   */
+  #rememberUsedKeys(sessionId: string, datas: readonly unknown[]): void {
+    let keys: Set<string> | undefined
+    for (const data of datas) {
+      const key = promptKeyIn(data)
+      if (key === undefined) continue
+      keys ??= this.#usedKeysFor(sessionId)
+      keys.add(key)
+    }
+  }
+
+  /**
+   * The key set for one conversation, created on first use.
+   *
+   * @param sessionId - the conversation.
+   * @returns its set, to add to.
+   */
+  #usedKeysFor(sessionId: string): Set<string> {
+    const existing = this.#usedKeys.get(sessionId)
+    if (existing !== undefined) return existing
+    const created = new Set<string>()
+    this.#usedKeys.set(sessionId, created)
+    return created
   }
 
   /**
@@ -306,6 +458,9 @@ export class SessionLayer {
       case 'snapshot': {
         state.snapshotDelivered = true
         state.cursor = frame.cursor
+        // Before the peer sees the snapshot: it may prompt the moment it has it, and a prompt judged
+        // against a stale key set is a prompt that slips through the guard below.
+        this.#rememberUsedKeys(sessionId, frame.records.map(record => eventDataIn(record)))
         await this.#deps.notify('session/snapshot', {
           sessionId,
           generation,
@@ -315,6 +470,10 @@ export class SessionLayer {
           projections: frame.projections,
           assistantStream: frame.assistantStream,
         })
+        // The snapshot carries projections, but only this one: their later updates travel on a
+        // different stream the panel does not open. So the first statistics are sent here, and
+        // refreshed when a turn closes.
+        await this.refreshStats(sessionId)
         return
       }
       case 'event': {
@@ -346,6 +505,7 @@ export class SessionLayer {
           return
         }
         state.cursor = frame.seq
+        if (frame.eventType === 'user/message') this.#rememberUsedKeys(sessionId, [frame.data])
         await this.#deps.notify('session/event', {
           sessionId,
           generation,
@@ -354,6 +514,12 @@ export class SessionLayer {
           time: frame.time,
           data: frame.data,
         })
+        // The one event that makes the statistics stale: `turn/end` closes the last step of a turn,
+        // which is exactly when turns, steps, decode time and token usage stop changing. Awaited so
+        // the panel receives the totals no later than the event that produced them.
+        if (frame.eventType === 'turn/end' || frame.eventType === 'step/end') {
+          await this.refreshStats(sessionId)
+        }
         return
       }
       case 'assistant-stream': {

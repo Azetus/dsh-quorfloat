@@ -27,6 +27,7 @@ import {
   createHarnessFromContext,
   HarnessError,
   probeServices,
+  type ModelChoiceView,
   type ProbeResult,
   type QuorfloatHarness,
 } from './harness/adapter.js'
@@ -199,6 +200,16 @@ export function createPlugin(overrides: PluginOverrides = {}) {
         ctx,
         ownedSessionIds: () => sessionLayer.ownedSessionIds(),
         authority,
+        // Which conversation the panel is showing. Together with the verdict this is what
+        // makes the panel answer only for its own conversation: an open panel that is
+        // working on something else defers, and the Harness window answers.
+        panelSession: () => sessionLayer.activeSessionId,
+        // The peer declares what its build implements in `hello`, and claiming is
+        // exclusive — so the panel claims only what it says it can render. Today that
+        // is approvals: a question's answer is a list of selected option ids and the
+        // panel has no widget for it, so claiming one would hide it from the Harness
+        // window for the whole claim deadline and then hand it back.
+        canAnswer: kind => activation.supervisor?.snapshot().peerCapabilities.includes(kind) === true,
         notify: async (method, params) => {
           const supervisor = activation.supervisor
           if (supervisor === undefined) return
@@ -232,6 +243,10 @@ export function createPlugin(overrides: PluginOverrides = {}) {
             createSession: async workspaceId => await sessionLayer.createSession(workspaceId),
             attachSession: async sessionId => await sessionLayer.attach(sessionId),
             readHistory: async (sessionId, beforeSeq) => await sessionLayer.readHistory(sessionId, beforeSeq),
+            readOptions: async sessionId => await sessionLayer.readOptions(sessionId),
+            selectModel: async (sessionId, selection) =>
+              await sessionLayer.selectModel(sessionId, selection as ModelChoiceView),
+            setPermission: async (sessionId, value) => await sessionLayer.setPermission(sessionId, value),
             prompt: async (sessionId, requestId, text) => await sessionLayer.prompt(sessionId, requestId, text),
             cancel: async sessionId => await sessionLayer.cancel(sessionId),
             answerInteraction: async (interactionId, answer) => interactions.answer(interactionId, answer),
@@ -267,6 +282,16 @@ export function createPlugin(overrides: PluginOverrides = {}) {
               ? (params as { sessionId: string }).sessionId
               : undefined
             if (sessionId !== undefined) void sessionLayer.attach(sessionId)
+          }
+          // The panel has stopped showing a conversation — it started a new one, or the
+          // pinned one turned out to be gone. This is what keeps approval routing honest:
+          // the panel answers only for the conversation it is showing, so a subscription
+          // nobody is looking at must not keep claiming requests for it.
+          if (method === 'session/detach') {
+            const sessionId = typeof (params as { sessionId?: unknown })?.sessionId === 'string'
+              ? (params as { sessionId: string }).sessionId
+              : undefined
+            if (sessionId !== undefined) sessionLayer.detach(sessionId)
           }
         },
       })

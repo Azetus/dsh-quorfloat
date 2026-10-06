@@ -19,7 +19,7 @@ import type { QuorfloatConfig } from '../config.js'
 import { PROTOCOL_VERSION } from '../protocol.js'
 import { ChannelError } from '../bridge/errors.js'
 import { QuorfloatChannel } from '../bridge/channel.js'
-import { HostRouter, type RouterHost } from '../bridge/router.js'
+import { HostRouter, METHODS, type RouterHost } from '../bridge/router.js'
 import type { ResolvedBinary } from './binary.js'
 
 /** Coarse lifecycle phase; a snapshot always reports exactly one. */
@@ -60,6 +60,18 @@ export interface SupervisorSnapshot {
   readonly panelVisible: boolean
   /** Capabilities the panel process has measured and reported. */
   readonly panelCapabilities: readonly string[]
+  /**
+   * Capabilities the panel declared in `hello` — what its build implements.
+   *
+   * Distinct from `panelCapabilities` on purpose: that one is measured at runtime
+   * (a window that was really created), this one is the build inventory written
+   * before any window exists. It is what decides whether a claimed request can be
+   * rendered: claiming is exclusive, so claiming what the panel cannot answer hides
+   * the request from every other answerer for the whole claim deadline.
+   *
+   * Empty before the handshake, which defers everything — the safe direction.
+   */
+  readonly peerCapabilities: readonly string[]
 }
 
 /** Event delivered to listeners on every meaningful supervision change. */
@@ -159,6 +171,7 @@ export class QuorfloatSupervisor {
       restartExhausted: this.#restartExhausted,
       panelVisible: this.#panelVisible,
       panelCapabilities: this.#panelCapabilities,
+      peerCapabilities: this.#router?.handshake?.capabilities ?? [],
     }
   }
 
@@ -708,26 +721,15 @@ export class QuorfloatSupervisor {
 /**
  * Bind router methods to a plain function map for channel registration.
  *
+ * The list of methods comes from the router itself: a second copy here is what let
+ * `session/options` be implemented and still answered with "unsupported method".
+ *
  * @param router - the router to expose.
  * @returns method name → handler.
  */
 function routerMethods(router: HostRouter): Map<string, (params: unknown, method: string) => Promise<unknown>> {
-  const methods = [
-    'hello',
-    'window/visibility',
-    'workspaces/list',
-    'sessions/list',
-    'session/create',
-    'session/attach',
-    'session/history',
-    'session/prompt',
-    'session/cancel',
-    'interaction/answer',
-    'presence/report',
-    'diag/snapshot',
-  ]
   const map = new Map<string, (params: unknown, method: string) => Promise<unknown>>()
-  for (const method of methods) {
+  for (const method of METHODS) {
     map.set(method, async (params: unknown) => await router.handle(method, params))
   }
   return map
