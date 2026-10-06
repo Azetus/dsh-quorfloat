@@ -243,10 +243,16 @@ pub fn same_directory(left: &str, right: &str) -> bool {
 /// The attached one has a title, because its `session/title` event has arrived; the others
 /// are identified by the shortest thing that is still unique — see the note at the top.
 fn conversation_name(state: &PanelState, conversation: &SessionSummary) -> String {
+    // The name the Harness gave it, from whichever side knows: the attached conversation's own
+    // `session/title` event (which is fresher — a title can be rewritten as the conversation
+    // develops), and otherwise the title the host carried in the list.
     if state.attached.as_deref() == Some(conversation.session_id.as_str()) {
         if let Some(title) = state.title.as_deref().filter(|title| !title.trim().is_empty()) {
             return title.to_owned();
         }
+    }
+    if let Some(title) = conversation.title.as_deref().filter(|title| !title.trim().is_empty()) {
+        return title.to_owned();
     }
     short_id(&conversation.session_id).to_owned()
 }

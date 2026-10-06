@@ -51,8 +51,48 @@ export interface WorkspaceView {
 }
 
 /** One row of the Harness session list. */
+/**
+ * How many conversations one `sessions/list` call may read a title for.
+ *
+ * The panel lists every few seconds; a title read is an `inspect`, and unbounded work per poll is
+ * how a list of twenty conversations becomes twenty reads every three seconds. Whatever is left
+ * over keeps its id for one more poll rather than forever.
+ */
+const MAX_TITLE_READS = 2
+
+/**
+ * Fold the latest title out of a conversation's events.
+ *
+ * The same fold the Harness does — `foldSessionTitle`,
+ * `packages/session/session-title/src/index.ts:282` — copied rather than guessed: the last
+ * `session/title` event wins, and the title is its `data.title`.
+ *
+ * The tolerant version this replaced tried four shapes, because the payload belongs to the Harness
+ * and the source was not to hand. Now that it is, the measured shape is what is encoded, and
+ * anything else yields no title — a list of ids, which is where the panel already was — rather
+ * than a name invented out of the wrong field.
+ *
+ * @param events - a conversation's events, in order.
+ * @returns the title, or `undefined` when the conversation has never been named.
+ */
+export function foldSessionTitle(events: readonly unknown[]): string | undefined {
+  const event = events.findLast(item => (item as { type?: unknown } | undefined)?.type === 'session/title') as
+    | { data?: { title?: unknown } }
+    | undefined
+  if (event === undefined) return undefined
+  const title = event.data?.title
+  return typeof title === 'string' && title !== '' ? title : undefined
+}
+
 export interface SessionSummaryView {
   readonly sessionId: string
+  /**
+   * What the conversation is called, when the Harness has a name for it.
+   *
+   * The panel draws the conversation list from this record, and a list of session ids is a list
+   * nobody can read: the title is the only thing that tells two conversations apart.
+   */
+  readonly title?: string
   readonly cwd?: string
   readonly updatedAt: number
   readonly running: boolean
@@ -235,6 +275,8 @@ class CordisHarness implements QuorfloatHarness {
   readonly #log: AdapterLogger
   /** Counters that make upstream translation problems visible in diagnostics. */
   readonly #counters = { listCalls: 0, createCalls: 0, promptCalls: 0, cancelled: 0, followOpened: 0, followClosed: 0, cursorCalls: 0 }
+  /** Titles by session, with the `updatedAt` they were read at. */
+  readonly #titles = new Map<string, { updatedAt: number; title: string | undefined }>()
 
   /**
    * @param controller - the live session controller service.
@@ -293,17 +335,88 @@ class CordisHarness implements QuorfloatHarness {
     const signal = new AbortController().signal
     const value = await this.#controller.list({}, signal)
     const items = Array.isArray(value?.items) ? value.items : []
-    return items.map(item => {
+    const summaries = items.map(item => {
       const sessionId = typeof item['sessionId'] === 'string' ? item['sessionId'] : ''
       const cwd = typeof item['cwd'] === 'string' ? item['cwd'] : undefined
+      const title = typeof item['title'] === 'string' && item['title'] !== '' ? item['title'] : undefined
       return {
         sessionId,
+        ...(title === undefined ? {} : { title }),
         ...(cwd === undefined ? {} : { cwd }),
         updatedAt: typeof item['updatedAt'] === 'number' ? item['updatedAt'] : 0,
         running: item['running'] === true,
         blank: item['blank'] === true,
       }
     }).filter(item => item.sessionId !== '')
+    return await this.#withTitles(summaries, signal)
+  }
+
+  /**
+   * Name the conversations, reading the ones whose name is not known yet.
+   *
+   * The Harness's own list carries no titles — measured, not assumed: with the field mapped, the
+   * panel's record read `sessions 4 named 0`. The names exist in each conversation's history as a
+   * `session/title` event, and `inspect` is documented as cold-safe — the persisted header and
+   * prefix, without resuming an agent — so reading them wakes nothing.
+   *
+   * Cached by session and invalidated by `updatedAt`: a conversation that has moved on may have
+   * been renamed, and one that has not is asked about once.
+   *
+   * @param summaries - what the list gave, without names.
+   * @param signal - abort signal, shared with the list call.
+   * @returns the same conversations, as many named as the budget allowed.
+   */
+  async #withTitles(
+    summaries: readonly SessionSummaryView[],
+    signal: AbortSignal,
+  ): Promise<readonly SessionSummaryView[]> {
+    let budget = MAX_TITLE_READS
+    const named: SessionSummaryView[] = []
+    for (const summary of summaries) {
+      if (summary.title !== undefined) {
+        named.push(summary)
+        continue
+      }
+      const cached = this.#titles.get(summary.sessionId)
+      if (cached !== undefined && cached.updatedAt === summary.updatedAt) {
+        named.push(cached.title === undefined ? summary : { ...summary, title: cached.title })
+        continue
+      }
+      if (budget <= 0) {
+        named.push(summary)
+        continue
+      }
+      budget -= 1
+      try {
+        const title = await this.#readTitle(summary.sessionId, signal)
+        this.#titles.set(summary.sessionId, { updatedAt: summary.updatedAt, title })
+        named.push(title === undefined ? summary : { ...summary, title })
+      } catch (error) {
+        // A conversation that cannot be inspected keeps its id in the list rather than vanishing
+        // from it: the list is about what exists, not about what can be named.
+        this.#log.debug('could not read a conversation title', {
+          sessionId: summary.sessionId,
+          error: String(error),
+        })
+        named.push(summary)
+      }
+    }
+    return named
+  }
+
+  /**
+   * Read one conversation's title from its history.
+   *
+   * The last `session/title` event wins: a conversation can be renamed as it develops.
+   *
+   * @param sessionId - the conversation to read.
+   * @param signal - abort signal.
+   * @returns the title, or `undefined` when it has never been named.
+   */
+  async #readTitle(sessionId: string, signal: AbortSignal): Promise<string | undefined> {
+    const inspection = await this.#controller.inspect(sessionId, signal)
+    const events = Array.isArray(inspection?.events) ? inspection.events : []
+    return foldSessionTitle(events)
   }
 
   /** {@inheritDoc QuorfloatHarness.cursor} */

@@ -481,6 +481,13 @@ impl Follow {
                 // the picker shows, and asking twice for one fact is how two views of it
                 // start to disagree.
                 self.sessions = parse_sessions(&result);
+                // The count and how many carry a name, because "the list shows session ids" is a
+                // question about what the host sent, and this is the record that answers it.
+                sink.mark(&format!(
+                    "sessions {} named {}",
+                    self.sessions.len(),
+                    self.sessions.iter().filter(|entry| entry.title.is_some()).count(),
+                ));
                 // A pinned conversation the host no longer lists is a pin that cannot be
                 // honoured. Keeping it would leave the panel attached to something that is not
                 // there — and looking, from the outside, exactly like a panel with nothing to
@@ -704,6 +711,12 @@ pub struct SessionSummary {
     pub session_id: String,
     /// When the Harness last touched it, in epoch milliseconds.
     pub updated_at: i64,
+    /// What the Harness calls this conversation, when it has a name for it.
+    ///
+    /// The list is what the picker draws, and a row of session ids is a list nobody can read; the
+    /// host is the only side that knows the titles of conversations this panel has never attached
+    /// to.
+    pub title: Option<String>,
     /// The workspace directory's name, when the host reported one.
     pub label: Option<String>,
     /// That directory in full, which is how a conversation is matched to the workspace it
@@ -743,6 +756,11 @@ fn summaries(result: &Value) -> Vec<SessionSummary> {
             Some(SessionSummary {
                 session_id: session_id.to_owned(),
                 updated_at: item.get("updatedAt").and_then(Value::as_i64).unwrap_or(0),
+                title: item
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .filter(|title| !title.trim().is_empty())
+                    .map(str::to_owned),
                 cwd: item.get("cwd").and_then(Value::as_str).map(str::to_owned),
                 label: item
                     .get("cwd")
@@ -1134,6 +1152,34 @@ mod tests {
     }
 
     #[test]
+    /// The titles the picker draws: the host carries them in the list.
+    #[test]
+    fn a_listed_conversation_carries_the_name_the_host_gave_it() {
+        let mut follow = started();
+        let mut sink = Recorded::default();
+        follow.next(0);
+        let _ = follow.resolve(
+            Ok(json!({"items": [
+                {"sessionId": "session-1", "updatedAt": 10, "title": "随机测试对话"},
+                {"sessionId": "session-2", "updatedAt": 9, "title": "   "},
+                {"sessionId": "session-3", "updatedAt": 8},
+            ]})),
+            1,
+            &mut sink,
+        );
+        let titles: Vec<Option<&str>> = follow
+            .sessions()
+            .iter()
+            .map(|entry| entry.title.as_deref())
+            .collect();
+        assert_eq!(titles, vec![Some("随机测试对话"), None, None], "blank and missing are no name");
+        assert!(
+            sink.marks.iter().any(|mark| mark == "sessions 3 named 1"),
+            "and the record says how many arrived named: {:?}",
+            sink.marks,
+        );
+    }
+
     fn entries_without_a_usable_id_are_skipped() {
         let mut follow = started();
         let mut sink = Recorded::default();
