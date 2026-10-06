@@ -9,7 +9,8 @@ use eframe::egui;
 use crate::app::session::interaction::{ApprovalVerdict, Handoff, Interaction, InteractionKind, InteractionState};
 
 use super::Action;
-use crate::ui::theme::{ALLOW, BAD, BANNER, CARD, DISPLAY_LOCALE, MUTED, OK, REJECT, TEXT, WARN};
+use crate::ui::theme as theme;
+use crate::ui::theme::DISPLAY_LOCALE;
 
 use super::wrapped;
 
@@ -38,13 +39,13 @@ pub(super) fn handoff_banner(ui: &mut egui::Ui, handoff: &Handoff, action: &mut 
         (InteractionKind::Approval, false) => ("审批待确认", "当前没有可以确认它的 Harness 窗口"),
     };
     egui::Frame::NONE
-        .fill(BANNER)
+        .fill(theme::banner())
         .inner_margin(egui::Margin::same(10))
         .corner_radius(6)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(headline).size(13.0).color(WARN).strong());
-                ui.label(egui::RichText::new(instruction).size(12.0).color(TEXT));
+                ui.label(egui::RichText::new(headline).size(13.0).color(theme::warn_text()));
+                ui.label(egui::RichText::new(instruction).size(12.0).color(theme::text()));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("知道了").clicked() {
                         *action = Some(Action::DismissHandoff);
@@ -61,7 +62,7 @@ pub(super) fn handoff_banner(ui: &mut egui::Ui, handoff: &Handoff, action: &mut 
 /// @param action - collects what the user clicked.
 pub(super) fn approval_card(ui: &mut egui::Ui, card: &Interaction, action: &mut Option<Action>) {
     egui::Frame::NONE
-        .fill(CARD)
+        .fill(theme::soft())
         .inner_margin(egui::Margin::same(12))
         .corner_radius(6)
         .show(ui, |ui| {
@@ -69,7 +70,7 @@ pub(super) fn approval_card(ui: &mut egui::Ui, card: &Interaction, action: &mut 
                 Some(tool) => format!("工具 {tool} 请求提权"),
                 None => "有工具请求提权".to_owned(),
             };
-            ui.label(egui::RichText::new(headline).size(13.0).color(TEXT).strong());
+            ui.label(egui::RichText::new(headline).size(13.0).color(theme::text()).strong());
             ui.add_space(4.0);
             wrapped(
                 ui,
@@ -77,20 +78,20 @@ pub(super) fn approval_card(ui: &mut egui::Ui, card: &Interaction, action: &mut 
                     card.detail(DISPLAY_LOCALE).unwrap_or_else(|| "请求方没有说明原因".to_owned()),
                 )
                 .size(12.0)
-                .color(MUTED),
+                .color(theme::muted()),
             );
             ui.add_space(8.0);
             match card.state() {
                 InteractionState::Pending => {
                     ui.horizontal(|ui| {
-                        let allow = egui::Button::new(egui::RichText::new("允许一次").color(TEXT)).fill(ALLOW);
+                        let allow = egui::Button::new(egui::RichText::new("允许一次").color(theme::on_button())).fill(theme::good());
                         if ui.add(allow).clicked() {
                             *action = Some(Action::Answer {
                                 id: card.id().to_owned(),
                                 verdict: ApprovalVerdict::AllowOnce,
                             });
                         }
-                        let reject = egui::Button::new(egui::RichText::new("拒绝").color(TEXT)).fill(REJECT);
+                        let reject = egui::Button::new(egui::RichText::new("拒绝").color(theme::on_button())).fill(theme::bad());
                         if ui.add(reject).clicked() {
                             *action = Some(Action::Answer {
                                 id: card.id().to_owned(),
@@ -102,12 +103,12 @@ pub(super) fn approval_card(ui: &mut egui::Ui, card: &Interaction, action: &mut 
                 InteractionState::Submitting { .. } => {
                     // Buttons are gone rather than disabled: a second click would be a
                     // second decision for one question, and the host refuses it anyway.
-                    ui.label(egui::RichText::new("已提交，等待 Harness 确认…").size(12.0).color(MUTED));
+                    ui.label(egui::RichText::new("已提交，等待 Harness 确认…").size(12.0).color(theme::muted()));
                 }
                 InteractionState::Applied { verdict } => {
                     let (text, colour) = match verdict {
-                        ApprovalVerdict::AllowOnce => ("已允许一次", OK),
-                        ApprovalVerdict::Reject => ("已拒绝", BAD),
+                        ApprovalVerdict::AllowOnce => ("已允许一次", theme::good_text()),
+                        ApprovalVerdict::Reject => ("已拒绝", theme::bad_text()),
                     };
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(text).size(12.0).color(colour));
@@ -117,7 +118,7 @@ pub(super) fn approval_card(ui: &mut egui::Ui, card: &Interaction, action: &mut 
                 InteractionState::Refused { reason } => {
                     wrapped(
                         ui,
-                        egui::RichText::new(format!("已失效：{reason}")).size(12.0).color(BAD),
+                        egui::RichText::new(format!("已失效：{reason}")).size(12.0).color(theme::bad_text()),
                     );
                     ui.add_space(4.0);
                     close_button(ui, card, action);
@@ -140,20 +141,20 @@ pub(super) fn approval_card(ui: &mut egui::Ui, card: &Interaction, action: &mut 
 pub(super) fn question_card(ui: &mut egui::Ui, card: &Interaction, action: &mut Option<Action>) {
     let questions = card.questions();
     egui::Frame::NONE
-        .fill(CARD)
+        .fill(theme::soft())
         .inner_margin(egui::Margin::same(12))
         .corner_radius(6)
         .show(ui, |ui| {
             ui.label(
                 egui::RichText::new(format!("追问（{} 个问题）", card.question_count()))
                     .size(13.0)
-                    .color(TEXT)
+                    .color(theme::text())
                     .strong(),
             );
             ui.add_space(4.0);
             wrapped(
                 ui,
-                egui::RichText::new("本窗口不能回答追问，请切到 Harness 窗口输入").size(12.0).color(WARN),
+                egui::RichText::new("本窗口不能回答追问，请切到 Harness 窗口输入").size(12.0).color(theme::warn_text()),
             );
             for (header, question) in &questions {
                 ui.add_space(4.0);
@@ -161,11 +162,11 @@ pub(super) fn question_card(ui: &mut egui::Ui, card: &Interaction, action: &mut 
                     Some(header) => format!("• {header} — {question}"),
                     None => format!("• {question}"),
                 };
-                wrapped(ui, egui::RichText::new(text).size(12.0).color(MUTED));
+                wrapped(ui, egui::RichText::new(text).size(12.0).color(theme::muted()));
             }
             if card.question_count() > questions.len() {
                 ui.add_space(4.0);
-                wrapped(ui, egui::RichText::new("（还有更多，未全部显示）").size(12.0).color(MUTED));
+                wrapped(ui, egui::RichText::new("（还有更多，未全部显示）").size(12.0).color(theme::muted()));
             }
             ui.add_space(8.0);
             if ui.button("知道了").clicked() {

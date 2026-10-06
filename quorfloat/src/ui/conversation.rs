@@ -3,7 +3,8 @@
 use eframe::egui;
 
 use crate::app::PanelState;
-use crate::ui::theme::{BAD, CONVERSATION_MIN_HEIGHT, MUTED, TEXT};
+use crate::ui::theme as theme;
+use crate::ui::theme::CONVERSATION_MIN_HEIGHT;
 
 use super::wrapped;
 
@@ -30,7 +31,7 @@ pub(super) fn conversation(ui: &mut egui::Ui, state: &PanelState, height: f32) {
         .max_height(height)
         .show(ui, |ui| {
             if state.entries.is_empty() && state.live.is_none() {
-                ui.label(egui::RichText::new("尚无对话内容").size(12.0).color(MUTED));
+                ui.label(theme::meta(ui.ctx(), "尚无对话内容"));
                 return;
             }
             for entry in state.entries.iter() {
@@ -42,6 +43,23 @@ pub(super) fn conversation(ui: &mut egui::Ui, state: &PanelState, height: f32) {
         });
 }
 
+/// A model's answer, in the design's own proportion.
+///
+/// The line height is the point: an answer is prose to be read rather than scanned, and
+/// `line-height:1.85` is what the design uses to keep a long one readable. It is set on the
+/// text rather than through the style so that a wrapped paragraph and the reasoning block
+/// beside it do not drift apart.
+///
+/// @param ctx - the context, for the font the weights are cut from.
+/// @param text - the answer so far.
+/// @returns the text to lay out.
+fn answer(ctx: &egui::Context, text: &str) -> egui::RichText {
+    egui::RichText::new(text)
+        .font(theme::font(ctx, theme::Weight::Regular, theme::TEXT_BODY))
+        .line_height(Some(theme::LINE_ANSWER))
+        .color(theme::text())
+}
+
 /// Draw one line of the conversation.
 ///
 /// @param ui - where to draw.
@@ -50,37 +68,37 @@ pub(super) fn entry_ui(ui: &mut egui::Ui, entry: &crate::app::session::transcrip
     use crate::app::session::transcript::{Block, Entry};
 
     ui.add_space(6.0);
-    ui.label(egui::RichText::new(speaker(entry)).size(11.0).color(MUTED));
+    ui.label(egui::RichText::new(speaker(entry)).size(theme::TEXT_META).color(theme::muted()));
     ui.add_space(2.0);
     match entry {
         Entry::User { text } => {
-            wrapped(ui, egui::RichText::new(text).size(13.0).color(TEXT));
+            wrapped(ui, answer(ui.ctx(), text));
         }
         Entry::Assistant { blocks, streaming } => {
             for block in blocks {
                 match block {
-                    Block::Text(text) => wrapped(ui, egui::RichText::new(text).size(13.0).color(TEXT)),
+                    Block::Text(text) => wrapped(ui, answer(ui.ctx(), text)),
                     // Reasoning is drawn, not hidden: it is what the model is doing, and
                     // a panel that shows only conclusions makes a slow answer look stuck.
                     Block::Reasoning(text) => {
-                        wrapped(ui, egui::RichText::new(text).size(12.0).color(MUTED).italics());
+                        wrapped(ui, egui::RichText::new(text).size(theme::TEXT_META).color(theme::muted()).italics());
                     }
                     Block::Call { name, arguments } => {
-                        wrapped(ui, egui::RichText::new(format!("$ {name} {arguments}")).size(12.0).color(MUTED).monospace());
+                        wrapped(ui, egui::RichText::new(format!("$ {name} {arguments}")).size(theme::TEXT_META).color(theme::muted()).monospace());
                     }
                 }
                 ui.add_space(2.0);
             }
             if *streaming {
-                ui.label(egui::RichText::new("生成中…").size(11.0).color(MUTED));
+                ui.label(egui::RichText::new("生成中…").size(theme::TEXT_SMALL).color(theme::muted()));
             }
         }
         Entry::Tool { text, is_error, .. } => {
-            let colour = if *is_error { BAD } else { MUTED };
-            wrapped(ui, egui::RichText::new(text).size(12.0).color(colour).monospace());
+            let colour = if *is_error { theme::bad_text() } else { theme::muted() };
+            wrapped(ui, egui::RichText::new(text).size(theme::TEXT_META).color(colour).monospace());
         }
-        Entry::System { text } => wrapped(ui, egui::RichText::new(text).size(12.0).color(MUTED)),
-        Entry::Notice { text, .. } => wrapped(ui, egui::RichText::new(text).size(12.0).color(MUTED)),
+        Entry::System { text } => wrapped(ui, theme::meta(ui.ctx(), text)),
+        Entry::Notice { text, .. } => wrapped(ui, theme::meta(ui.ctx(), text)),
     }
 }
 

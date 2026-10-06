@@ -58,8 +58,41 @@ pub const FONT_FILE: &str = "NotoSansSC-VF.otf";
 /// directory whose layout is not the shipped one.
 pub const FONT_PATH_ENV: &str = "DSH_QUORFLOAT_FONT_PATH";
 
-/// Name this font is registered under inside egui.
+/// Name the CJK font is registered under inside egui.
 const FAMILY: &str = "noto-sans-sc";
+
+/// The family the medium (500) cut of the bundled variable font is registered under.
+pub const WEIGHT_MEDIUM: &str = "noto-sans-sc-medium";
+
+/// The family the semibold (600) cut is registered under.
+pub const WEIGHT_SEMIBOLD: &str = "noto-sans-sc-semibold";
+
+/// The context-data key under which "the weighted cuts are installed" is recorded.
+///
+/// **Per context, not per process.** epaint panics on a font family that is bound to no
+/// fonts, so the answer to "may I ask for the medium cut?" has to come from the context
+/// that will draw the text. A process-wide flag looked simpler and was wrong: tests run in
+/// one process with a context each, so a test that installed the font made every *other*
+/// test ask for families its own context had never heard of — which is a panic, and is
+/// exactly how this was found.
+const WEIGHTED_KEY: &str = "quorfloat.fonts.weighted";
+
+/// Whether the weighted cuts of the bundled font are installed in this context.
+///
+/// @param ctx - the render context that would draw the text.
+/// @returns `true` when asking for [`WEIGHT_MEDIUM`] or [`WEIGHT_SEMIBOLD`] is safe.
+#[must_use]
+pub fn has_weighted_families(ctx: &egui::Context) -> bool {
+    ctx.data(|data| data.get_temp::<bool>(egui::Id::new(WEIGHTED_KEY)).unwrap_or(false))
+}
+
+/// The family the icon font is registered under, and the only way to draw with it.
+///
+/// The icon font is compiled into this binary (`egui-phosphor` carries the bytes), so
+/// unlike the CJK font it cannot be missing — and unlike the CJK font it is **never** a
+/// fallback: an icon font in the proportional chain means body text can render a padlock
+/// where a character was meant to be.
+pub const ICON_FAMILY: &str = "icons";
 
 /// The panel's own text, used to check that the font actually arrived.
 ///
@@ -70,7 +103,9 @@ const PANEL_SAMPLE: &str = "允许一次 拒绝";
 /// What happened when the fonts were installed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FontStatus {
-    /// The bundled font is in use.
+    /// The bundled CJK font is in use. The icons may or may not be, and that is reported
+    /// separately because it is a different kind of loss: without the CJK font Chinese is
+    /// unreadable, without the icons the controls are unlabelled.
     Loaded {
         /// The file that was read.
         path: PathBuf,
@@ -96,7 +131,7 @@ impl FontStatus {
     pub fn describe(&self) -> String {
         match self {
             Self::Loaded { path, bytes } => {
-                format!("fonts loaded {FAMILY} from {} ({bytes} bytes)", path.display())
+                format!("fonts loaded {FAMILY} from {} ({bytes} bytes), icons from phosphor", path.display())
             }
             Self::Missing { searched } => {
                 let tried = searched
@@ -165,10 +200,43 @@ pub fn candidate_paths(exe_dir: Option<&Path>, override_path: Option<&Path>) -> 
 /// @returns the first candidate that exists, and the full list that was tried.
 #[must_use]
 pub fn locate(exe_dir: Option<&Path>) -> (Option<PathBuf>, Vec<PathBuf>) {
-    let override_path = std::env::var_os(FONT_PATH_ENV)
+    locate_named(exe_dir, FONT_PATH_ENV, FONT_FILE, "fonts")
+}
+
+/// The one lookup rule, used for both fonts.
+///
+/// @param exe_dir - directory holding this executable.
+/// @param variable - the environment variable that overrides everything.
+/// @param file - the file name to look for.
+/// @param directory - the directory name inside the package and beside the binary.
+/// @returns the first candidate that exists, and every path that was tried.
+#[must_use]
+fn locate_named(exe_dir: Option<&Path>, variable: &str, file: &str, directory: &str) -> (Option<PathBuf>, Vec<PathBuf>) {
+    let override_path = std::env::var_os(variable)
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty());
-    let candidates = candidate_paths(exe_dir, override_path.as_deref());
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let mut push = |path: PathBuf| {
+        if !candidates.contains(&path) {
+            candidates.push(path);
+        }
+    };
+    if let Some(path) = override_path {
+        push(path);
+    }
+    if let Some(directory_of_exe) = exe_dir {
+        let parent = directory_of_exe.parent();
+        let mut layouts: Vec<PathBuf> = Vec::new();
+        // The platform package: `bin/dsh-quorfloat` with `fonts/` and `icons/` beside `bin/`.
+        if let Some(root) = parent {
+            layouts.push(root.join(directory));
+        }
+        // A flat layout, which is what the development harness stages.
+        layouts.push(directory_of_exe.join(directory));
+        for layout in layouts {
+            push(layout.join(file));
+        }
+    }
     let found = candidates.iter().find(|path| path.is_file()).cloned();
     (found, candidates)
 }
@@ -188,6 +256,7 @@ pub fn exe_dir() -> Option<PathBuf> {
 ///   that frame lays text out with a set that is about to change.
 /// @returns what was loaded, or why nothing was.
 pub fn install(ctx: &egui::Context) -> FontStatus {
+    ensure_icons(ctx);
     let (found, searched) = locate(exe_dir().as_deref());
     let Some(path) = found else {
         return FontStatus::Missing { searched };
@@ -214,21 +283,111 @@ pub fn install_from(ctx: &egui::Context, path: &Path) -> FontStatus {
     // Leaked on purpose: the font lives as long as the process does, and a `'static`
     // slice lets every weight share one copy of the bytes instead of one each.
     let shared: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+    // First, not last: the design's body text is a normal-weight humanist sans, and the
+    // built-in Latin face is a *light* one — leaving it ahead of the bundled font would
+    // make every Latin sentence thinner than the design asks for. The built-in faces stay
+    // behind it as fallbacks for anything this font does not cover.
     ctx.add_font(egui::epaint::text::FontInsert {
         name: FAMILY.to_owned(),
         data: egui::FontData::from_static(shared),
         families: vec![
             egui::epaint::text::InsertFontFamily {
                 family: egui::FontFamily::Proportional,
-                priority: egui::epaint::text::FontPriority::Lowest,
+                priority: egui::epaint::text::FontPriority::Highest,
             },
             egui::epaint::text::InsertFontFamily {
                 family: egui::FontFamily::Monospace,
-                priority: egui::epaint::text::FontPriority::Lowest,
+                priority: egui::epaint::text::FontPriority::Highest,
             },
         ],
     });
+    // The design's 500 and 600 weights, cut from the same variable font. One copy of the
+    // bytes, three families: the coordinates are applied when a glyph is rasterised, so
+    // this costs three atlas entries and no extra memory for the font itself.
+    for (family, weight) in [(WEIGHT_MEDIUM, 500.0), (WEIGHT_SEMIBOLD, 600.0)] {
+        ctx.add_font(egui::epaint::text::FontInsert {
+            name: family.to_owned(),
+            data: egui::FontData::from_static(shared).tweak(egui::epaint::text::FontTweak {
+                coords: egui::epaint::text::VariationCoords::new([(b"wght", weight)]),
+                ..Default::default()
+            }),
+            families: vec![egui::epaint::text::InsertFontFamily {
+                family: egui::FontFamily::Name(family.into()),
+                priority: egui::epaint::text::FontPriority::Highest,
+            }],
+        });
+    }
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new(WEIGHTED_KEY), true));
     FontStatus::Loaded { path: path.to_path_buf(), bytes: size }
+}
+
+/// The context-data key recording that the icon family is registered here.
+const ICONS_KEY: &str = "quorfloat.fonts.icons";
+
+/// Whether the icon family can be drawn with *in this pass*.
+///
+/// Asked by [`crate::ui::icons::glyph`] before it names the family, because egui applies a
+/// pending font at the **end** of a pass (`Context::add_font` queues it, and the queue is
+/// drained after the frame is built). A context that asks for the icons and then draws in
+/// the same pass would name a family that is not bound to any fonts yet — which epaint
+/// answers with a panic rather than with a blank space. It was found exactly that way, by
+/// tests that draw a panel into a context `main` never installed into.
+///
+/// The pass number is the whole mechanism, and it is egui's own public one: asked-for in
+/// pass N means usable from pass N+1.
+///
+/// @param ctx - the render context.
+/// @returns whether drawing with [`ICON_FAMILY`] is safe right now.
+#[must_use]
+pub fn icons_ready(ctx: &egui::Context) -> bool {
+    ctx.data(|data| data.get_temp::<u64>(egui::Id::new(ICONS_KEY)))
+        .is_some_and(|asked_in_pass| ctx.cumulative_pass_nr() > asked_in_pass)
+}
+
+/// Register the icon family once per context, whoever gets there first.
+///
+/// Unlike the CJK font this reads no file — the bytes are compiled in — so it is cheap
+/// enough to guarantee from the drawing path rather than from a startup step someone has
+/// to remember to call.
+///
+/// @param ctx - the render context.
+pub fn ensure_icons(ctx: &egui::Context) {
+    if ctx.data(|data| data.get_temp::<u64>(egui::Id::new(ICONS_KEY)).is_some()) {
+        return;
+    }
+    install_icons(ctx);
+    let asked_in_pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new(ICONS_KEY), asked_in_pass));
+}
+
+/// Register the icon font under its own family.
+///
+/// **Not** a fallback: it is deliberately absent from the proportional and monospace
+/// chains, so body text can never render a padlock where a character was meant. Drawing an
+/// icon means asking for [`ICON_FAMILY`] by name — which is what `ui/icons.rs` does.
+///
+/// The bytes are `'static` because they come from the icon crate rather than from a file,
+/// so there is nothing to read, nothing to leak, and no way for this to fail.
+///
+/// @param ctx - the render context.
+pub fn install_icons(ctx: &egui::Context) {
+    ctx.add_font(egui::epaint::text::FontInsert {
+        name: ICON_FAMILY.to_owned(),
+        data: egui::FontData::from_static(egui_phosphor::Variant::Regular.font_bytes()),
+        families: vec![egui::epaint::text::InsertFontFamily {
+            family: egui::FontFamily::Name(ICON_FAMILY.into()),
+            priority: egui::epaint::text::FontPriority::Highest,
+        }],
+    });
+}
+
+/// The font an icon is drawn with.
+///
+/// @param size - the icon's box, in points.
+/// @returns the font id to lay an icon glyph out with.
+#[must_use]
+pub fn icon_font(size: f32) -> egui::FontId {
+    egui::FontId::new(size, egui::FontFamily::Name(ICON_FAMILY.into()))
 }
 
 /// Whether the panel can currently draw its own text.
@@ -332,6 +491,83 @@ mod tests {
         assert!(status.is_loaded());
         assert!(status.describe().contains("42 bytes"));
         assert_eq!(status.warning(), None);
+    }
+
+    /// The icon font, and the two properties that matter about it.
+    ///
+    /// This one never skips: the icon bytes are compiled in, so "no icons" is not a state
+    /// this build can be in.
+    #[test]
+    fn the_icon_font_draws_icons_and_nothing_else() {
+        let ctx = egui::Context::default();
+        install_icons(&ctx);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        output.textures_delta.clear();
+
+        // Every icon in the panel's vocabulary is drawable through its own family...
+        for icon in crate::ui::icons::ALL {
+            let chars = icon.chars();
+            assert!(
+                ctx.fonts_mut(|fonts| fonts.has_glyph(&icon_font(16.0), chars.chars().next().unwrap())),
+                "the icon family has {}",
+                icon.name(),
+            );
+        }
+        // ...and none of them is reachable through the text families, which is the whole
+        // reason the icon font is registered by name: a body paragraph must never be able to
+        // render a padlock.
+        let folder = crate::ui::icons::Icon::Folder;
+        assert!(
+            !ctx.fonts_mut(|fonts| fonts.has_glyph(&egui::FontId::proportional(16.0), folder.chars().chars().next().unwrap())),
+            "and the text family does not, so an icon cannot leak into a sentence",
+        );
+    }
+
+    /// The weighted cuts are a fact about a *context*, not about the process.
+    ///
+    /// This is how the parallel-test panic was found: a process-wide flag was set by the
+    /// test that installed the font, and every other test then asked for families its own
+    /// context had never heard of — which epaint answers with a panic.
+    #[test]
+    fn installing_the_font_marks_only_the_context_it_was_installed_into() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts").join(FONT_FILE);
+        if !path.is_file() {
+            println!("skipping: {} is missing; run `npm run fonts`", path.display());
+            return;
+        }
+        let installed = egui::Context::default();
+        let untouched = egui::Context::default();
+        assert!(!has_weighted_families(&untouched), "nothing is installed to begin with");
+        install_from(&installed, &path);
+        assert!(has_weighted_families(&installed), "and the context that installed it knows");
+        assert!(
+            !has_weighted_families(&untouched),
+            "while a context that did not is unaffected — which is what keeps a missing font \
+             from becoming a panic instead of a warning",
+        );
+    }
+
+    /// The timing the guard in [`crate::ui::icons::glyph`] exists for.
+    ///
+    /// If this ever becomes "ready immediately", the guard is unnecessary — and if it
+    /// becomes "ready one pass later than this says", the guard is wrong and the panel
+    /// panics on its first frame in any context. Either way this test is where that is
+    /// noticed.
+    #[test]
+    fn the_icon_family_is_usable_from_the_pass_after_it_was_asked_for() {
+        let ctx = egui::Context::default();
+        assert!(!icons_ready(&ctx), "nothing has been asked for yet");
+
+        ensure_icons(&ctx);
+        assert!(!icons_ready(&ctx), "asked for during this pass, applied at the end of it");
+
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        output.textures_delta.clear();
+        assert!(icons_ready(&ctx), "and from the next pass it can be drawn with");
+
+        // Asking again is idempotent, and does not push the answer into the future.
+        ensure_icons(&ctx);
+        assert!(icons_ready(&ctx), "a second ask does not un-ready it");
     }
 
     #[test]

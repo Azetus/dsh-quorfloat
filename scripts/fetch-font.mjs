@@ -15,10 +15,13 @@
  * Running it is an explicit step (`npm run fonts`), and `npm run dev` tells you when the
  * file it needs is not there.
  *
- * It fetches **two** files: the font, and the licence that must travel with it. Both are
- * pinned by SHA-256 and both land in `quorfloat/assets/fonts/`; the platform package is
- * built by copying that directory whole, so the font and its licence cannot be separated
- * by accident.
+ * It fetches **two** files: the CJK font, and the licence that must travel with it. Both
+ * are pinned by SHA-256 and both land in `quorfloat/assets/fonts/`; the platform package
+ * is built by copying that directory whole, so the font and its licence cannot be
+ * separated by accident.
+ *
+ * Icons are deliberately not fetched: they arrive as compiled-in bytes from the
+ * `egui-phosphor` crate, so there is no icon asset to pin, ship or lose.
  *
  * The font is Noto Sans SC (the noto-cjk *subset* variable font, OFL-1.1): it covers
  * Simplified and Traditional Chinese, Japanese, Greek and Cyrillic, and — being
@@ -61,7 +64,7 @@ export const FONT_SOURCE = {
   license: 'SIL Open Font License 1.1 (see quorfloat/assets/fonts/OFL.txt)',
 }
 
-/** The licence file that must travel with the font. */
+/** The licence file that must travel with the CJK font. */
 export const LICENSE_FILE = 'OFL.txt'
 
 /**
@@ -117,12 +120,22 @@ function verifyOne(path, pin) {
  *
  * @returns `{ ok: true, paths }` or `{ ok: false, reason }`.
  */
+/** Every pinned asset, in the order a reader should think about them. */
+export function assets() {
+  return [
+    { ...FONT_SOURCE, path: fontPath(), label: 'font' },
+    { ...LICENSE_SOURCE, path: licensePath(), label: 'licence' },
+  ]
+}
+
 export function verify() {
-  const font = verifyOne(fontPath(), FONT_SOURCE)
-  if (!font.ok) return font
-  const license = verifyOne(licensePath(), LICENSE_SOURCE)
-  if (!license.ok) return license
-  return { ok: true, path: font.path, paths: [font.path, license.path] }
+  const paths = []
+  for (const asset of assets()) {
+    const state = verifyOne(asset.path, asset)
+    if (!state.ok) return state
+    paths.push(state.path)
+  }
+  return { ok: true, path: paths[0], paths }
 }
 
 /**
@@ -161,11 +174,9 @@ async function downloadOne(path, pin, label) {
 /** Download anything missing or corrupt. */
 async function download() {
   mkdirSync(FONT_DIR, { recursive: true })
-  if (!verifyOne(fontPath(), FONT_SOURCE).ok) {
-    await downloadOne(fontPath(), FONT_SOURCE, 'font')
-  }
-  if (!verifyOne(licensePath(), LICENSE_SOURCE).ok) {
-    await downloadOne(licensePath(), LICENSE_SOURCE, 'licence')
+  for (const asset of assets()) {
+    if (verifyOne(asset.path, asset).ok) continue
+    await downloadOne(asset.path, asset, asset.label)
   }
 }
 

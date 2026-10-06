@@ -326,22 +326,31 @@ function stageSidecar() {
  * packaging mistake this layout is meant to make impossible.
  */
 function stageFonts(sidecarDirectory) {
-  const directory = join(sidecarDirectory, 'fonts')
+  const groups = [{ directory: 'fonts', names: [FONT_NAME, FONT_LICENCE] }]
+  // An asset directory the repository no longer has is removed rather than left behind:
+  // a stale copy in the dev home is how a panel keeps working on a machine whose checkout
+  // would not — the same reason each file below is mirrored, not merely added.
+  for (const stale of ['icons']) {
+    rmSync(join(sidecarDirectory, stale), { recursive: true, force: true })
+  }
   const missing = []
-  for (const name of [FONT_NAME, FONT_LICENCE]) {
-    const source = join(ROOT, 'quorfloat', 'assets', 'fonts', name)
-    const destination = join(directory, name)
-    if (!existsSync(source)) {
-      missing.push(name)
-      // Mirror the repository rather than keeping a copy from an earlier run: a staged
-      // font the repository no longer has would let the panel look healthy while a
-      // fresh checkout is broken — and it is the very failure this harness exists to
-      // show you.
-      rmSync(destination, { force: true })
-      continue
+  for (const group of groups) {
+    const target = join(sidecarDirectory, group.directory)
+    for (const name of group.names) {
+      const source = join(ROOT, 'quorfloat', 'assets', group.directory, name)
+      const destination = join(target, name)
+      if (!existsSync(source)) {
+        missing.push(name)
+        // Mirror the repository rather than keeping a copy from an earlier run: a staged
+        // asset the repository no longer has would let the panel look healthy while a
+        // fresh checkout is broken — and it is the very failure this harness exists to
+        // show you.
+        rmSync(destination, { force: true })
+        continue
+      }
+      mkdirSync(target, { recursive: true })
+      cpSync(source, destination, { force: true })
     }
-    mkdirSync(directory, { recursive: true })
-    cpSync(source, destination, { force: true })
   }
   if (missing.length > 0) {
     process.stdout.write(
@@ -350,7 +359,7 @@ function stageFonts(sidecarDirectory) {
     )
     return
   }
-  process.stdout.write(`dev: staged the font and its licence in ${directory}\n`)
+  process.stdout.write(`dev: staged the font and its licence in ${sidecarDirectory}\n`)
 }
 
 /** One line describing what the staged sidecar will find. */

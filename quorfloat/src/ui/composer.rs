@@ -33,78 +33,123 @@ pub(super) fn composer(
     draft: &mut String,
     action: &mut Option<Action>,
 ) {
+    use crate::ui::theme;
+
     let sending = state.prompt_sending;
-    let editor = ui.add_sized(
-        [ui.available_width(), EDITOR_HEIGHT],
-        egui::TextEdit::multiline(draft)
-            .desired_rows(2)
-            // Shift+Enter is the combination that inserts a newline; plain Enter is left
-            // unconsumed so the check below can turn it into a send.
-            .return_key(Some(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::Enter)))
-            .hint_text("输入消息…"),
-    );
+    let frame = egui::Frame::NONE.inner_margin(theme::PAD_COMPOSER);
+    frame.show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = theme::GAP_COMPOSER;
+            // The design's leading mark: what this row is for, in the one colour that means
+            // "here". It is not a button and does not pretend to be one.
+            let mark = theme::TEXT_COMPOSER * 0.8;
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(mark, mark), egui::Sense::hover());
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                crate::ui::icons::Icon::Search.chars(),
+                theme::font(ui.ctx(), theme::Weight::Regular, mark),
+                theme::accent(),
+            );
 
-    // Enter sends, unless the user is mid-composition, asking for a line break, or has
-    // nothing to send. The decision is a separate function because it is the rule this
-    // whole file exists for, and a rule that can only be tested by driving a keyboard is
-    // a rule that will not be tested.
-    let (enter, shift) = ui.input(|input| (input.key_pressed(egui::Key::Enter), input.modifiers.shift));
-    if submits(editor.has_focus(), enter, shift, composing(ui), sending, draft.trim().is_empty()) {
-        *action = Some(Action::Send { text: draft.clone() });
-    }
+            let editor_width = (ui.available_width() - theme::SEND_BUTTON - theme::GAP_COMPOSER).max(80.0);
+            let editor = ui.add_sized(
+                [editor_width, editor_height(draft)],
+                egui::TextEdit::multiline(draft)
+                    .desired_rows(1)
+                    // The panel's largest text, on purpose: this is the one place the user
+                    // is looking, and the design sets it at 20px against a 14px body.
+                    .font(theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_COMPOSER))
+                    // Shift+Enter is the combination that inserts a newline; plain Enter is
+                    // left unconsumed so the check below can turn it into a send.
+                    .return_key(Some(egui::KeyboardShortcut::new(egui::Modifiers::SHIFT, egui::Key::Enter)))
+                    .hint_text("问点什么…"),
+            );
 
-    ui.horizontal(|ui| {
-        let blank = draft.trim().is_empty();
-        let send = ui.add_enabled_ui(!blank && !sending, |ui| {
-            ui.add_sized([BUTTON_WIDTH, BUTTON_HEIGHT], egui::Button::new(if sending { "发送中…" } else { "发送" }))
-        });
-        if send.inner.clicked() {
-            *action = Some(Action::Send { text: draft.clone() });
-        }
-        // Only while there is something to stop: a stop button in an idle conversation is
-        // a button that does nothing, which teaches the user to distrust the row.
-        if state.turn_active {
-            let stop = ui.add_sized([BUTTON_WIDTH, BUTTON_HEIGHT], egui::Button::new("停止"));
-            if stop.clicked() {
-                *action = Some(Action::Cancel);
+            // Enter sends, unless the user is mid-composition, asking for a line break, or
+            // has nothing to send. The decision is a separate function because it is the
+            // rule this whole file exists for, and a rule that can only be tested by driving
+            // a keyboard is a rule that will not be tested.
+            let (enter, shift) = ui.input(|input| (input.key_pressed(egui::Key::Enter), input.modifiers.shift));
+            if submits(editor.has_focus(), enter, shift, composing(ui), sending, draft.trim().is_empty()) {
+                *action = Some(Action::Send { text: draft.clone() });
             }
-        }
+
+            // One button, two meanings — send, or stop what is being generated. The design
+            // swaps its icon rather than showing both, which is also the honest thing: at any
+            // moment only one of the two is what the user wants.
+            let stop = state.turn_active;
+            let enabled = stop || !draft.trim().is_empty();
+            if submit_button(ui, stop, enabled).clicked() {
+                if stop {
+                    *action = Some(Action::Cancel);
+                } else if !draft.trim().is_empty() {
+                    *action = Some(Action::Send { text: draft.clone() });
+                }
+            }
+        });
     });
-    // Reserved whether or not there is anything to say: a line that appears and disappears
-    // would move the conversation above it, and the strip's height has already been
-    // promised to the layout.
-    let line = state.prompt_line.as_deref().unwrap_or_default();
-    ui.add_sized(
-        [ui.available_width(), STATUS_HEIGHT],
-        egui::Label::new(egui::RichText::new(line).size(11.0).color(crate::ui::theme::MUTED)),
+}
+
+/// The round-square button at the end of the composer.
+///
+/// @param ui - where to draw.
+/// @param stop - whether a turn is in flight, which turns the send into a stop.
+/// @param enabled - whether there is anything to do.
+/// @returns the response, so the caller can act on a click.
+fn submit_button(ui: &mut egui::Ui, stop: bool, enabled: bool) -> egui::Response {
+    use crate::ui::theme;
+
+    let size = egui::vec2(theme::SEND_BUTTON, theme::SEND_BUTTON);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let hovering = response.hovered() && enabled;
+    let (fill, foreground) = match (enabled, hovering) {
+        (false, _) => (theme::soft(), theme::muted()),
+        (true, false) => (theme::button(), theme::on_button()),
+        (true, true) => (theme::accent(), theme::bg()),
+    };
+    ui.painter().rect_filled(rect, egui::CornerRadius::same(theme::RADIUS_SUBMIT), fill);
+    let icon = if stop { crate::ui::icons::Icon::Stop } else { crate::ui::icons::Icon::ArrowUp };
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        icon.chars(),
+        theme::font(ui.ctx(), theme::Weight::Regular, theme::ICON),
+        foreground,
     );
+    if enabled {
+        response.on_hover_text(if stop { "停止生成" } else { "发送" })
+    } else {
+        response
+    }
 }
 
-/// The height the composer will occupy, before it is drawn.
+/// How tall the editor is for a given draft.
 ///
-/// Computed from constants rather than measured, because the layout needs the number
-/// *before* the composer exists: the conversation is given what is left, and a first frame
-/// that guesses would either clip the buttons or make the conversation jump on the second.
+/// The design starts the input at a single line (38px) and lets it grow, which is the one
+/// behaviour a composer needs: a wrapped sentence the user cannot see is a sentence they
+/// will send by accident. Growth is counted in *explicit* lines — a paragraph that wraps
+/// keeps its height and scrolls instead, because measuring wrapped text needs the font and
+/// the width, and this number is needed by the layout before either is laid out. That trade
+/// is stated here rather than discovered later.
 ///
-/// @param ui - the frame, for the item spacing.
-/// @param state - read only for the status line, whose space is reserved unconditionally.
-/// @returns the strip's height.
+/// @param draft - what the user has typed.
+/// @returns the height to give the editor, between the design's minimum and its cap.
 #[must_use]
-pub(super) fn height(ui: &egui::Ui, _state: &PanelState) -> f32 {
-    let spacing = ui.spacing().item_spacing.y;
-    EDITOR_HEIGHT + spacing + BUTTON_HEIGHT + spacing + STATUS_HEIGHT
+fn editor_height(draft: &str) -> f32 {
+    let rows = draft.lines().count().max(1) as f32;
+    (rows * crate::ui::theme::LINE_COMPOSER + EDITOR_PADDING)
+        .clamp(EDITOR_MIN_HEIGHT, EDITOR_MAX_HEIGHT)
 }
 
-/// How tall the editor is. Two rows: enough to see a wrapped sentence, small enough that
-/// the conversation keeps most of a short panel. Longer text scrolls inside it.
-const EDITOR_HEIGHT: f32 = 44.0;
+/// The height the editor starts at, from the design's `height:38px`.
+const EDITOR_MIN_HEIGHT: f32 = 38.0;
 
-/// How tall the send and stop buttons are, and how wide.
-const BUTTON_HEIGHT: f32 = 26.0;
-const BUTTON_WIDTH: f32 = 72.0;
+/// The tallest the editor grows before it scrolls, from the design's own cap.
+const EDITOR_MAX_HEIGHT: f32 = 120.0;
 
-/// How tall the line under the buttons is. Always reserved, never conditional.
-const STATUS_HEIGHT: f32 = 16.0;
+/// What `TextEdit` adds around its text, which the row maths has to account for.
+const EDITOR_PADDING: f32 = 8.0;
 
 /// Whether an Enter press sends the message.
 ///

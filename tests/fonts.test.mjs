@@ -68,13 +68,15 @@ test('the licence is shipped beside the font it covers, unmodified', () => {
   assert.equal(digestOf(licensePath()), LICENSE_SOURCE.sha256, 'byte-for-byte upstream')
 })
 
-test('both fetched files match their pinned checksums and sizes', { skip }, () => {
-  // `verify` recomputes both digests: a file that changed under the same pin fails here
+test('every fetched asset matches its pinned checksum and size', { skip }, () => {
+  // `verify` recomputes every digest: a file that changed under the same pin fails here
   // rather than rendering slightly different glyphs in a shipped panel — or shipping a
-  // licence that no longer matches the font it claims to cover.
+  // licence that no longer matches the asset it claims to cover.
   const again = verify()
   assert.equal(again.ok, true, again.reason)
-  assert.deepEqual(again.paths, [fontPath(), licensePath()])
-  assert.equal(statSync(fontPath()).size, FONT_SOURCE.bytes, 'the pinned size is the real size')
-  assert.equal(statSync(licensePath()).size, LICENSE_SOURCE.bytes, 'and so is the licence')
+  const expected = [fontPath(), licensePath()]
+  assert.deepEqual(again.paths, expected, 'every pinned asset is checked, none is forgotten')
+  for (const [path, pin] of [[fontPath(), FONT_SOURCE], [licensePath(), LICENSE_SOURCE]]) {
+    assert.equal(statSync(path).size, pin.bytes, `the pinned size is the real size: ${path}`)
+  }
 })

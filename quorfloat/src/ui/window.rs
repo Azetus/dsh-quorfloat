@@ -20,6 +20,8 @@ pub struct WindowSettings {
     /// Suppress animations. The host exposes this because motion sensitivity is a
     /// user preference, not a per-app choice.
     pub reduce_motion: bool,
+    /// Which of the design's two palettes to draw in.
+    pub theme: crate::ui::theme::Preference,
 }
 
 impl Default for WindowSettings {
@@ -27,7 +29,16 @@ impl Default for WindowSettings {
         // Matches `DEFAULT_CONFIG.window` on the host side. Duplicated rather than
         // requested so the panel can be shown before the handshake completes; the
         // host's `ready` payload is the authority once it arrives.
-        Self { width: 640.0, max_height: 560.0, always_on_top: true, reduce_motion: false }
+        Self {
+            // The design's own `max-width:640px`.
+            width: 640.0,
+            max_height: 560.0,
+            always_on_top: true,
+            reduce_motion: false,
+            // A panel that floats over other applications should look like it belongs to
+            // the desktop it is floating over, so the platform decides until told otherwise.
+            theme: crate::ui::theme::Preference::System,
+        }
     }
 }
 
@@ -46,6 +57,7 @@ impl WindowSettings {
             width: float_env("DSH_QUORFLOAT_WINDOW_WIDTH", defaults.width),
             max_height: float_env("DSH_QUORFLOAT_WINDOW_MAX_HEIGHT", defaults.max_height),
             always_on_top: bool_env("DSH_QUORFLOAT_WINDOW_ALWAYS_ON_TOP", defaults.always_on_top),
+            theme: crate::ui::theme::Preference::from_env(),
             reduce_motion: bool_env("DSH_QUORFLOAT_WINDOW_REDUCE_MOTION", defaults.reduce_motion),
         }
     }
@@ -62,6 +74,9 @@ impl WindowSettings {
         }
         if let Some(height) = window.get("maxHeight").and_then(serde_json::Value::as_f64) {
             self.max_height = height as f32;
+        }
+        if let Some(theme) = window.get("theme").and_then(serde_json::Value::as_str) {
+            self.theme = crate::ui::theme::Preference::from_name(Some(theme));
         }
         if let Some(always) = window.get("alwaysOnTop").and_then(serde_json::Value::as_bool) {
             self.always_on_top = always;
@@ -93,10 +108,21 @@ pub fn viewport(settings: &WindowSettings, remembered: Option<(f32, f32)>) -> eg
             egui::WindowLevel::Normal
         })
         .with_resizable(false)
+        // The panel draws its own rounded corners and its own shadow, which is only possible
+        // if the window behind them is not painted: an opaque window would show its square
+        // corners around the rounded panel.
+        .with_transparent(true)
         // Starts hidden. The hotkey is what reveals it, and starting visible would
         // flash a panel on every launch — including every automatic restart.
         .with_visible(false)
-        .with_inner_size([settings.width, settings.max_height])
+        // The window is the panel *plus* the room the panel's shadow needs, so that the
+        // configured width and height keep meaning "how big the panel is".
+        .with_inner_size([
+            settings.width + f32::from(crate::ui::theme::SHADOW_ROOM_SIDE) * 2.0,
+            settings.max_height
+                + f32::from(crate::ui::theme::SHADOW_ROOM_TOP)
+                + f32::from(crate::ui::theme::SHADOW_ROOM_BOTTOM),
+        ])
         .with_min_inner_size([settings.width.min(320.0), 80.0])
         .with_title("quorfloat");
     // Where the user left it — or nowhere, which is a real difference rather than a
@@ -179,7 +205,23 @@ mod tests {
         assert_eq!(viewport.decorations, Some(false));
         assert_eq!(viewport.window_level, Some(egui::WindowLevel::AlwaysOnTop));
         assert_eq!(viewport.resizable, Some(false));
-        assert_eq!(viewport.inner_size, Some([640.0, 560.0].into()));
+    }
+
+    #[test]
+    fn the_window_is_the_panel_plus_the_room_its_shadow_needs() {
+        // The panel has rounded corners and a shadow of its own, which needs a transparent
+        // window and a margin to draw them in — so the window is bigger than the panel, and
+        // the configured numbers keep meaning "how big the panel is".
+        let settings = WindowSettings::default();
+        let viewport = viewport(&settings, None);
+        assert_eq!(viewport.transparent, Some(true), "the panel draws its own corners");
+        let expected = [
+            settings.width + f32::from(crate::ui::theme::SHADOW_ROOM_SIDE) * 2.0,
+            settings.max_height
+                + f32::from(crate::ui::theme::SHADOW_ROOM_TOP)
+                + f32::from(crate::ui::theme::SHADOW_ROOM_BOTTOM),
+        ];
+        assert_eq!(viewport.inner_size, Some(expected.into()));
     }
 
     #[test]

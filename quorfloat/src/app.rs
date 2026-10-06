@@ -69,6 +69,8 @@ pub struct App {
     capabilities: Vec<&'static str>,
     /// Whether the window's position has been observed at least once this run.
     window_seen: bool,
+    /// Whether the resolved theme has been reported once this run.
+    theme_seen: bool,
     /// Where the window is, and where that is remembered.
     ///
     /// Owned here rather than by the window layer: the window reports where it is, and the
@@ -124,6 +126,7 @@ impl App {
             capabilities: measured_capabilities(hotkey_active),
             window_state,
             window_seen: false,
+            theme_seen: false,
             draft: String::new(),
             fonts_warning: None,
             fonts_checked: false,
@@ -450,6 +453,15 @@ impl App {
     ///
     /// @param action - what the user asked for.
     fn apply_card_action(&mut self, action: crate::ui::Action) {
+        if action == crate::ui::Action::Hide {
+            // Before the session lock, because this needs `self` mutably and the lock holds
+            // it. The conversation is not lost: hiding is what the hotkey does, and the
+            // panel comes back to the same place it was — which is why the design offers
+            // this rather than a close.
+            self.set_visible(false);
+            return;
+        }
+
         use crate::ui::Action;
         let mut session = match self.session.lock() {
             Ok(session) => session,
@@ -457,6 +469,9 @@ impl App {
         };
         let mut sink = BorrowedSink(&self.sink);
         match action {
+            // Handled before the session lock is taken, below; this arm exists so that the
+            // match stays exhaustive without pretending the lock is not held here.
+            crate::ui::Action::Hide => {}
             Action::Answer { id, verdict } => {
                 session.answer_interaction(&id, verdict, &mut sink);
             }
@@ -582,6 +597,28 @@ impl App {
     ///
     /// @param ui - the root area, with no margin or background of its own.
     pub fn draw(&mut self, ui: &mut egui::Ui) {
+        // Before anything is drawn: the panel names a family for every icon it draws, and a
+        // family bound to no fonts is a panic in epaint rather than a blank space.
+        crate::ui::fonts::ensure_icons(ui.ctx());
+        // One resolution per frame, before anything is drawn: the palette is process state
+        // (see `ui/theme.rs`), and this is its single writer.
+        let mode = self.settings.theme.resolve(ui.ctx());
+        crate::ui::theme::set_mode(mode);
+        if !self.theme_seen {
+            // Once, on the record: "why is the panel light" is otherwise a question about a
+            // platform setting this process cannot show you.
+            self.theme_seen = true;
+            let preference = match self.settings.theme {
+                crate::ui::theme::Preference::System => "system",
+                crate::ui::theme::Preference::Light => "light",
+                crate::ui::theme::Preference::Dark => "dark",
+            };
+            let mode = match mode {
+                crate::ui::theme::Mode::Light => "light",
+                crate::ui::theme::Mode::Dark => "dark",
+            };
+            self.sink.mark(&format!("theme {mode} (preference {preference})"));
+        }
         let state = self.state();
         let mut action: Option<crate::ui::Action> = None;
         crate::ui::draw(ui, &state, &mut self.draft, &mut action);
@@ -840,6 +877,9 @@ mod tests {
     /// where on screen it landed.
     fn drawn_text(app: &mut App, size: egui::Vec2) -> Vec<(String, egui::Rect)> {
         let ctx = egui::Context::default();
+        // The way `main` does it: before the first frame, because egui builds its font atlas
+        // when a pass starts and a family named in the same frame it was added is not in it.
+        crate::ui::fonts::ensure_icons(&ctx);
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
             ..Default::default()
@@ -928,6 +968,11 @@ mod tests {
         // The reported bug: the conversation was laid out before the composer and took
         // every pixel it was offered, so the input box — the one control that must always
         // be reachable — ended up below the bottom edge of the window.
+        //
+        // The design fixes it structurally rather than arithmetically: the composer is the
+        // *first* thing under the top bar, so it claims its space by being drawn first and
+        // the conversation can only have what is left. This test is what keeps that true if
+        // someone later moves the composer back under the thread.
         let (mut app, recorded, session, _wake) = app_and_session();
         deliver(&session, &recorded, conversation_frame());
 
@@ -939,10 +984,10 @@ mod tests {
                 text.contains(needle) && rect.height() > 1.0 && rect.max.y <= screen.max.y + 1.0
             })
         };
-        assert!(visible("发送"), "the send button is inside the window: {texts:#?}");
-        assert!(visible("输入消息"), "and so is the box it belongs to: {texts:#?}");
-        // The conversation is still there — the fix reserves the composer's strip, it does
-        // not simply drop the content above it.
+        assert!(visible("问点什么"), "the input box is inside the window: {texts:#?}");
+        assert!(visible("发送"), "and so is the button beside it: {texts:#?}");
+        // The conversation is still there — the composer taking its share is not the same
+        // as the content above it disappearing.
         assert!(visible("帮我看看"), "the conversation did not vanish: {texts:#?}");
     }
 
@@ -960,10 +1005,16 @@ mod tests {
         // by the *previous* pass: one pass to register the handle and place the pointer,
         // one to press, one to move. A two-pass version of this test proved nothing — it
         // passed with the drag handle removed.
+        // A point inside the top bar, computed from the same tokens the bar is drawn with:
+        // the panel is inset by the room its shadow needs, and the bar by its own padding.
+        let press = egui::pos2(
+            f32::from(crate::ui::theme::SHADOW_ROOM_SIDE + crate::ui::theme::PAD_TOP.left) + 4.0,
+            f32::from(crate::ui::theme::SHADOW_ROOM_TOP + crate::ui::theme::PAD_TOP.top) + 4.0,
+        );
         let plan: Vec<Vec<egui::Event>> = vec![
-            vec![egui::Event::PointerMoved(egui::pos2(40.0, 16.0))],
+            vec![egui::Event::PointerMoved(press)],
             vec![egui::Event::PointerButton {
-                pos: egui::pos2(40.0, 16.0),
+                pos: press,
                 button: egui::PointerButton::Primary,
                 pressed: true,
                 modifiers: egui::Modifiers::NONE,
