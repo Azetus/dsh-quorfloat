@@ -18,7 +18,8 @@
     "typecheck": "./.tooling/node_modules/.bin/tsc -p tsconfig.json --noEmit",
     "test": "npm run build --silent && node --test --test-timeout=30000 \"tests/*.test.mjs\"",
     "test:only": "node --test --test-timeout=30000 \"tests/*.test.mjs\"",
-    "contract:extract": "node tests/fixtures/extract-harness-contract.mjs"
+    "contract:extract": "node tests/fixtures/extract-harness-contract.mjs",
+    "dev": "node scripts/dev.mjs"
   },
   "dsh": {
     "bundle": {
