@@ -20,6 +20,10 @@ mod composer;
 mod conversation;
 mod geometry;
 mod picker;
+
+/// The one thing the app needs from the picker: the id of the workspace menu, so a send that
+/// has no workspace to create in can open the menu that chooses one.
+pub(crate) use picker::{Kind as PickerKind, popup_id as picker_popup_id};
 pub mod fonts;
 pub mod icons;
 pub mod screenshot;
@@ -79,11 +83,11 @@ pub enum Action {
         /// Which one.
         session_id: String,
     },
-    /// Create a conversation, and attach to it.
-    CreateConversation {
-        /// Where to create it, or `None` for the host's default workspace.
-        workspace_id: Option<String>,
-    },
+    /// Go back to "new conversation" mode, without creating anything yet.
+    ///
+    /// The creation itself happens when the user submits their first message: a panel that
+    /// created a conversation per summon would fill the harness's list with empty ones.
+    NewConversation,
     /// Keep opening one conversation, or stop pinning any.
     PinConversation {
         /// Which one, or `None` to unpin.

@@ -460,15 +460,13 @@ test('the real host publishes an approval the panel records as a card', { skip }
   }
 })
 
-test('the panel follows the most recent conversation without being told to', { skip }, async () => {
-  // The step that decides whether an approval can reach the panel at all. The host
-  // claims an interaction only for a session the peer has attached, so a panel that
-  // never attaches owns nothing — and every approval silently goes to the Harness
-  // window instead, which looks exactly like a broken panel.
-  //
-  // Asserted on both sides: the router records the attach it was asked for, and the
-  // binary records the follow it established. Neither alone would show the handshake
-  // between them actually happened.
+test('the panel reads the conversation list and attaches to nothing on its own', { skip }, async () => {
+  // This test used to assert the opposite — that the panel attached to the newest
+  // conversation by itself — and the design changed: a panel attaches to the conversation
+  // the user pinned or chose, and otherwise waits to be given something to say (the
+  // conversation is created when they submit). Asserted here because it is a claim about
+  // two programs: the host must still be asked what exists, and must not be asked to
+  // attach to anything until a person decides.
   const { mkdtemp, readFile, rm } = await import('node:fs/promises')
   const { tmpdir } = await import('node:os')
   const directory = await mkdtemp(join(tmpdir(), 'quorfloat-follow-'))
@@ -529,28 +527,20 @@ test('the panel follows the most recent conversation without being told to', { s
   try {
     await supervisor.start()
     await waitFor('running', async () => supervisor.snapshot().state === 'running', { timeoutMs: 10000 })
-    await waitFor(
-      'the panel to attach the newest conversation',
-      async () => attaches.length > 0,
-      { timeoutMs: 10000 },
-    )
-    assert.deepEqual(attaches, ['session-newest'], 'the newest, once, and not the first listed')
-    assert.ok(listCalls >= 1, 'the panel asked which conversations exist')
+    // The list is read — the picker draws it, and a pinned conversation is validated against
+    // it — and no attach follows, however busy the conversations in it are.
+    await waitFor('the panel to read the conversation list', async () => listCalls >= 1, { timeoutMs: 10000 })
+    assert.deepEqual(attaches, [], 'nothing is attached without a decision')
 
-    // The router seeing the request is not the peer having processed the answer, so
-    // this waits for the record rather than reading it as soon as the attach appears.
-    await waitFor(
-      'the panel to record what it follows',
-      async () => (await readFile(markerPath, 'utf8').catch(() => '')).includes('follow session-newest generation=7'),
-      { timeoutMs: 10000 },
-    )
-    // Discovery keeps running: it is how a conversation started later is picked up.
-    await waitFor(
-      'a second look for newer conversations',
-      async () => listCalls >= 2,
-      { timeoutMs: 10000 },
-    )
-    assert.equal(attaches.length, 1, 'the steady state does not churn the subscription')
+    // And the record says the same thing: whatever the list contained, the panel never claims
+    // to be following anything — which is the durable evidence that it is waiting for a person
+    // rather than for the host to touch another conversation.
+    const marker = await readFile(markerPath, 'utf8').catch(() => '')
+    assert.ok(!marker.includes('follow '), `nothing is claimed as followed: ${marker}`)
+
+    // Discovery keeps running: it is how a conversation started later is noticed.
+    await waitFor('a second look for conversations', async () => listCalls >= 2, { timeoutMs: 10000 })
+    assert.deepEqual(attaches, [], 'and the steady state still attaches to nothing')
     assert.equal(supervisor.snapshot().consecutiveMissedHeartbeats, 0, 'the polling did not disturb liveness')
   } finally {
     delete process.env['DSH_QUORFLOAT_RUST_MARKER']

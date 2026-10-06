@@ -25,6 +25,7 @@ use eframe::egui;
 
 pub mod pinned;
 pub mod session;
+pub mod workspace;
 pub mod sink;
 
 use crate::ui::fonts::{self, FontStatus};
@@ -236,6 +237,33 @@ impl App {
         self.fonts_warning = Some(message);
     }
 
+    /// Open the workspace picker, for the one rung of the ladder only a person can choose.
+    fn open_workspace_picker(&self) {
+        let Some(ctx) = &self.context else { return };
+        egui::Popup::open_id(ctx, crate::ui::picker_popup_id(crate::ui::PickerKind::Workspace));
+    }
+
+    /// Drop a remembered pin that the host no longer honours.
+    ///
+    /// The follow layer clears its own copy when a pinned conversation disappears from the
+    /// list or is refused; this is what makes the file agree, so the next run does not try the
+    /// same dead conversation again.
+    fn forget_a_pin_the_host_refused(&mut self) {
+        if self.pinned.session.is_none() {
+            return;
+        }
+        let still_pinned = match self.session.lock() {
+            Ok(session) => session.pinned_conversation().is_some(),
+            Err(poisoned) => poisoned.into_inner().pinned_conversation().is_some(),
+        };
+        if !still_pinned {
+            self.pinned.session = None;
+            if let Some(path) = &self.pinned_path {
+                self.pinned.save(path);
+            }
+        }
+    }
+
     /// Ask for the workspace list the first time the panel is on screen.
     ///
     /// The picker can ask for it too, but the *bar* needs it before anyone opens a menu: it
@@ -436,6 +464,7 @@ impl App {
         self.write_screenshot();
         self.hide_when_the_user_leaves();
         self.ask_for_workspaces_once();
+        self.forget_a_pin_the_host_refused();
         self.remember_window_position();
         self.pump();
         self.apply_window_commands();
@@ -583,18 +612,7 @@ impl App {
         // target here is what left the top bar showing its fallback text and the current row
         // without a tick, in the first screenshot of the picker.
         let attached = follow.session_id().map(str::to_owned);
-        // Which workspace the attached conversation is in: the session list carries no
-        // workspace id, so the directory both lists agree on is what matches them.
-        let current_workspace = attached
-            .as_deref()
-            .and_then(|id| conversations.iter().find(|entry| entry.session_id == id))
-            .and_then(|entry| entry.cwd.as_deref())
-            .and_then(|cwd| {
-                workspaces
-                    .iter()
-                    .find(|workspace| paths_match(&workspace.path, cwd))
-                    .map(|workspace| workspace.workspace_id.clone())
-            });
+        let current_workspace = current_workspace(&session);
         PanelState {
             hotkey: self.hotkey_status(),
             prompt_line: session.prompt_delivery().describe(),
@@ -608,6 +626,8 @@ impl App {
             title: transcript.title().map(str::to_owned),
             conversations,
             workspaces,
+            workspaces_asked: session.workspaces_asked(),
+            creating_on_submit: session.target_conversation().is_none(),
             attached,
             pinned: session.pinned_conversation().map(str::to_owned),
             pinned_workspace: self.pinned.workspace.clone(),
@@ -658,10 +678,30 @@ impl App {
             }
             Action::DismissHandoff => session.dismiss_handoff(),
             Action::Send { text } => {
+                // Where a *new* conversation goes is the ladder's business (see
+                // `app/workspace.rs`); when one is already attached this is not used.
+                let workspace = crate::app::workspace::to_create_in(
+                    self.pinned.workspace.as_deref(),
+                    current_workspace(&session).as_deref(),
+                    session.transcript().is_turn_active(),
+                    session.workspaces(),
+                    session.conversations(),
+                );
                 // The draft is cleared only when the host may actually have it: a refused
                 // send leaves the text where the user can fix it, which is the difference
-                // between "that failed" and "my message vanished".
-                if matches!(session.send_prompt(&text, &mut sink), Delivery::Failed { .. }) {
+                // between "that failed" and "my message vanished". A send that is waiting for
+                // a conversation to be created has the text in hand, so it counts as taken.
+                // Nowhere to create a conversation: rather than let the send fail with a
+                // message about a workspace the user has never seen, the panel opens the
+                // picker that chooses one. That is P4 of the ladder, and it is the only rung
+                // a machine cannot climb.
+                if session.follow().session_id().is_none() && workspace.is_none() {
+                    self.open_workspace_picker();
+                }
+                if matches!(
+                    session.send_prompt(&text, workspace.as_deref(), &mut sink),
+                    Delivery::Failed { .. },
+                ) {
                     // The session has already logged why. Keeping the text is the point:
                     // the user can fix a refusal, and cannot fix a vanished message.
                 } else {
@@ -674,8 +714,13 @@ impl App {
             Action::ChooseConversation { session_id } => {
                 session.choose_conversation(&session_id, &mut sink);
             }
-            Action::CreateConversation { workspace_id } => {
-                session.create_conversation(workspace_id.as_deref(), &mut sink);
+            Action::NewConversation => {
+                session.start_new_conversation(&mut sink);
+                // The pin goes with it, and so does the file the next run reads.
+                self.pinned.session = None;
+                if let Some(path) = &self.pinned_path {
+                    self.pinned.save(path);
+                }
             }
             Action::PinConversation { session_id } => {
                 // Written before the request goes out: a pin the user set is a fact about
@@ -731,8 +776,18 @@ pub(crate) struct PanelState {
     pub(crate) conversations: Vec<crate::app::session::follow::SessionSummary>,
     /// The workspaces the host last listed.
     pub(crate) workspaces: Vec<crate::app::session::follow::Workspace>,
+    /// Whether the workspace list has ever been asked for.
+    ///
+    /// The picker asks once and then stops: an empty list is an answer, not a reason to ask
+    /// again every frame.
+    pub(crate) workspaces_asked: bool,
     /// The conversation the panel is attached to, if any.
     pub(crate) attached: Option<String>,
+    /// Whether sending would start a new conversation.
+    ///
+    /// True when nothing is pinned and nothing was chosen: the panel is in "new conversation"
+    /// mode, and the conversation appears when the user submits. The composer says so.
+    pub(crate) creating_on_submit: bool,
     /// The conversation the user pinned, if any.
     pub(crate) pinned: Option<String>,
     /// The workspace new conversations are created in, if one is pinned.
@@ -1006,19 +1061,28 @@ fn measured_capabilities(hotkey_active: bool) -> Vec<&'static str> {
     capabilities
 }
 
-/// Whether a conversation's directory is the workspace's directory.
+/// The workspace the conversation on screen belongs to, if the lists can say.
 ///
-/// Exact after normalising a trailing separator, and nothing cleverer: a session opened in a
-/// *subdirectory* of a workspace is a session the workspace list cannot name, and guessing by
-/// prefix would label it with the wrong workspace the moment two workspaces are nested.
+/// The session list carries no workspace id, so the directory both lists agree on is what
+/// matches them: see [`crate::app::workspace::same_directory`] for why that is exact rather
+/// than a prefix match.
 ///
-/// @param workspace_path - the workspace's directory, as the host reports it.
-/// @param cwd - the conversation's directory.
-/// @returns whether they are the same directory.
+/// @param session - the session being drawn.
+/// @returns the workspace id, when one matches.
 #[must_use]
-fn paths_match(workspace_path: &str, cwd: &str) -> bool {
-    let trim = |path: &str| path.trim_end_matches(['/', '\\']).to_owned();
-    !workspace_path.is_empty() && trim(workspace_path) == trim(cwd)
+fn current_workspace(session: &Session) -> Option<String> {
+    let attached = session.follow().session_id()?;
+    let cwd = session
+        .conversations()
+        .iter()
+        .find(|conversation| conversation.session_id == attached)?
+        .cwd
+        .as_deref()?;
+    session
+        .workspaces()
+        .iter()
+        .find(|workspace| crate::app::workspace::same_directory(&workspace.path, cwd))
+        .map(|workspace| workspace.workspace_id.clone())
 }
 
 /// Whether the panel should put itself away, given who is focused.
@@ -1270,15 +1334,29 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_send_with_no_conversation_keeps_the_text() {
-        // No session is followed in this app, so the send is refused. The draft is the
-        // only copy of what the user typed: clearing it would lose the message and tell
-        // them nothing.
-        let (mut app, _recorded, _session, _wake) = app_and_session();
-        app.draft = "还没发出去".to_owned();
-        app.apply_card_action(Action::Send { text: app.draft.clone() });
-        assert_eq!(app.draft, "还没发出去");
+    fn a_send_with_no_conversation_starts_one() {
+        // The panel used to refuse this, and the refusal was correct for the old design and
+        // wrong for this one: with nothing pinned the panel is *meant* to start a conversation,
+        // and the text waits in the session until the creation has finished.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        {
+            let mut sink = RecordingSink(recorded.clone());
+            session.lock().expect("session").start(&mut sink);
+        }
+        answer(&session, &recorded, "hello", serde_json::json!({"sessionId": "host-1", "hostVersion": "test"}));
+        app.draft = "你好".to_owned();
+        apply(&mut app, crate::ui::Action::Send { text: "你好".to_owned() });
+
+        let frames = recorded.frames.lock().expect("frames").clone();
+        assert!(
+            frames.iter().any(|frame| frame["method"] == "session/create"),
+            "a conversation is created on submit: {frames:?}",
+        );
+        assert!(
+            !frames.iter().any(|frame| frame["method"] == "session/prompt"),
+            "and the prompt waits for it",
+        );
+        assert_eq!(app.draft, "", "the box is free again: the text is in the session's hands");
     }
 
     #[test]
@@ -1379,6 +1457,34 @@ mod tests {
 
     /// Pinning and unpinning are the one place the panel writes a preference, and the file is
     /// what makes "always open this one" mean anything across runs.
+    /// "Start a new conversation" is a decision about the panel, not a request to the host:
+    /// nothing is created until the user has something to say.
+    #[test]
+    fn starting_a_new_conversation_creates_nothing_yet() {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        let path = std::env::temp_dir().join(format!("quorfloat-new-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        app.note_pinned_path(path.clone());
+        attach_one(&mut app, &recorded, &session);
+        apply(&mut app, crate::ui::Action::PinConversation { session_id: Some("session-1".to_owned()) });
+        assert_eq!(session.lock().expect("session").pinned_conversation(), Some("session-1"));
+
+        apply(&mut app, crate::ui::Action::NewConversation);
+        let guard = session.lock().expect("session");
+        assert_eq!(guard.pinned_conversation(), None, "nothing is pinned any more");
+        assert_eq!(guard.follow().session_id(), None, "and nothing is attached");
+        assert_eq!(guard.transcript().session_id(), None, "the transcript was let go too");
+        drop(guard);
+        assert!(!path.exists(), "and the remembered pin is gone from the file");
+
+        let frames = recorded.frames.lock().expect("frames").clone();
+        assert!(
+            !frames.iter().any(|frame| frame["method"] == "session/create"),
+            "no conversation is created until there is something to say: {frames:?}",
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn pinning_a_conversation_writes_it_down_and_unpinning_forgets_it() {
         let (mut app, recorded, session, _wake) = app_and_session();
@@ -1494,75 +1600,6 @@ mod tests {
         assert_eq!(app.draft, "", "and the box was cleared");
     }
 
-    /// With nothing attached, the panel must say so rather than swallow the keystroke.
-    ///
-    /// This is the state that produced the report "my input will not send": a panel with no
-    /// conversation looks ready, and the only thing wrong with it is the one thing it does not
-    /// say. The composer's placeholder and its disabled button carry that now, and the delivery
-    /// reason is on the status line for anyone who pressed the key anyway.
-    #[test]
-    fn with_no_conversation_the_refusal_is_on_the_record_and_on_the_panel() {
-        let (mut app, recorded, session, _wake) = app_and_session();
-        let ctx = egui::Context::default();
-        crate::ui::fonts::ensure_icons(&ctx);
-        let size = egui::vec2(708.0, 620.0);
-        app.draft = "你好".to_owned();
-        let enter = egui::Event::Key {
-            key: egui::Key::Enter,
-            physical_key: None,
-            pressed: true,
-            repeat: false,
-            modifiers: egui::Modifiers::NONE,
-        };
-        // Focus the editor first: without focus an Enter belongs to something else, and this
-        // test would pass for that reason instead of the one it is about.
-        let editor = egui::pos2(
-            f32::from(crate::ui::theme::SHADOW_ROOM_SIDE + crate::ui::theme::PAD_COMPOSER.left) + 60.0,
-            f32::from(crate::ui::theme::SHADOW_ROOM_TOP) + 95.0,
-        );
-        let plan: Vec<Vec<egui::Event>> = vec![
-            vec![egui::Event::PointerMoved(editor)],
-            vec![egui::Event::PointerButton {
-                pos: editor,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::NONE,
-            }],
-            vec![egui::Event::PointerButton {
-                pos: editor,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::NONE,
-            }],
-            vec![enter],
-        ];
-        for events in plan {
-            let mut output = ctx.run_ui(
-                egui::RawInput {
-                    events,
-                    focused: true,
-                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
-                    ..Default::default()
-                },
-                |ui| app.draw(ui),
-            );
-            output.textures_delta.clear();
-        }
-
-        // Nothing was sent…
-        assert!(
-            !recorded.frames.lock().expect("frames").iter().any(|frame| frame["method"] == "session/prompt"),
-            "no prompt can leave without a conversation",
-        );
-        // …the text is still there for the user to send once there is one…
-        assert_eq!(app.draft, "你好");
-        // …and the panel knows why, which is what its status line shows.
-        let reason = session.lock().expect("session").prompt_delivery().describe();
-        assert!(
-            reason.as_deref().is_some_and(|reason| reason.contains("会话")),
-            "the refusal names its reason: {reason:?}",
-        );
-    }
 
     /// The invariant behind "the panel looks cut off at the bottom".
     ///
@@ -1745,12 +1782,14 @@ mod tests {
 
     /// Take the panel through a handshake and onto one conversation.
     ///
+    /// The decision in the middle is the user's: with the "follow the newest" rule gone, a
+    /// conversation is attached because it was chosen — which is what the panel does when
+    /// somebody picks one in the picker.
+    ///
     /// @param app - the panel, whose follow loop is pumped the way `logic` pumps it.
     /// @param recorded - the frames sent so far.
     /// @param session - the session being driven.
     fn attach_one(app: &mut App, recorded: &Recorded, session: &Arc<Mutex<Session>>) {
-        // The handshake is written by whoever owns the event loop — in the panel, that is
-        // `main` before the window exists — so the tests do it the way `main` does.
         {
             let mut sink = RecordingSink(recorded.clone());
             session.lock().expect("session").start(&mut sink);
@@ -1763,6 +1802,10 @@ mod tests {
             "sessions/list",
             serde_json::json!({"items": [{"sessionId": "session-1", "updatedAt": 1, "cwd": "/work/project"}]}),
         );
+        {
+            let mut sink = RecordingSink(recorded.clone());
+            session.lock().expect("session").choose_conversation("session-1", &mut sink);
+        }
         answer(session, recorded, "session/attach", serde_json::json!({"generation": 1}));
     }
 

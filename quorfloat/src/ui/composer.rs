@@ -63,7 +63,15 @@ pub(super) fn composer(
                     .frame(egui::Frame::NONE)
                     // The placeholder is where a user looks when nothing happens, so it says
                     // the one thing that would stop a send: there is no conversation yet.
-                    .hint_text(if state.attached.is_some() { "问点什么…" } else { "先新建一个会话…" }),
+                    .hint_text(if state.attached.is_some() {
+                        "问点什么…"
+                    } else if state.creating_on_submit {
+                        // Sending will start a conversation: said here because the alternative
+                        // is a user wondering whether the panel is attached to anything.
+                        "问点什么…（发送时新建会话）"
+                    } else {
+                        "正在打开会话…"
+                    }),
             );
 
             // Enter sends, unless the user is mid-composition, asking for a line break, or
@@ -82,9 +90,12 @@ pub(super) fn composer(
             // Sending needs somewhere to send to. The button says so by being disabled, and a
             // hover explains why — a button that looks ready and silently refuses is how "my
             // input will not send" becomes a bug report about the input.
-            let ready = state.attached.is_some();
+            // Sending is possible when there is somewhere to send to, or when sending is what
+            // creates it. The only state that cannot send is the one in between: a conversation
+            // is pinned but not attached yet.
+            let ready = state.attached.is_some() || state.creating_on_submit;
             let enabled = stop || (ready && !draft.trim().is_empty());
-            let refusal = (!ready).then_some("还没有会话可以发送：先新建一个会话");
+            let refusal = (!ready).then_some("正在打开会话…");
             if submit_button(ui, stop, enabled, refusal).clicked() {
                 if stop {
                     *action = Some(Action::Cancel);

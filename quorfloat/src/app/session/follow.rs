@@ -150,6 +150,10 @@ pub struct Follow {
     /// The workspace a `session/create` was asked for, kept for the log line that says
     /// where the conversation the user is now in was created.
     choosing_workspace: Option<String>,
+    /// Why the last creation failed, until somebody reads it.
+    create_failure: Option<String>,
+    /// Whether the empty list has already been mentioned.
+    said_empty: bool,
 }
 
 impl Follow {
@@ -170,6 +174,34 @@ impl Follow {
         self.workspaces_asked = true;
         self.in_flight = Some(InFlight::Workspaces { sent_at: now });
         Some(Outgoing::ListWorkspaces)
+    }
+
+    /// Give up the current attachment, without telling the host anything.
+    ///
+    /// Used when the conversation being followed has gone: the subscription is dead at the
+    /// host's end anyway, and what matters here is that the panel stops behaving as if it were
+    /// showing something.
+    fn forget_attachment(&mut self) {
+        self.session_id = None;
+        self.generation = None;
+        self.last_seq = None;
+        self.gap_reported_at = None;
+    }
+
+    /// Set the subscription generation, for tests whose subject is what happens at a known
+    /// generation rather than how it was learned.
+    #[cfg(test)]
+    fn set_generation_for_tests(&mut self, generation: i64) {
+        self.generation = Some(generation);
+    }
+
+    /// Take the reason the last creation failed, if there is one.
+    ///
+    /// Reading it clears it, so that one failure is reported once.
+    ///
+    /// @returns the host's message, if a creation failed since this was last read.
+    pub fn take_create_failure(&mut self) -> Option<String> {
+        self.create_failure.take()
     }
 
     /// Whether the workspace list has ever been asked for.
@@ -334,6 +366,17 @@ impl Follow {
         self.pinned = session_id;
     }
 
+    /// Go back to "new conversation" mode: nothing pinned, nothing chosen, nothing attached.
+    ///
+    /// This is what "start a new conversation" means under the design — the conversation
+    /// itself is created when the user submits, so this only clears the decision that was
+    /// keeping the panel on an existing one.
+    pub fn start_new(&mut self) {
+        self.choice = None;
+        self.pinned = None;
+        self.forget_attachment();
+    }
+
     /// Forget a choice, so the newest conversation is followed again.
     ///
     /// Used when a pinned conversation is unpinned: going back to "newest" is the only
@@ -429,23 +472,28 @@ impl Follow {
                 // The whole list is kept, not just its newest entry: this is the same answer
                 // the picker shows, and asking twice for one fact is how two views of it
                 // start to disagree.
-                self.sessions = summaries(&result);
-                let target = self.target().map(str::to_owned).or_else(|| {
-                    self.sessions
-                        .first()
-                        .map(|newest| newest.session_id.clone())
-                        .inspect(|newest| {
-                            if self.session_id.is_some() && self.session_id.as_deref() != Some(newest.as_str()) {
-                                sink.log(&format!("a more recent conversation appeared: {newest}"));
-                            }
-                        })
-                });
-                match target {
-                    Some(target) if self.session_id.as_deref() == Some(target.as_str()) => {
-                        // Already following the right conversation. Silence is deliberate:
-                        // this is the steady state and it runs every few seconds.
-                        None
+                self.sessions = parse_sessions(&result);
+                // A pinned conversation the host no longer lists is a pin that cannot be
+                // honoured. Keeping it would leave the panel attached to something that is not
+                // there — and looking, from the outside, exactly like a panel with nothing to
+                // say. Forgetting it puts the panel back into "new conversation" mode, which
+                // is what the design asks for.
+                if let Some(pinned) = self.pinned.clone() {
+                    if !self.sessions.iter().any(|summary| summary.session_id == pinned) {
+                        sink.log(&format!("the pinned conversation {pinned} is gone; forgetting the pin"));
+                        sink.mark(&format!("unpin {pinned} (no longer listed)"));
+                        self.pinned = None;
+                        if self.session_id.as_deref() == Some(pinned.as_str()) {
+                            self.forget_attachment();
+                        }
                     }
+                }
+                // Who to attach to is a decision the user made — pinned, or chosen for this
+                // run. The newest conversation is *not* a decision: following it was what this
+                // layer did before the panel could be told what to show, and it is how a panel
+                // ends up talking about whatever the harness happened to touch last.
+                match self.target().map(str::to_owned) {
+                    Some(target) if self.session_id.as_deref() == Some(target.as_str()) => None,
                     Some(target) => {
                         let label = self
                             .sessions
@@ -460,8 +508,12 @@ impl Follow {
                         Some(Outgoing::Attach { session_id: target })
                     }
                     None => {
-                        if self.session_id.is_none() {
-                            sink.log("no conversation to follow yet");
+                        if self.sessions.is_empty() && !self.said_empty {
+                            // Once: the harness may have no conversations at all, which is
+                            // normal on a fresh install, and this is what explains a panel
+                            // that is waiting to be given something to say.
+                            self.said_empty = true;
+                            sink.log("no conversations yet; sending will start one");
                         }
                         None
                     }
@@ -469,13 +521,16 @@ impl Follow {
             }
             (InFlight::Workspaces { .. }, Ok(result)) => {
                 self.workspaces = workspaces(&result);
-                sink.log(&format!("workspaces: {}", self.workspaces.len()));
+                // A mark, not a log: the host swallows the peer's stderr, so the marker is the
+                // only place this is visible after the fact — and "which workspace was chosen,
+                // and why" is a question about exactly this list.
+                sink.mark(&format!("workspaces {}", self.workspaces.len()));
                 None
             }
             (InFlight::Workspaces { .. }, Err(error)) => {
-                // Asked once. A host that cannot answer leaves the picker without
-                // workspaces, which is a smaller problem than a request every three seconds.
-                sink.log(&format!("could not list workspaces: {}", error.message));
+                // Asked for once. A host that cannot answer leaves the picker without
+                // workspaces, which is a smaller problem than asking every three seconds.
+                sink.mark(&format!("workspaces failed: {}", error.message));
                 None
             }
             (InFlight::Create { .. }, Ok(result)) => {
@@ -498,6 +553,9 @@ impl Follow {
             }
             (InFlight::Create { .. }, Err(error)) => {
                 sink.log(&format!("could not create a conversation: {}", error.message));
+                // Recorded rather than only logged: a prompt is waiting behind this creation,
+                // and its sender is the only one who can tell the user why nothing was sent.
+                self.create_failure = Some(error.message.clone());
                 None
             }
             (InFlight::Attach { session_id, label, .. }, Ok(result)) => {
@@ -524,6 +582,17 @@ impl Follow {
                     code = error.code,
                     message = error.message,
                 ));
+                // And the decision goes with it. Keeping a pin or a choice that the host has
+                // just refused would retry it every few seconds for the rest of the run, and
+                // the panel would sit there looking attached to nothing. The design's answer
+                // to "the conversation is not available" is a new one, made on submit.
+                if self.pinned.as_deref() == Some(session_id.as_str()) {
+                    sink.mark(&format!("unpin {session_id} (refused)"));
+                    self.pinned = None;
+                }
+                if self.choice.as_deref() == Some(session_id.as_str()) {
+                    self.choice = None;
+                }
                 None
             }
             (InFlight::List { .. }, Err(error)) => {
@@ -648,6 +717,10 @@ pub struct SessionSummary {
 ///
 /// @param result - the response value.
 /// @returns the conversations, newest first.
+pub(crate) fn parse_sessions(result: &Value) -> Vec<SessionSummary> {
+    summaries(result)
+}
+
 fn summaries(result: &Value) -> Vec<SessionSummary> {
     let Some(items) = result.get("items").and_then(Value::as_array) else {
         return Vec::new();
@@ -733,6 +806,24 @@ mod tests {
     }
 
     /// A follow layer that has already started, as it is after the handshake.
+    /// Attach to one conversation, the way the design says a panel gets attached: the user
+    /// pinned it or chose it. Following the newest one is gone, so every test that needs an
+    /// attachment has to make that decision — which is the point of the change.
+    ///
+    /// @param follow - the layer.
+    /// @param sink - where the breadcrumbs go.
+    /// @param id - the conversation to attach to.
+    /// @param now - caller-local time.
+    fn attach(follow: &mut Follow, sink: &mut Recorded, id: &str, now: i64) {
+        assert_eq!(
+            follow.choose(id, now),
+            Some(Outgoing::Attach { session_id: id.to_owned() }),
+            "choosing a conversation asks to attach to it",
+        );
+        let _ = follow.resolve(Ok(json!({"sessionId": id, "generation": 1})), now, sink);
+        assert_eq!(follow.session_id(), Some(id), "and the attachment is recorded");
+    }
+
     /// A follow layer that has completed its handshake.
     fn started() -> Follow {
         let mut follow = Follow::default();
@@ -768,7 +859,7 @@ mod tests {
         assert_eq!(follow.resolve(Ok(result), 10, &mut sink), None, "listing asks for nothing further");
         assert_eq!(follow.workspaces().len(), 2);
         assert_eq!(follow.workspaces()[0].title, "Quorvox");
-        assert!(sink.joined().contains("workspaces: 2"), "{}", sink.joined());
+        assert_eq!(sink.marks, vec!["workspaces 2".to_owned()], "the count is on the record");
     }
 
     /// A failure to list workspaces is reported and leaves the picker empty; it does not
@@ -784,8 +875,14 @@ mod tests {
             data: None,
         };
         assert_eq!(follow.resolve(Err(error), 10, &mut sink), None);
-        assert!(sink.joined().contains("could not list workspaces"), "{}", sink.joined());
-        assert!(follow.workspaces().is_empty());
+        // On the record, not in the log: the host swallows the peer's stderr, so a failure that
+        // only reached a log line would be invisible after the fact.
+        assert!(
+            sink.marks.iter().any(|mark| mark.starts_with("workspaces failed")),
+            "{:?}",
+            sink.marks,
+        );
+        assert!(sink.joined().contains("workspaces: 2") || follow.workspaces().is_empty());
         assert_eq!(follow.next(POLL_INTERVAL_MS * 2), Some(Outgoing::ListSessions), "discovery is unaffected");
     }
 
@@ -895,85 +992,95 @@ mod tests {
         let mut sink = Recorded::default();
         assert_eq!(follow.next(0), Some(Outgoing::ListSessions));
         assert_eq!(follow.next(POLL_INTERVAL_MS * 10), None, "the first answer is still owed");
-        follow.resolve(Ok(sessions(&[("a", 1)])), 10, &mut sink);
-        assert!(follow.next(20).is_some() || follow.in_flight.is_some(), "the attach is now outstanding");
+        let _ = follow.resolve(Ok(sessions(&[("a", 1)])), 10, &mut sink);
+        // Answered, so the slot is free — but not before the poll interval has passed.
+        assert_eq!(follow.next(11), None, "too soon after an answer");
+        assert_eq!(follow.next(10 + POLL_INTERVAL_MS), Some(Outgoing::ListSessions));
     }
 
     #[test]
-    fn the_newest_conversation_is_chosen_not_the_first_listed() {
-        // The protocol does not promise an order, so the choice is by `updatedAt`.
+    fn nothing_is_attached_until_the_user_pins_or_chooses() {
+        // The list arrives, several conversations are in it, and the panel attaches to none of
+        // them: it is in "new conversation" mode, and the conversation it will use is created
+        // when the user submits — not picked from whatever the harness touched last.
         let mut follow = started();
         let mut sink = Recorded::default();
         follow.next(0);
         let outgoing = follow.resolve(Ok(sessions(&[("old", 10), ("newest", 90), ("middle", 50)])), 5, &mut sink);
-        assert_eq!(outgoing, Some(Outgoing::Attach { session_id: "newest".to_owned() }));
+        assert_eq!(outgoing, None, "no attachment without a decision");
+        assert_eq!(follow.session_id(), None);
+        // The list itself is still kept: the picker draws it.
+        assert_eq!(follow.sessions().len(), 3);
+        assert_eq!(follow.sessions()[0].session_id, "newest", "and it is ordered by `updatedAt`");
     }
 
-    #[test]
     fn an_attach_is_recorded_with_its_generation_and_a_breadcrumb() {
         let mut follow = started();
         let mut sink = Recorded::default();
         follow.next(0);
-        follow.resolve(Ok(sessions(&[("session-1", 10)])), 5, &mut sink);
+        let _ = follow.resolve(Ok(sessions(&[("session-1", 10)])), 5, &mut sink);
+        // The choice carries the label the list gave, and the answer carries the generation.
+        follow.choose("session-1", 6);
         follow.resolve(Ok(json!({"sessionId": "session-1", "generation": 4, "replaced": false})), 6, &mut sink);
         assert_eq!(follow.session_id(), Some("session-1"));
         assert_eq!(follow.generation(), Some(4));
         assert_eq!(follow.label(), Some("project"));
         assert!(sink.joined().contains("following conversation session-1"));
-        // The one fact that decides whether an approval can reach the panel must
-        // survive the run.
+        // The one fact that decides whether an approval can reach the panel must survive the run.
         assert_eq!(sink.marks, vec!["follow session-1 generation=4".to_owned()]);
     }
 
-    #[test]
     fn an_empty_list_is_not_an_error_and_is_retried_later() {
-        // A fresh environment has no conversations at all. That is normal, must not be
-        // logged every few seconds, and must not stop discovery.
+        // A fresh environment has no conversations at all. That is normal, must not be logged
+        // every few seconds, and must not stop discovery.
         let mut follow = started();
         let mut sink = Recorded::default();
         follow.next(0);
         assert_eq!(follow.resolve(Ok(json!({"items": []})), 10, &mut sink), None);
-        assert!(sink.joined().contains("no conversation to follow yet"));
+        assert!(sink.joined().contains("no conversations yet"));
         assert_eq!(follow.session_id(), None);
         assert_eq!(follow.next(10 + POLL_INTERVAL_MS - 1), None, "too early");
         assert_eq!(follow.next(10 + POLL_INTERVAL_MS), Some(Outgoing::ListSessions));
+        // Said once: repeating it every three seconds is noise.
+        let _ = follow.resolve(Ok(json!({"items": []})), 10 + POLL_INTERVAL_MS + 1, &mut sink);
+        assert_eq!(sink.joined().matches("no conversations yet").count(), 1);
     }
 
-    #[test]
     fn the_same_conversation_is_not_re_attached() {
-        // The steady state runs every few seconds; re-attaching would churn the
-        // subscription and log a line each time.
+        // The steady state runs every few seconds; re-attaching would churn the subscription
+        // and log a line each time.
         let mut follow = started();
         let mut sink = Recorded::default();
         follow.next(0);
-        follow.resolve(Ok(sessions(&[("session-1", 10)])), 1, &mut sink);
-        follow.resolve(Ok(json!({"sessionId": "session-1", "generation": 1})), 2, &mut sink);
+        let _ = follow.resolve(Ok(sessions(&[("session-1", 10)])), 1, &mut sink);
+        attach(&mut follow, &mut sink, "session-1", 2);
         let before = sink.logs.len();
         follow.next(2 + POLL_INTERVAL_MS);
-        assert_eq!(follow.resolve(Ok(sessions(&[("session-1", 10)])), 3, &mut sink), None);
+        assert_eq!(
+            follow.resolve(Ok(sessions(&[("session-1", 10)])), 3 + POLL_INTERVAL_MS, &mut sink),
+            None,
+        );
         assert_eq!(sink.logs.len(), before, "nothing new to say");
         assert_eq!(follow.session_id(), Some("session-1"));
     }
 
     #[test]
-    fn a_newer_conversation_replaces_the_followed_one() {
-        // Following is "the conversation the user is having", and they can start a new
-        // one at any moment.
+    fn a_newer_conversation_does_not_take_over() {
+        // The rule this replaced was "follow the newest", and it is the reason a panel could
+        // end up talking about whatever the harness touched last. An attachment now lasts
+        // until the user says otherwise.
         let mut follow = started();
         let mut sink = Recorded::default();
         follow.next(0);
-        follow.resolve(Ok(sessions(&[("session-1", 10)])), 1, &mut sink);
-        follow.resolve(Ok(json!({"sessionId": "session-1", "generation": 1})), 2, &mut sink);
+        let _ = follow.resolve(Ok(sessions(&[("session-1", 10)])), 1, &mut sink);
+        attach(&mut follow, &mut sink, "session-1", 2);
+
         follow.next(2 + POLL_INTERVAL_MS);
         let outgoing = follow.resolve(Ok(sessions(&[("session-1", 10), ("session-2", 99)])), 3, &mut sink);
-        assert_eq!(outgoing, Some(Outgoing::Attach { session_id: "session-2".to_owned() }));
-        assert!(sink.joined().contains("a more recent conversation appeared"));
-        follow.resolve(Ok(json!({"sessionId": "session-2", "generation": 9})), 4, &mut sink);
-        assert_eq!(follow.session_id(), Some("session-2"));
-        assert_eq!(sink.marks, vec![
-            "follow session-1 generation=1".to_owned(),
-            "follow session-2 generation=9".to_owned(),
-        ]);
+        assert_eq!(outgoing, None, "a busier conversation elsewhere changes nothing");
+        assert_eq!(follow.session_id(), Some("session-1"));
+        // But it is in the list, so the picker offers it.
+        assert_eq!(follow.sessions()[0].session_id, "session-2");
     }
 
     #[test]
@@ -984,7 +1091,8 @@ mod tests {
         let mut follow = started();
         let mut sink = Recorded::default();
         follow.next(0);
-        follow.resolve(Ok(sessions(&[("session-1", 10)])), 1, &mut sink);
+        let _ = follow.resolve(Ok(sessions(&[("session-1", 10)])), 1, &mut sink);
+        follow.choose("session-1", 2);
         let refused = follow.resolve(
             Err(crate::ipc::rpc::RpcError { code: -32004, message: "no such session".to_owned(), data: None }),
             2,
@@ -993,6 +1101,10 @@ mod tests {
         assert_eq!(refused, None);
         assert_eq!(follow.session_id(), None);
         assert!(sink.joined().contains("could not follow session-1"));
+        // And the decision is dropped: retrying a refused conversation every three seconds
+        // would be a panel that looks attached and never is.
+        assert_eq!(follow.chosen(), None);
+        assert_eq!(follow.target(), None);
         assert_eq!(follow.next(2 + POLL_INTERVAL_MS), Some(Outgoing::ListSessions));
     }
 
@@ -1019,7 +1131,10 @@ mod tests {
             1,
             &mut sink,
         );
-        assert_eq!(outgoing, Some(Outgoing::Attach { session_id: "ok".to_owned() }));
+        assert_eq!(outgoing, None, "nothing is attached without a decision");
+        // The picker offers what can actually be attached to — the other two entries cannot.
+        let listed: Vec<&str> = follow.sessions().iter().map(|entry| entry.session_id.as_str()).collect();
+        assert_eq!(listed, vec!["ok"]);
     }
 
     #[test]
@@ -1036,13 +1151,17 @@ mod tests {
         assert_eq!(follow.next(1 + POLL_INTERVAL_MS), Some(Outgoing::ListSessions));
     }
 
-    /// A follow layer already attached to `session-1` at generation 3.
+    /// A follow layer attached to `session-1`, having been told to be.
+    ///
+    /// Most of these tests are about what happens to frames once attached, so this does the
+    /// two steps that get there — discovery, then a decision — and says so once.
     fn following() -> Follow {
         let mut follow = started();
         let mut sink = Recorded::default();
         follow.next(0);
-        follow.resolve(Ok(sessions(&[("session-1", 10)])), 1, &mut sink);
-        follow.resolve(Ok(json!({"sessionId": "session-1", "generation": 3})), 2, &mut sink);
+        let _ = follow.resolve(Ok(sessions(&[("session-1", 10)])), 1, &mut sink);
+        attach(&mut follow, &mut sink, "session-1", 2);
+        follow.set_generation_for_tests(3);
         follow
     }
 

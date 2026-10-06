@@ -116,6 +116,10 @@ pub(super) fn deliver(session: &mut Session, frames: Vec<Inbound>, sink: &mut Re
     }
 }
 
+/// Attach the session to `session-1` the way the design says a panel gets attached: after
+/// the handshake, the list is read and the user's decision — a pin or a choice — is what
+/// attaches. Following the newest conversation is gone; a test that needs an attachment has
+/// to make the same decision the panel's user would.
 pub(super) fn follow_a_conversation(session: &mut Session, sink: &mut RecordingSink) {
     session.on_frame(hello_ok(), sink);
     session.pump_follow_at(0, sink);
@@ -130,6 +134,7 @@ pub(super) fn follow_a_conversation(session: &mut Session, sink: &mut RecordingS
         },
         sink,
     );
+    session.choose_conversation("session-1", sink);
     let attach = sink.frames.last().expect("an attach request")["id"].clone();
     session.on_frame(
         Inbound::Response { id: attach, outcome: Ok(json!({"sessionId": "session-1", "generation": 3})) },

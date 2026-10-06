@@ -29,13 +29,13 @@ use crate::ui::{Action, icons, theme};
 ///
 /// @param kind - which picker.
 /// @returns the id its open state lives under.
-pub(super) fn popup_id(kind: Kind) -> egui::Id {
+pub(crate) fn popup_id(kind: Kind) -> egui::Id {
     kind.id()
 }
 
 /// Which picker a popup belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Kind {
+pub(crate) enum Kind {
     /// The workspace picker.
     Workspace,
     /// The conversation picker.
@@ -96,10 +96,19 @@ pub(super) fn workspaces(ui: &mut egui::Ui, state: &PanelState) -> Outcome {
             ui.set_width(theme::POPOVER_WIDTH);
             popover_head(ui, "工作区", &format!("{} 个", state.workspaces.len()));
             if state.workspaces.is_empty() {
-                // Asked for when the menu opens rather than at startup: a panel whose user
-                // never opens this should not spend a request on it.
-                popover_note(ui, "正在向 Harness 查询工作区…");
-                action = Some(Action::RefreshWorkspaces);
+                // Asked for once, when the menu is first opened: a request per frame would be
+                // a panel that spends its life asking the same question. After that the list is
+                // whatever the host had, and the note below says what to do about it.
+                if !state.workspaces_asked {
+                    popover_note(ui, "正在向 Harness 查询工作区…");
+                    action = Some(Action::RefreshWorkspaces);
+                } else {
+                    popover_note(ui, "Harness 里还没有工作区。");
+                    popover_hint(ui, "在 Harness 中打开一个文件夹，再回来点「重新查询」。");
+                }
+                if let Some(Row::Chosen) = option_row(ui, Icon::Search, "重新查询", None, false, false, false) {
+                    action = Some(Action::RefreshWorkspaces);
+                }
             }
             for workspace in &state.workspaces {
                 let chosen = state.current_workspace.as_deref() == Some(workspace.workspace_id.as_str());
@@ -159,13 +168,13 @@ pub(super) fn conversations(ui: &mut egui::Ui, state: &PanelState) -> Outcome {
         .show(|ui| {
             ui.set_width(theme::POPOVER_WIDTH);
             popover_head(ui, "会话", &format!("{} 个", state.conversations.len()));
-            if let Some(Row::Chosen) = option_row(ui, Icon::Plus, "新建会话", Some("在固定工作区中创建"), false, false, false)
+            if let Some(Row::Chosen) =
+                option_row(ui, Icon::Plus, "开始新会话", Some("发送时创建"), false, false, false)
             {
-                // Pinned workspace first, then the one the panel is showing: creating a
-                // conversation where the user is looking is the least surprising answer, and
-                // it means a fresh panel can start without pinning anything.
-                let workspace_id = state.pinned_workspace.clone().or_else(|| state.current_workspace.clone());
-                action = Some(Action::CreateConversation { workspace_id });
+                // Not "create one now": the design creates the conversation when the user
+                // submits, so this clears whatever the panel was pinned or switched to and
+                // leaves it waiting for something to say.
+                action = Some(Action::NewConversation);
                 egui::Popup::close_id(ui.ctx(), Kind::Conversation.id());
             }
             if state.conversations.is_empty() {

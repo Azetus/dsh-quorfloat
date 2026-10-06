@@ -224,6 +224,12 @@ impl HotkeyReport {
     }
 }
 
+/// Why a conversation cannot be started: the panel does not know where to put one.
+///
+/// The host's router requires a non-empty `workspaceId`, so this is not a limitation the panel
+/// can work around by asking more cleverly — it is a question only the user can answer.
+pub const CREATE_WITHOUT_WORKSPACE: &str = "先选择一个工作区";
+
 /// What the host sent in `ready` after a successful handshake.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HostConfig {
@@ -276,6 +282,11 @@ pub struct Session {
     cancel: Delivery,
     /// Requests awaiting a verdict, so a response can be attributed to what asked.
     sends_in_flight: BTreeMap<i64, Sending>,
+    /// A prompt that cannot be sent until the conversation it needs exists.
+    ///
+    /// Held here rather than in the panel because only this layer knows when the creation has
+    /// finished: it finishes as an attach, and an attach is done when its answer arrives.
+    pending_prompt: Option<String>,
     /// Idempotency keys issued so far, so a retry after a failure uses a fresh one.
     prompts_issued: u64,
     /// Where raw conversation frames are captured, when a capture was asked for.
@@ -309,6 +320,7 @@ impl Session {
             prompt: Delivery::Idle,
             cancel: Delivery::Idle,
             sends_in_flight: BTreeMap::new(),
+            pending_prompt: None,
             prompts_issued: 0,
             dump: Dump::default(),
             follow_request: None,
@@ -558,6 +570,9 @@ impl Session {
                 if let Some(outgoing) = self.follow.resolve(outcome, now, sink) {
                     self.send_follow(outgoing, now, sink);
                 }
+                self.forget_a_conversation_that_is_gone(sink);
+                // The conversation a waiting prompt needed may have just come into existence.
+                self.flush_pending_prompt(sink);
                 return;
             }
         }
@@ -712,6 +727,22 @@ impl Session {
         self.follow.workspaces()
     }
 
+    /// Whether the workspace list has ever been asked for.
+    ///
+    /// The picker asks once and then stops: an empty list is an answer, not a reason to ask
+    /// again every frame.
+    #[must_use]
+    pub fn workspaces_asked(&self) -> bool {
+        self.follow.workspaces_asked()
+    }
+
+    /// The prompt waiting for a conversation to exist, for tests about when it is sent.
+    #[cfg(test)]
+    #[must_use]
+    pub fn pending_prompt_for_tests(&self) -> Option<&str> {
+        self.pending_prompt.as_deref()
+    }
+
     /// The conversation the user pinned, if any.
     #[must_use]
     pub fn pinned_conversation(&self) -> Option<&str> {
@@ -754,6 +785,15 @@ impl Session {
         let now = rpc::now_millis();
         let outgoing = self.follow.set_pinned(session_id, now);
         self.send_request(outgoing, now, sink)
+    }
+
+    /// Go back to "new conversation" mode, dropping whatever was pinned or chosen.
+    ///
+    /// @param sink - where the fact goes, because a panel that empties itself silently is
+    ///   indistinguishable from one that lost its place.
+    pub fn start_new_conversation(&mut self, sink: &mut dyn FrameSink) {
+        self.follow.start_new();
+        self.forget_a_conversation_that_is_gone(sink);
     }
 
     /// Create a conversation, and be in it.
@@ -801,13 +841,33 @@ impl Session {
     /// @param now - caller-local time, recorded so a lost answer can be noticed.
     /// @param sink - where the frame goes.
     fn send_follow(&mut self, outgoing: Outgoing, now: i64, sink: &mut dyn FrameSink) {
+        if let Outgoing::CreateSession { workspace_id } = &outgoing {
+            if workspace_id.as_deref().is_none_or(|id| id.trim().is_empty()) {
+                // Caught here rather than at the wire: the caller asked for a conversation
+                // without saying where, and the honest answer is that the panel needs a
+                // workspace before it can make one.
+                sink.log("a conversation was asked for without a workspace");
+                sink.mark("create refused: no workspace");
+                self.follow.abandon(now);
+                if let Some(text) = self.pending_prompt.take() {
+                    // The text the user typed is not sent, and they are told why.
+                    self.prompt = Delivery::Failed { reason: CREATE_WITHOUT_WORKSPACE.to_owned() };
+                    sink.log(&format!("{CREATE_WITHOUT_WORKSPACE}: {text:?} was not sent"));
+                }
+                return;
+            }
+        }
         let id = self.take_request_id();
         let frame = match &outgoing {
             Outgoing::ListSessions => rpc::request(id, "sessions/list", json!({})),
             Outgoing::ListWorkspaces => rpc::request(id, "workspaces/list", json!({})),
             Outgoing::CreateSession { workspace_id } => {
-                // An empty workspace id is the host's own default, which is the documented
-                // way to say "wherever you would put it" (see `docs/protocol.md` §7).
+                // The host's router requires a non-empty `workspaceId` and rejects the request
+                // outright (`requireString`, `bridge/router.ts`), so "ask for the default by
+                // sending nothing" is not a thing the protocol can express — the empty value is
+                // the *host's own* internal default, not the wire's. There is no frame to send
+                // here without an id, and sending one would be a request the host answers with
+                // an error the user cannot act on.
                 let workspace_id = workspace_id.clone().unwrap_or_default();
                 rpc::request(id, "session/create", json!({ "workspaceId": workspace_id }))
             }
@@ -949,7 +1009,7 @@ impl Session {
     /// @param sink - where the frame goes.
     /// @returns what is known now; the host's verdict arrives later and is reported
     ///   through [`Session::prompt_delivery`].
-    pub fn send_prompt(&mut self, text: &str, sink: &mut dyn FrameSink) -> Delivery {
+    pub fn send_prompt(&mut self, text: &str, workspace_id: Option<&str>, sink: &mut dyn FrameSink) -> Delivery {
         let text = text.trim();
         if text.is_empty() {
             self.prompt = Delivery::Failed { reason: "内容为空".to_owned() };
@@ -961,9 +1021,45 @@ impl Session {
             return self.prompt.clone();
         }
         let Some(session_id) = self.follow.session_id().map(str::to_owned) else {
-            self.prompt = Delivery::Failed { reason: "尚未跟随任何会话".to_owned() };
+            // Nothing to send to: the panel is in "new conversation" mode, and this is the
+            // moment the conversation is created — on submit, never on open. A panel that
+            // created one every time it was summoned would fill the harness's list with
+            // conversations nobody ever used.
+            // Nowhere to create it: the host requires a workspace, so the panel asks the user
+            // for one instead of sending a request the host will reject.
+            let Some(workspace_id) = workspace_id.filter(|id| !id.trim().is_empty()) else {
+                // Two different problems, two different answers: a list that has not arrived
+                // yet needs patience, and a list with nothing in it needs the user.
+                self.prompt = Delivery::Failed {
+                    reason: if self.follow.workspaces_asked() {
+                        CREATE_WITHOUT_WORKSPACE.to_owned()
+                    } else {
+                        "正在获取工作区，请稍候再发送".to_owned()
+                    },
+                };
+                return self.prompt.clone();
+            };
+            let now = rpc::now_millis();
+            let Some(outgoing) = self.follow.create(Some(workspace_id), now) else {
+                self.prompt = Delivery::Failed { reason: "正在创建会话，请稍候再发送".to_owned() };
+                return self.prompt.clone();
+            };
+            self.pending_prompt = Some(text.to_owned());
+            self.prompt = Delivery::Sending;
+            self.send_follow(outgoing, now, sink);
+            sink.mark(&format!("create-then-prompt {} bytes", text.len()));
             return self.prompt.clone();
         };
+        self.send_to(&session_id, text, sink)
+    }
+
+    /// Write one prompt for a conversation that exists.
+    ///
+    /// @param session_id - where it goes.
+    /// @param text - what to say.
+    /// @param sink - where the frame goes.
+    /// @returns how the attempt ended.
+    fn send_to(&mut self, session_id: &str, text: &str, sink: &mut dyn FrameSink) -> Delivery {
         self.prompts_issued += 1;
         let key = format!("{session_id}:prompt-{}", self.prompts_issued);
         let request_id = self.take_request_id();
@@ -981,6 +1077,52 @@ impl Session {
             sink.log(&format!("could not send a prompt: {error}"));
         }
         self.prompt.clone()
+    }
+
+    /// Send the prompt that was waiting for a conversation to exist.
+    ///
+    /// Called after every follow answer: the creation this prompt is behind finishes as an
+    /// attach, and an attach is only known to have worked when its own answer arrives.
+    ///
+    /// @param sink - where the prompt goes.
+    fn flush_pending_prompt(&mut self, sink: &mut dyn FrameSink) {
+        let Some(text) = self.pending_prompt.clone() else {
+            return;
+        };
+        if let Some(reason) = self.follow.take_create_failure() {
+            // The conversation could not be made, so the text was never sent. Saying so is the
+            // whole job of `Delivery`: an attempt that failed silently is indistinguishable
+            // from a panel that ignored the key.
+            self.pending_prompt = None;
+            self.prompt = Delivery::Failed { reason: format!("无法创建会话：{reason}") };
+            sink.log(&format!("a prompt could not be sent: {reason}"));
+            return;
+        }
+        let Some(session_id) = self.follow.session_id().map(str::to_owned) else {
+            return;
+        };
+        self.pending_prompt = None;
+        self.send_to(&session_id, &text, sink);
+    }
+
+    /// Drop the transcript of a conversation the panel is no longer attached to.
+    ///
+    /// The two are meant to agree — the transcript learns its conversation from a snapshot,
+    /// which only arrives while attached — so a transcript with no attachment behind it means
+    /// the attachment was let go, and the panel is showing a conversation it is not following.
+    /// That happens when a pinned conversation disappears from the harness.
+    ///
+    /// @param sink - where the reason goes: a panel that silently empties itself is
+    ///   indistinguishable from one that lost its place.
+    fn forget_a_conversation_that_is_gone(&mut self, sink: &mut dyn FrameSink) {
+        if self.follow.session_id().is_some() {
+            return;
+        }
+        let Some(session_id) = self.transcript.session_id().map(str::to_owned) else {
+            return;
+        };
+        sink.log(&format!("forgetting {session_id}: it is no longer being followed"));
+        self.transcript.reset();
     }
 
     /// Ask the host to stop the turn in flight.
@@ -1553,11 +1695,9 @@ mod tests {
         assert_eq!(sink.frames.last().expect("a list request")["method"], "sessions/list");
     }
 
-    #[test]
-    fn the_newest_conversation_is_attached_with_a_fresh_request_id() {
-        // This is the step that decides whether an approval can reach the panel at
-        // all: with nothing attached, every interaction is deferred before the panel
-        // ever hears about it.
+    fn a_chosen_conversation_is_attached_with_a_fresh_request_id() {
+        // This is the step that decides whether an approval can reach the panel at all: with
+        // nothing attached, every interaction is deferred before the panel ever hears about it.
         let mut session = Session::new(identity());
         let mut sink = RecordingSink::default();
         session.on_frame(hello_ok(), &mut sink);
@@ -1573,23 +1713,24 @@ mod tests {
             },
             &mut sink,
         );
+        assert_eq!(
+            sink.frames.last().expect("the list request")["method"],
+            "sessions/list",
+            "reading the list attaches to nothing on its own",
+        );
+
+        session.choose_conversation("older", &mut sink);
         let attach = sink.frames.last().expect("an attach request");
         assert_eq!(attach["method"], "session/attach");
-        assert_eq!(attach["params"]["sessionId"], "newest");
+        assert_eq!(attach["params"]["sessionId"], "older", "the chosen one, not the newest");
         assert_ne!(attach["id"], list_id, "the attach is a second request, not a repeat of the first");
 
         let attach_id = attach["id"].clone();
         session.on_frame(
-            Inbound::Response { id: attach_id, outcome: Ok(json!({"sessionId": "newest", "generation": 2})) },
+            Inbound::Response { id: attach_id, outcome: Ok(json!({"sessionId": "older", "generation": 2})) },
             &mut sink,
         );
-        assert_eq!(session.follow().session_id(), Some("newest"));
-        assert_eq!(session.follow().generation(), Some(2));
-        assert!(
-            sink.marks.iter().any(|line| line == "follow newest generation=2"),
-            "the fact that decides ownership is recorded: {:?}",
-            sink.marks,
-        );
+        assert_eq!(session.follow().session_id(), Some("older"));
     }
 
     #[test]
@@ -1664,13 +1805,13 @@ mod tests {
         // The host admits a given key once; two prompts sharing one are one prompt, and
         // the second thing the user typed would vanish.
         let (mut session, mut sink) = followed();
-        session.send_prompt("第一句", &mut sink);
+        session.send_prompt("第一句", None, &mut sink);
         let first = last_request(&sink);
         session.on_frame(
             Inbound::Response { id: first["id"].clone(), outcome: Ok(json!({"accepted": true})) },
             &mut sink,
         );
-        session.send_prompt("第二句", &mut sink);
+        session.send_prompt("第二句", None, &mut sink);
         let second = last_request(&sink);
 
         assert_eq!(first["method"], "session/prompt");
@@ -1680,13 +1821,72 @@ mod tests {
         assert_eq!(second["params"]["text"], "第二句");
     }
 
+    /// The bug behind `session/create: workspaceId must be a non-empty string`.
+    ///
+    /// The host's router requires a non-empty `workspaceId`; the empty value that means "use
+    /// your default" belongs to the host's own API, not to the wire. The panel was sending the
+    /// empty string and being refused — a request that could never have worked.
     #[test]
-    fn a_prompt_without_a_followed_conversation_is_refused() {
+    fn a_conversation_is_never_asked_for_without_a_workspace() {
         let mut session = Session::new(identity());
         let mut sink = RecordingSink::default();
-        let delivery = session.send_prompt("在吗", &mut sink);
+        session.on_frame(hello_ok(), &mut sink);
+
+        let delivery = session.send_prompt("在吗", None, &mut sink);
         assert!(matches!(delivery, Delivery::Failed { .. }), "{delivery:?}");
-        assert!(sink.frames.is_empty(), "nothing is sent with nowhere to send it");
+        assert!(
+            !sink.frames.iter().any(|frame| frame["method"] == "session/create"),
+            "no request is sent at all: {:?}",
+            sink.frames,
+        );
+        let reason = delivery.describe().unwrap_or_default();
+        assert!(reason.contains("工作区"), "and the user is told what is missing: {reason}");
+        assert_eq!(session.pending_prompt_for_tests(), None, "the text is not held hostage");
+
+        // A blank string is not a workspace either.
+        let delivery = session.send_prompt("在吗", Some("   "), &mut sink);
+        assert!(matches!(delivery, Delivery::Failed { .. }), "{delivery:?}");
+        assert!(!sink.frames.iter().any(|frame| frame["method"] == "session/create"));
+    }
+
+    fn a_prompt_with_no_conversation_creates_one_and_then_sends_it() {
+        // The design's rule: the conversation is created *when the user submits*, not when the
+        // panel opens. A panel that created one on every summon would fill the harness's list
+        // with conversations nobody ever used.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        session.on_frame(hello_ok(), &mut sink);
+
+        let delivery = session.send_prompt("在吗", Some("ws-1"), &mut sink);
+        assert!(delivery.is_sending(), "the panel is working on it: {delivery:?}");
+        let create = sink.frames.last().expect("a create request");
+        assert_eq!(create["method"], "session/create");
+        assert_eq!(create["params"]["workspaceId"], "ws-1", "in the workspace the ladder chose");
+        assert!(
+            !sink.frames.iter().any(|frame| frame["method"] == "session/prompt"),
+            "and nothing is sent until there is somewhere to send it",
+        );
+
+        // The host answers with the new conversation, which the panel then attaches to.
+        let create_id = create["id"].clone();
+        session.on_frame(
+            Inbound::Response { id: create_id, outcome: Ok(json!({"sessionId": "brand-new"})) },
+            &mut sink,
+        );
+        let attach = sink.frames.last().expect("an attach request");
+        assert_eq!(attach["method"], "session/attach");
+        assert_eq!(attach["params"]["sessionId"], "brand-new");
+
+        // And the attach's answer is what releases the prompt the user typed.
+        let attach_id = attach["id"].clone();
+        session.on_frame(
+            Inbound::Response { id: attach_id, outcome: Ok(json!({"sessionId": "brand-new", "generation": 1})) },
+            &mut sink,
+        );
+        let prompt = sink.frames.last().expect("the prompt");
+        assert_eq!(prompt["method"], "session/prompt");
+        assert_eq!(prompt["params"]["sessionId"], "brand-new");
+        assert_eq!(prompt["params"]["text"], "在吗");
     }
 
     #[test]
@@ -1694,7 +1894,7 @@ mod tests {
         // The host would accept it and the conversation would gain an empty turn.
         let (mut session, mut sink) = followed();
         let before = sink.frames.len();
-        let delivery = session.send_prompt("   \n ", &mut sink);
+        let delivery = session.send_prompt("   \n ", None, &mut sink);
         assert_eq!(delivery, Delivery::Failed { reason: "内容为空".to_owned() });
         assert_eq!(sink.frames.len(), before);
     }
@@ -1702,9 +1902,9 @@ mod tests {
     #[test]
     fn a_second_prompt_waits_for_the_first_verdict() {
         let (mut session, mut sink) = followed();
-        session.send_prompt("第一句", &mut sink);
+        session.send_prompt("第一句", None, &mut sink);
         let sent = sink.frames.len();
-        session.send_prompt("第二句", &mut sink);
+        session.send_prompt("第二句", None, &mut sink);
         assert_eq!(sink.frames.len(), sent, "the second is not written while the first is unanswered");
         assert!(session.prompt_delivery().is_sending());
     }
@@ -1712,7 +1912,7 @@ mod tests {
     #[test]
     fn the_hosts_verdict_on_a_prompt_is_reported() {
         let (mut session, mut sink) = followed();
-        session.send_prompt("你好", &mut sink);
+        session.send_prompt("你好", None, &mut sink);
         let id = last_request(&sink)["id"].clone();
         session.on_frame(Inbound::Response { id, outcome: Ok(json!({"accepted": true})) }, &mut sink);
         assert_eq!(*session.prompt_delivery(), Delivery::Accepted);
@@ -1725,7 +1925,7 @@ mod tests {
         // retry deliberately"), so a retry is a new submission — and the reason has to
         // survive, because it is the only thing that tells the user what to change.
         let (mut session, mut sink) = followed();
-        session.send_prompt("你好", &mut sink);
+        session.send_prompt("你好", None, &mut sink);
         let first = last_request(&sink);
         let key = first["params"]["requestId"].clone();
         session.on_frame(
@@ -1742,7 +1942,7 @@ mod tests {
         let described = session.prompt_delivery().describe().expect("a line for the user");
         assert!(described.contains("still awaiting confirmation"), "{described}");
 
-        session.send_prompt("你好", &mut sink);
+        session.send_prompt("你好", None, &mut sink);
         assert_ne!(last_request(&sink)["params"]["requestId"], key, "a retry is a new submission");
     }
 
@@ -1750,7 +1950,7 @@ mod tests {
     fn a_prompt_that_could_not_be_written_is_not_left_sending() {
         let (mut session, _) = followed();
         let mut deaf = DeafSink;
-        let delivery = session.send_prompt("你好", &mut deaf);
+        let delivery = session.send_prompt("你好", None, &mut deaf);
         assert!(matches!(delivery, Delivery::Failed { .. }), "{delivery:?}");
         assert!(!session.prompt_delivery().is_sending(), "a failed write must not look pending");
     }

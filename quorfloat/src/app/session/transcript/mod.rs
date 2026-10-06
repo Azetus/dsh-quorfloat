@@ -176,6 +176,19 @@ impl Transcript {
         self.turn_active
     }
 
+    /// Forget everything: the conversation, its title, and every line of it.
+    ///
+    /// For a conversation that no longer exists at the host. There is nothing worth keeping:
+    /// those lines describe a conversation the panel is not following any more, and leaving
+    /// them on screen would be showing the user something they cannot reply to.
+    pub fn reset(&mut self) {
+        self.session_id = None;
+        self.entries = std::sync::Arc::new(Vec::new());
+        self.live = None;
+        self.title = None;
+        self.turn_active = false;
+    }
+
     /// The subscription generation the current entries belong to.
     #[must_use]
     pub fn generation(&self) -> Option<i64> {
