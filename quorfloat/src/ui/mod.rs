@@ -19,6 +19,7 @@ mod cards;
 mod composer;
 mod conversation;
 mod geometry;
+mod picker;
 pub mod fonts;
 pub mod icons;
 pub mod screenshot;
@@ -73,6 +74,28 @@ pub enum Action {
     Cancel,
     /// Put the panel away without losing the conversation.
     Hide,
+    /// Attach to one conversation, now.
+    ChooseConversation {
+        /// Which one.
+        session_id: String,
+    },
+    /// Create a conversation, and attach to it.
+    CreateConversation {
+        /// Where to create it, or `None` for the host's default workspace.
+        workspace_id: Option<String>,
+    },
+    /// Keep opening one conversation, or stop pinning any.
+    PinConversation {
+        /// Which one, or `None` to unpin.
+        session_id: Option<String>,
+    },
+    /// Ask for the workspace list, which the picker needs the first time it opens.
+    RefreshWorkspaces,
+    /// Pin the workspace new conversations are created in, or stop pinning one.
+    PinWorkspace {
+        /// Which one, or `None` to unpin.
+        workspace_id: Option<String>,
+    },
 }
 
 /// What the drawing layer learned about the panel's own size.
@@ -104,6 +127,7 @@ pub(crate) fn draw(
     draft: &mut String,
     action: &mut Option<Action>,
 ) -> PanelLayout {
+    open_picker_from_env(ui.ctx());
     // The window is transparent so that the panel can have rounded corners and a shadow of
     // its own; this is the room it leaves for both.
     egui::Frame::NONE
@@ -163,6 +187,27 @@ pub(crate) fn draw(
         .inner
 }
 
+/// Open one picker at startup, when the environment asks for it.
+///
+/// A development aid with no part in normal running: menus open on a click, and a screenshot
+/// cannot click. `DSH_QUORFLOAT_OPEN_PICKER=session` or `=workspace` makes the panel come up
+/// with that menu already open, which is how its layout is checked by eye.
+///
+/// @param ctx - the context whose memory holds the popup state.
+fn open_picker_from_env(ctx: &egui::Context) {
+    let Ok(which) = std::env::var("DSH_QUORFLOAT_OPEN_PICKER") else {
+        return;
+    };
+    let id = match which.trim().to_ascii_lowercase().as_str() {
+        "session" => picker::popup_id(picker::Kind::Conversation),
+        "workspace" => picker::popup_id(picker::Kind::Workspace),
+        _ => return,
+    };
+    if !egui::Popup::is_id_open(ctx, id) {
+        egui::Popup::open_id(ctx, id);
+    }
+}
+
 /// The shortest the panel is allowed to be.
 ///
 /// The top bar, the composer and the footer, with room to see that the conversation is
@@ -196,35 +241,95 @@ fn top_bar(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
                             .color(text()),
                     );
                     ui.add_space(theme::GAP);
-                    // What the panel is looking at. A picker in the design; here it is the
-                    // name alone until the conversation list exists to put behind it — a
-                    // caret that opens nothing is a promise the panel cannot keep.
-                    ui.label(icons::glyph(ui.ctx(), icons::Icon::Chat, theme::ICON_PICKER, muted()));
-                    let title = state.title.clone().unwrap_or_else(|| "新会话".to_owned());
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(title).size(theme::TEXT_META).color(text()))
-                            .truncate(),
-                    );
+                    // Where the panel is: the workspace, then the conversation inside it. Both
+                    // are pickers now — the conversation list exists, so the carets open
+                    // something (see `ui/picker.rs`).
+                    let mut occupied = Vec::new();
+                    let workspace = picker::workspaces(ui, state);
+                    if workspace.action.is_some() {
+                        *action = workspace.action.clone();
+                    }
+                    occupied.push(workspace.button);
+                    ui.label(egui::RichText::new("/").size(theme::TEXT_META).color(theme::line()));
+                    let conversations = picker::conversations(ui, state);
+                    if conversations.action.is_some() {
+                        *action = conversations.action.clone();
+                    }
+                    occupied.push(conversations.button);
                     // The tools, pushed to the far end.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let hint = format!("收起面板（{}）", state.hotkey);
-                        if icon_button(ui, icons::Icon::Close, &hint).clicked()
-                            || ui.input(|input| input.key_pressed(egui::Key::Escape))
-                        {
+                        let close = icon_button(ui, icons::Icon::Close, &hint);
+                        occupied.push(close.rect);
+                        if close.clicked() || ui.input(|input| input.key_pressed(egui::Key::Escape)) {
                             *action = Some(Action::Hide);
                         }
                     });
-                });
-            });
-        })
-        .response;
-    let handle = ui.interact(bar.rect, ui.id().with("quorfloat-drag"), egui::Sense::drag());
-    if handle.drag_started() {
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    occupied
+                })
+                // The occupied rects travel out through the frames that drew them, because
+                // the drag handle is computed from them below.
+                .inner
+            })
+            .inner
+        });
+    let occupied = bar.inner;
+    // The bar is the window's drag handle — an undecorated window has no title bar — but it
+    // is also where the controls live, and a handle registered over a button swallows the
+    // press that button was waiting for. So the handle is what the controls leave behind:
+    // drag anywhere that is not a control.
+    for (index, region) in drag_regions(bar.response.rect, &occupied).into_iter().enumerate() {
+        let handle = ui.interact(region, ui.id().with(("quorfloat-drag", index)), egui::Sense::drag());
+        if handle.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        if handle.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
     }
-    if handle.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+}
+
+/// The narrowest gap worth dragging by.
+///
+/// A two-pixel slot between two buttons is not a target; it is a way to move the window by
+/// accident while aiming at something else.
+const MIN_DRAG_WIDTH: f32 = 10.0;
+
+/// The parts of a bar that are left over once its controls have taken their share.
+///
+/// Pure, so that the interesting cases — controls that touch, a bar with nothing left, a
+/// layout whose gaps are too narrow to use — can be checked without a window.
+///
+/// @param bar - the whole bar.
+/// @param occupied - what the controls occupy, in any order.
+/// @returns the draggable regions, left to right.
+#[must_use]
+fn drag_regions(bar: egui::Rect, occupied: &[egui::Rect]) -> Vec<egui::Rect> {
+    let mut spans: Vec<(f32, f32)> = occupied.iter().map(|rect| (rect.left(), rect.right())).collect();
+    spans.sort_by(|left, right| left.0.total_cmp(&right.0));
+
+    let mut regions = Vec::new();
+    let mut cursor = bar.left();
+    for (left, right) in spans {
+        // Only the part of a control that is inside the bar can take space away from it.
+        let left = left.clamp(bar.left(), bar.right());
+        let right = right.clamp(bar.left(), bar.right());
+        if left > cursor {
+            regions.push(egui::Rect::from_min_max(
+                egui::pos2(cursor, bar.top()),
+                egui::pos2(left, bar.bottom()),
+            ));
+        }
+        cursor = cursor.max(right);
     }
+    if cursor < bar.right() {
+        regions.push(egui::Rect::from_min_max(
+            egui::pos2(cursor, bar.top()),
+            egui::pos2(bar.right(), bar.bottom()),
+        ));
+    }
+    regions.retain(|region| region.width() >= MIN_DRAG_WIDTH);
+    regions
 }
 
 /// A square icon button, at the design's size for the top bar.
@@ -326,6 +431,54 @@ fn footer_bar(ui: &mut egui::Ui, state: &PanelState) {
             });
         });
     });
+}
+
+#[cfg(test)]
+mod drag_tests {
+    use super::*;
+
+    /// A bar 400 wide, 40 tall, at the top of the panel.
+    fn bar() -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 40.0))
+    }
+
+    fn rect(left: f32, right: f32) -> egui::Rect {
+        egui::Rect::from_min_max(egui::pos2(left, 0.0), egui::pos2(right, 40.0))
+    }
+
+    #[test]
+    fn the_gaps_between_controls_are_what_can_be_dragged() {
+        // Two controls in the middle: the space before, between and after them.
+        let regions = drag_regions(bar(), &[rect(100.0, 150.0), rect(200.0, 250.0)]);
+        let spans: Vec<(f32, f32)> = regions.iter().map(|region| (region.left(), region.right())).collect();
+        assert_eq!(spans, vec![(0.0, 100.0), (150.0, 200.0), (250.0, 400.0)]);
+    }
+
+    #[test]
+    fn a_slot_too_narrow_to_aim_at_is_not_a_handle() {
+        // Eight pixels between two buttons is a way to move the window while aiming at one of
+        // them, not a target.
+        let regions = drag_regions(bar(), &[rect(100.0, 200.0), rect(208.0, 300.0)]);
+        let spans: Vec<(f32, f32)> = regions.iter().map(|region| (region.left(), region.right())).collect();
+        assert_eq!(spans, vec![(0.0, 100.0), (300.0, 400.0)]);
+    }
+
+    #[test]
+    fn a_bar_that_is_all_controls_has_nothing_left_to_drag_by() {
+        // The panel can still be moved by the hotkey and by the conversation area's own
+        // scrolling; what must not happen is a handle sitting on a button.
+        assert!(drag_regions(bar(), &[rect(0.0, 400.0)]).is_empty());
+        assert!(drag_regions(bar(), &[rect(-50.0, 450.0)]).is_empty());
+        assert!(drag_regions(bar(), &[]).len() == 1, "an empty bar is entirely draggable");
+    }
+
+    #[test]
+    fn controls_outside_the_bar_do_not_eat_into_it() {
+        // A popup's rect or a mis-measured one must not turn the bar's own space into a gap.
+        let regions = drag_regions(bar(), &[rect(-100.0, -10.0), rect(500.0, 600.0)]);
+        assert_eq!(regions.len(), 1);
+        assert_eq!((regions[0].left(), regions[0].right()), (0.0, 400.0));
+    }
 }
 
 /// A label that wraps instead of being clipped.

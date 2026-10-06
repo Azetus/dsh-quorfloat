@@ -538,6 +538,30 @@ pub fn shadow_near() -> egui::epaint::Shadow {
     }
 }
 
+/// The popover's shadow: `0 10px 30px`, the design's own for anything that floats above
+/// the panel.
+#[must_use]
+pub fn shadow_popover() -> egui::epaint::Shadow {
+    egui::epaint::Shadow { offset: [0, 10], blur: 30, spread: 0, color: palette().shadow }
+}
+
+/// The frame every popover is drawn in: the design's `--q-popover`.
+#[must_use]
+pub fn popover_frame() -> egui::Frame {
+    egui::Frame::NONE
+        .fill(bg())
+        .corner_radius(egui::CornerRadius::same(RADIUS_POPOVER))
+        .stroke(egui::Stroke::new(BORDER, line()))
+        .shadow(shadow_popover())
+        .inner_margin(egui::Margin::same(6))
+}
+
+/// How wide a popover is (`--q-popover`, 276px; the small one is 218px).
+pub const POPOVER_WIDTH: f32 = 276.0;
+
+/// Space between an option's rows (`padding:5px 7px` in the design's picker).
+pub const ROW_PADDING: egui::Margin = egui::Margin { left: 9, right: 9, top: 8, bottom: 8 };
+
 /// How long the panel takes to appear or leave (`--q-speed`, 180ms).
 pub const SPEED: f32 = 0.18;
 

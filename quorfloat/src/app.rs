@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
+pub mod pinned;
 pub mod session;
 pub mod sink;
 
@@ -71,6 +72,12 @@ pub struct App {
     window_seen: bool,
     /// Whether the resolved theme has been reported once this run.
     theme_seen: bool,
+    /// What the user pinned, and where that is remembered.
+    pinned: crate::app::pinned::Pinned,
+    /// Where the pin is remembered, or nowhere when there is no home to write to.
+    pinned_path: Option<std::path::PathBuf>,
+    /// Whether the workspace list has been asked for in this run.
+    workspaces_asked: bool,
     /// Whether the panel has held focus at least once since it was shown.
     ///
     /// The rule for hiding on blur is about the user *leaving*: a panel that was never
@@ -146,6 +153,11 @@ impl App {
             window_seen: false,
             theme_seen: false,
             focused_once: false,
+            workspaces_asked: false,
+            pinned: crate::app::pinned::Pinned::load(
+                crate::app::pinned::path_from_env().as_deref().unwrap_or(std::path::Path::new("")),
+            ),
+            pinned_path: crate::app::pinned::path_from_env(),
             screenshot: std::env::var_os("DSH_QUORFLOAT_SCREENSHOT")
                 .map(std::path::PathBuf::from)
                 .filter(|path| !path.as_os_str().is_empty()),
@@ -180,6 +192,15 @@ impl App {
     /// visible in the very first paint rather than discovered by a user reading boxes.
     ///
     /// @param status - what [`crate::ui::fonts::install`] found and loaded.
+    /// Point the pin file somewhere else, for tests that must not touch the real one.
+    ///
+    /// @param path - where pins should be written.
+    #[cfg(test)]
+    pub(crate) fn note_pinned_path(&mut self, path: std::path::PathBuf) {
+        self.pinned_path = Some(path);
+    }
+
+    /// @param status - what [`crate::ui::fonts::install`] found and loaded.
     pub fn note_fonts(&mut self, status: FontStatus) {
         self.sink.log(&status.describe());
         self.sink.mark(&status.describe());
@@ -210,6 +231,28 @@ impl App {
         self.sink.log("fonts: the panel's own text has no glyphs");
         self.sink.mark("fonts coverage=missing");
         self.fonts_warning = Some(message);
+    }
+
+    /// Ask for the workspace list the first time the panel is on screen.
+    ///
+    /// The picker can ask for it too, but the *bar* needs it before anyone opens a menu: it
+    /// names the workspace the panel is in, and "工作区" is not a name. One request per run,
+    /// and only once the panel is actually being looked at.
+    fn ask_for_workspaces_once(&mut self) {
+        if self.workspaces_asked {
+            return;
+        }
+        let Some(ctx) = self.context.clone() else { return };
+        if !ctx.input(|input| input.viewport().visible().unwrap_or(false)) {
+            return;
+        }
+        self.workspaces_asked = true;
+        let mut session = match self.session.lock() {
+            Ok(session) => session,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mut sink = BorrowedSink(&self.sink);
+        session.request_workspaces(&mut sink);
     }
 
     /// Put the panel away when the user has gone back to another window.
@@ -389,6 +432,7 @@ impl App {
         self.verify_fonts();
         self.write_screenshot();
         self.hide_when_the_user_leaves();
+        self.ask_for_workspaces_once();
         self.remember_window_position();
         self.pump();
         self.apply_window_commands();
@@ -529,6 +573,25 @@ impl App {
         };
         let follow = session.follow();
         let transcript = session.transcript();
+        let conversations = session.conversations().to_vec();
+        let workspaces = session.workspaces().to_vec();
+        // The conversation actually attached — not `target_conversation`, which is only the
+        // *deliberate* target and is `None` while the panel follows the newest one. Taking the
+        // target here is what left the top bar showing its fallback text and the current row
+        // without a tick, in the first screenshot of the picker.
+        let attached = follow.session_id().map(str::to_owned);
+        // Which workspace the attached conversation is in: the session list carries no
+        // workspace id, so the directory both lists agree on is what matches them.
+        let current_workspace = attached
+            .as_deref()
+            .and_then(|id| conversations.iter().find(|entry| entry.session_id == id))
+            .and_then(|entry| entry.cwd.as_deref())
+            .and_then(|cwd| {
+                workspaces
+                    .iter()
+                    .find(|workspace| paths_match(&workspace.path, cwd))
+                    .map(|workspace| workspace.workspace_id.clone())
+            });
         PanelState {
             hotkey: self.hotkey_status(),
             prompt_line: session.prompt_delivery().describe(),
@@ -540,6 +603,12 @@ impl App {
             entries: transcript.shared_entries(),
             live: transcript.live_entry(),
             title: transcript.title().map(str::to_owned),
+            conversations,
+            workspaces,
+            attached,
+            pinned: session.pinned_conversation().map(str::to_owned),
+            pinned_workspace: self.pinned.workspace.clone(),
+            current_workspace,
             max_height: self.settings.max_height,
             follow: FollowView {
                 session_id: follow.session_id().map(str::to_owned),
@@ -599,6 +668,30 @@ impl App {
             Action::Cancel => {
                 session.cancel_turn(&mut sink);
             }
+            Action::ChooseConversation { session_id } => {
+                session.choose_conversation(&session_id, &mut sink);
+            }
+            Action::CreateConversation { workspace_id } => {
+                session.create_conversation(workspace_id.as_deref(), &mut sink);
+            }
+            Action::PinConversation { session_id } => {
+                // Written before the request goes out: a pin the user set is a fact about
+                // the panel, whether or not the host can switch to it this second.
+                session.pin_conversation(session_id.clone(), &mut sink);
+                self.pinned.session = session_id;
+                if let Some(path) = &self.pinned_path {
+                    self.pinned.save(path);
+                }
+            }
+            Action::RefreshWorkspaces => {
+                session.request_workspaces(&mut sink);
+            }
+            Action::PinWorkspace { workspace_id } => {
+                self.pinned.workspace = workspace_id;
+                if let Some(path) = &self.pinned_path {
+                    self.pinned.save(path);
+                }
+            }
         }
     }
 }
@@ -631,6 +724,18 @@ pub(crate) struct PanelState {
     pub(crate) live: Option<crate::app::session::transcript::Entry>,
     /// The harness's name for this conversation, when it has chosen one.
     pub(crate) title: Option<String>,
+    /// The conversations the host last listed, newest first.
+    pub(crate) conversations: Vec<crate::app::session::follow::SessionSummary>,
+    /// The workspaces the host last listed.
+    pub(crate) workspaces: Vec<crate::app::session::follow::Workspace>,
+    /// The conversation the panel is attached to, if any.
+    pub(crate) attached: Option<String>,
+    /// The conversation the user pinned, if any.
+    pub(crate) pinned: Option<String>,
+    /// The workspace new conversations are created in, if one is pinned.
+    pub(crate) pinned_workspace: Option<String>,
+    /// The workspace the attached conversation belongs to, matched by directory.
+    pub(crate) current_workspace: Option<String>,
     /// The tallest the panel may grow, in logical pixels.
     ///
     /// Handed down rather than read from the settings where they live, because the drawing
@@ -869,6 +974,21 @@ fn measured_capabilities(hotkey_active: bool) -> Vec<&'static str> {
         capabilities.push("hotkey");
     }
     capabilities
+}
+
+/// Whether a conversation's directory is the workspace's directory.
+///
+/// Exact after normalising a trailing separator, and nothing cleverer: a session opened in a
+/// *subdirectory* of a workspace is a session the workspace list cannot name, and guessing by
+/// prefix would label it with the wrong workspace the moment two workspaces are nested.
+///
+/// @param workspace_path - the workspace's directory, as the host reports it.
+/// @param cwd - the conversation's directory.
+/// @returns whether they are the same directory.
+#[must_use]
+fn paths_match(workspace_path: &str, cwd: &str) -> bool {
+    let trim = |path: &str| path.trim_end_matches(['/', '\\']).to_owned();
+    !workspace_path.is_empty() && trim(workspace_path) == trim(cwd)
 }
 
 /// Whether the panel should put itself away, given who is focused.
@@ -1222,6 +1342,98 @@ mod tests {
         height
     }
 
+
+
+    /// Pinning and unpinning are the one place the panel writes a preference, and the file is
+    /// what makes "always open this one" mean anything across runs.
+    #[test]
+    fn pinning_a_conversation_writes_it_down_and_unpinning_forgets_it() {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        let path = std::env::temp_dir().join(format!("quorfloat-pin-test-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        app.note_pinned_path(path.clone());
+        deliver(&session, &recorded, sessions_list_frame());
+
+        apply(&mut app, crate::ui::Action::PinConversation { session_id: Some("session-b".to_owned()) });
+        assert_eq!(
+            crate::app::pinned::Pinned::load(&path).session.as_deref(),
+            Some("session-b"),
+        );
+        assert_eq!(session.lock().expect("session").pinned_conversation(), Some("session-b"));
+
+        // Unpinning removes the file rather than leaving one that says "nothing".
+        apply(&mut app, crate::ui::Action::PinConversation { session_id: None });
+        assert!(!path.exists(), "unpinning removes the file");
+        assert_eq!(session.lock().expect("session").pinned_conversation(), None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The workspace a new conversation is created in is pinned the same way.
+    #[test]
+    fn pinning_a_workspace_writes_it_down_too() {
+        let (mut app, _recorded, _session, _wake) = app_and_session();
+        let path = std::env::temp_dir().join(format!("quorfloat-pin-ws-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        app.note_pinned_path(path.clone());
+
+        apply(&mut app, crate::ui::Action::PinWorkspace { workspace_id: Some("ws-1".to_owned()) });
+        assert_eq!(crate::app::pinned::Pinned::load(&path).workspace.as_deref(), Some("ws-1"));
+        apply(&mut app, crate::ui::Action::PinWorkspace { workspace_id: None });
+        assert!(!path.exists());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The bug this test was written for: the bar's drag handle covered the whole bar, so a
+    /// press on a picker was swallowed by the handle and the menu never opened. A handle is a
+    /// control too, and controls must not sit on top of each other.
+    #[test]
+    fn pressing_a_picker_opens_it_instead_of_dragging_the_window() {
+        let (mut app, _recorded, _session, _wake) = app_and_session();
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let size = egui::vec2(708.0, 620.0);
+        // Where the workspace picker is: just right of the brand, inside the top bar.
+        let press = egui::pos2(
+            f32::from(crate::ui::theme::SHADOW_ROOM_SIDE + crate::ui::theme::PAD_TOP.left) + 110.0,
+            f32::from(crate::ui::theme::SHADOW_ROOM_TOP + crate::ui::theme::PAD_TOP.top) + 8.0,
+        );
+        let popup = egui::Id::new(("quorfloat-picker", 0_u8));
+
+        // The passes matter: egui hit-tests a press against the widget rects registered by the
+        // *previous* pass, so a press sent in the first pass reaches nothing at all — which is
+        // how the first version of this test managed to fail for the wrong reason.
+        let plan: Vec<Vec<egui::Event>> = vec![
+            vec![egui::Event::PointerMoved(press)],
+            vec![egui::Event::PointerButton {
+                pos: press,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            vec![egui::Event::PointerButton {
+                pos: press,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ];
+        let mut opened = false;
+        for events in plan {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    focused: true,
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            output.textures_delta.clear();
+            opened |= egui::Popup::is_id_open(&ctx, popup);
+        }
+        assert!(opened, "the workspace picker opened on its own press");
+    }
+
     #[test]
     fn dragging_the_header_asks_the_platform_to_move_the_window() {
         // An undecorated window has no title bar, so without this the panel cannot be moved
@@ -1309,6 +1521,22 @@ mod tests {
             crate::ui::WindowState::default(),
         );
         (app, recorded, session, tx)
+    }
+
+    /// Apply one action, the way the frame after a click does.
+    fn apply(app: &mut App, action: crate::ui::Action) {
+        app.apply_card_action(action);
+    }
+
+    /// A host frame listing two conversations in one workspace, one of them newer.
+    fn sessions_list_frame() -> Inbound {
+        Inbound::Response {
+            id: serde_json::json!(1),
+            outcome: Ok(serde_json::json!({"items": [
+                {"sessionId": "session-a", "updatedAt": 10, "cwd": "/work/project"},
+                {"sessionId": "session-b", "updatedAt": 20, "cwd": "/work/project"},
+            ]})),
+        }
     }
 
     /// Deliver one host frame, on the same path the reader thread uses.

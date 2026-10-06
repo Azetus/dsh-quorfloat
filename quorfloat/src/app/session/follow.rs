@@ -42,6 +42,13 @@ const REQUEST_TIMEOUT_MS: i64 = 10_000;
 pub enum Outgoing {
     /// Ask which conversations exist.
     ListSessions,
+    /// Ask which workspaces exist.
+    ListWorkspaces,
+    /// Create a conversation, in a chosen workspace.
+    CreateSession {
+        /// The workspace to create it in, or `None` for the host's own default.
+        workspace_id: Option<String>,
+    },
     /// Subscribe to one of them.
     Attach {
         /// Durable session identity.
@@ -63,6 +70,37 @@ enum InFlight {
         /// When it was sent.
         sent_at: i64,
     },
+    /// A `workspaces/list` request, sent at this time.
+    Workspaces {
+        /// When it was sent.
+        sent_at: i64,
+    },
+    /// A `session/create` request, sent at this time.
+    Create {
+        /// When it was sent.
+        sent_at: i64,
+    },
+}
+
+impl InFlight {
+    /// When this request was sent.
+    fn sent_at(&self) -> i64 {
+        match self {
+            Self::List { sent_at } | Self::Workspaces { sent_at } | Self::Create { sent_at } => *sent_at,
+            Self::Attach { sent_at, .. } => *sent_at,
+        }
+    }
+}
+
+/// One workspace the user may choose, as the host describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Workspace {
+    /// Durable workspace identity.
+    pub workspace_id: String,
+    /// What the Harness calls it.
+    pub title: String,
+    /// Its directory, which is what tells two same-named workspaces apart.
+    pub path: String,
 }
 
 /// The conversation this panel follows.
@@ -92,9 +130,54 @@ pub struct Follow {
     last_seq: Option<i64>,
     /// The sequence whose jump was already reported, so one hole is one line.
     gap_reported_at: Option<i64>,
+    /// The conversations the host last listed, newest first.
+    sessions: Vec<SessionSummary>,
+    /// The workspaces the host last listed.
+    workspaces: Vec<Workspace>,
+    /// The conversation the user picked for this run, if any.
+    ///
+    /// A *choice* outranks "the newest conversation" and is forgotten when the panel is
+    /// reopened: it is what "switch to that one" means.
+    choice: Option<String>,
+    /// The conversation the user pinned, if any.
+    ///
+    /// A *pin* outranks both, and is kept across runs: it is what "always open this one"
+    /// means. The two are separate because they answer different questions, and collapsing
+    /// them would make switching conversations silently permanent.
+    pinned: Option<String>,
+    /// Whether the workspace list has been asked for yet.
+    workspaces_asked: bool,
+    /// The workspace a `session/create` was asked for, kept for the log line that says
+    /// where the conversation the user is now in was created.
+    choosing_workspace: Option<String>,
 }
 
 impl Follow {
+    /// Ask for the workspace list, which the picker needs and discovery does not.
+    ///
+    /// On demand rather than at startup: a panel whose user never opens the picker should
+    /// not spend a request on it, and workspaces change when someone adds one in the Harness
+    /// rather than between two polls. The answer is then cached until asked for again.
+    ///
+    /// @param now - caller-local time in milliseconds.
+    /// @returns the request to send, or `None` when one is already outstanding.
+    pub fn request_workspaces(&mut self, now: i64) -> Option<Outgoing> {
+        // One request at a time is the discipline this layer runs on, and the answer to
+        // whatever is in flight may be more interesting than this list.
+        if self.in_flight.is_some() {
+            return None;
+        }
+        self.workspaces_asked = true;
+        self.in_flight = Some(InFlight::Workspaces { sent_at: now });
+        Some(Outgoing::ListWorkspaces)
+    }
+
+    /// Whether the workspace list has ever been asked for.
+    #[must_use]
+    pub fn workspaces_asked(&self) -> bool {
+        self.workspaces_asked
+    }
+
     /// Start discovery, as soon as the channel can carry it.
     ///
     /// Called when the handshake completes rather than at construction: the host
@@ -168,6 +251,112 @@ impl Follow {
         Some(Outgoing::ListSessions)
     }
 
+    /// The conversations the host last listed, newest first.
+    #[must_use]
+    pub fn sessions(&self) -> &[SessionSummary] {
+        &self.sessions
+    }
+
+    /// The workspaces the host last listed.
+    #[must_use]
+    pub fn workspaces(&self) -> &[Workspace] {
+        &self.workspaces
+    }
+
+    /// The conversation the user pinned, if any.
+    #[must_use]
+    pub fn pinned(&self) -> Option<&str> {
+        self.pinned.as_deref()
+    }
+
+    /// The conversation the user picked for this run, if any.
+    #[must_use]
+    pub fn chosen(&self) -> Option<&str> {
+        self.choice.as_deref()
+    }
+
+    /// The conversation the panel should be attached to, whatever the list says.
+    ///
+    /// A pin outranks a choice, and a choice outranks "the newest".
+    #[must_use]
+    pub fn target(&self) -> Option<&str> {
+        self.pinned.as_deref().or(self.choice.as_deref())
+    }
+
+    /// Open one conversation, now, and keep it until the panel is reopened.
+    ///
+    /// @param session_id - which one.
+    /// @param now - caller-local time in milliseconds.
+    /// @returns the request to send.
+    pub fn choose(&mut self, session_id: &str, now: i64) -> Option<Outgoing> {
+        self.choice = Some(session_id.to_owned());
+        self.attach_now(session_id, now)
+    }
+
+    /// Keep opening one conversation, across restarts.
+    ///
+    /// @param session_id - which one, or `None` to stop pinning anything.
+    /// @param now - caller-local time in milliseconds.
+    /// @returns the request to send, when pinning means switching to it.
+    pub fn set_pinned(&mut self, session_id: Option<String>, now: i64) -> Option<Outgoing> {
+        self.pinned = session_id;
+        // Pinning what is already on screen changes nothing about the subscription.
+        match self.pinned.clone() {
+            Some(pinned) if self.session_id.as_deref() != Some(pinned.as_str()) => self.attach_now(&pinned, now),
+            _ => None,
+        }
+    }
+
+    /// Create a conversation, and be in it.
+    ///
+    /// @param workspace_id - where to create it, or `None` for the host's default.
+    /// @param now - caller-local time in milliseconds.
+    /// @returns the request to send.
+    pub fn create(&mut self, workspace_id: Option<&str>, now: i64) -> Option<Outgoing> {
+        if self.in_flight.is_some() {
+            // One request at a time is the discipline this whole layer runs on; the user can
+            // press the button again when the first answer is in.
+            return None;
+        }
+        self.choosing_workspace = workspace_id.map(str::to_owned);
+        self.in_flight = Some(InFlight::Create { sent_at: now });
+        Some(Outgoing::CreateSession { workspace_id: workspace_id.map(str::to_owned) })
+    }
+
+    /// Take a pin that was read from disk, without asking the host for anything.
+    ///
+    /// The pin decides which conversation the *next* discovery answer attaches, so it has to
+    /// be in place before that answer arrives — which is why this is separate from
+    /// [`Follow::set_pinned`], whose whole job is to switch to the pinned one right now.
+    ///
+    /// @param session_id - the pinned conversation, if one was remembered.
+    pub fn adopt_pinned(&mut self, session_id: Option<String>) {
+        self.pinned = session_id;
+    }
+
+    /// Forget a choice, so the newest conversation is followed again.
+    ///
+    /// Used when a pinned conversation is unpinned: going back to "newest" is the only
+    /// sensible reading of that, and it is what the panel did before pins existed.
+    pub fn clear_choice(&mut self) {
+        self.choice = None;
+    }
+
+    /// Subscribe to one conversation, as a deliberate act.
+    fn attach_now(&mut self, session_id: &str, now: i64) -> Option<Outgoing> {
+        let label = self
+            .sessions
+            .iter()
+            .find(|summary| summary.session_id == session_id)
+            .and_then(|summary| summary.label.clone());
+        self.in_flight = Some(InFlight::Attach {
+            session_id: session_id.to_owned(),
+            label,
+            sent_at: now,
+        });
+        Some(Outgoing::Attach { session_id: session_id.to_owned() })
+    }
+
     /// Re-subscribe to the conversation already being followed.
     ///
     /// For recovery, not for discovery: when the host reports that the event stream had
@@ -214,11 +403,9 @@ impl Follow {
     /// @returns whether the outstanding request should be treated as lost.
     #[must_use]
     pub fn expired(&self, now: i64) -> bool {
-        match &self.in_flight {
-            Some(InFlight::List { sent_at }) => now - *sent_at > REQUEST_TIMEOUT_MS,
-            Some(InFlight::Attach { sent_at, .. }) => now - *sent_at > REQUEST_TIMEOUT_MS,
-            None => false,
-        }
+        self.in_flight
+            .as_ref()
+            .is_some_and(|pending| now - pending.sent_at() > REQUEST_TIMEOUT_MS)
     }
 
     /// Read the answer to the outstanding request.
@@ -238,31 +425,81 @@ impl Follow {
         };
         self.next_poll_at = now + POLL_INTERVAL_MS;
         match (pending, outcome) {
-            (InFlight::List { .. }, Ok(result)) => match newest_session(&result) {
-                Some(found) if Some(found.session_id.as_str()) == self.session_id.as_deref() => {
-                    // Already following the most recent conversation. Silence is
-                    // deliberate: this is the steady state and it runs every few
-                    // seconds.
-                    None
-                }
-                Some(found) => {
-                    if self.session_id.is_some() {
-                        sink.log(&format!("a more recent conversation appeared: {}", found.session_id));
+            (InFlight::List { .. }, Ok(result)) => {
+                // The whole list is kept, not just its newest entry: this is the same answer
+                // the picker shows, and asking twice for one fact is how two views of it
+                // start to disagree.
+                self.sessions = summaries(&result);
+                let target = self.target().map(str::to_owned).or_else(|| {
+                    self.sessions
+                        .first()
+                        .map(|newest| newest.session_id.clone())
+                        .inspect(|newest| {
+                            if self.session_id.is_some() && self.session_id.as_deref() != Some(newest.as_str()) {
+                                sink.log(&format!("a more recent conversation appeared: {newest}"));
+                            }
+                        })
+                });
+                match target {
+                    Some(target) if self.session_id.as_deref() == Some(target.as_str()) => {
+                        // Already following the right conversation. Silence is deliberate:
+                        // this is the steady state and it runs every few seconds.
+                        None
                     }
-                    self.in_flight = Some(InFlight::Attach {
-                        session_id: found.session_id.clone(),
-                        label: found.label,
-                        sent_at: now,
-                    });
-                    Some(Outgoing::Attach { session_id: found.session_id })
-                }
-                None => {
-                    if self.session_id.is_none() {
-                        sink.log("no conversation to follow yet");
+                    Some(target) => {
+                        let label = self
+                            .sessions
+                            .iter()
+                            .find(|summary| summary.session_id == target)
+                            .and_then(|summary| summary.label.clone());
+                        self.in_flight = Some(InFlight::Attach {
+                            session_id: target.clone(),
+                            label,
+                            sent_at: now,
+                        });
+                        Some(Outgoing::Attach { session_id: target })
                     }
-                    None
+                    None => {
+                        if self.session_id.is_none() {
+                            sink.log("no conversation to follow yet");
+                        }
+                        None
+                    }
                 }
-            },
+            }
+            (InFlight::Workspaces { .. }, Ok(result)) => {
+                self.workspaces = workspaces(&result);
+                sink.log(&format!("workspaces: {}", self.workspaces.len()));
+                None
+            }
+            (InFlight::Workspaces { .. }, Err(error)) => {
+                // Asked once. A host that cannot answer leaves the picker without
+                // workspaces, which is a smaller problem than a request every three seconds.
+                sink.log(&format!("could not list workspaces: {}", error.message));
+                None
+            }
+            (InFlight::Create { .. }, Ok(result)) => {
+                let Some(session_id) = result.get("sessionId").and_then(Value::as_str) else {
+                    sink.log("session/create answered without a session id");
+                    return None;
+                };
+                // Creating a conversation means being in it: the newest-conversation rule
+                // would do the same, but only after the next poll, and the user is looking
+                // at the panel *now*.
+                self.choice = Some(session_id.to_owned());
+                sink.log(&format!("created conversation {session_id}"));
+                sink.mark(&format!("create {session_id}"));
+                self.in_flight = Some(InFlight::Attach {
+                    session_id: session_id.to_owned(),
+                    label: None,
+                    sent_at: now,
+                });
+                Some(Outgoing::Attach { session_id: session_id.to_owned() })
+            }
+            (InFlight::Create { .. }, Err(error)) => {
+                sink.log(&format!("could not create a conversation: {}", error.message));
+                None
+            }
             (InFlight::Attach { session_id, label, .. }, Ok(result)) => {
                 self.session_id = Some(session_id.clone());
                 self.label = label;
@@ -385,23 +622,37 @@ impl Follow {
 
 /// One conversation as `sessions/list` describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SessionSummary {
-    session_id: String,
-    updated_at: i64,
-    label: Option<String>,
+pub struct SessionSummary {
+    /// Durable session identity.
+    pub session_id: String,
+    /// When the Harness last touched it, in epoch milliseconds.
+    pub updated_at: i64,
+    /// The workspace directory's name, when the host reported one.
+    pub label: Option<String>,
+    /// That directory in full, which is how a conversation is matched to the workspace it
+    /// belongs to: the session list carries no workspace id, and the paths are what both
+    /// lists agree on.
+    pub cwd: Option<String>,
+    /// Whether a turn is in flight there right now.
+    pub running: bool,
+    /// Whether it has no history yet — a conversation that was created and not used.
+    pub blank: bool,
 }
 
-/// Pick the most recently updated conversation out of a `sessions/list` result.
+/// Read every conversation out of a `sessions/list` result, newest first.
 ///
 /// Ordered by `updatedAt` rather than by the array's order, which the protocol does
 /// not promise to be meaningful. Entries without a usable id are skipped: attaching
-/// to one would be a request the host must refuse.
+/// to one would be a request the host must refuse, and offering it in the picker would
+/// be offering something that cannot work.
 ///
 /// @param result - the response value.
-/// @returns the newest conversation, or `None` when there is none.
-fn newest_session(result: &Value) -> Option<SessionSummary> {
-    let items = result.get("items").and_then(Value::as_array)?;
-    items
+/// @returns the conversations, newest first.
+fn summaries(result: &Value) -> Vec<SessionSummary> {
+    let Some(items) = result.get("items").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut found: Vec<SessionSummary> = items
         .iter()
         .filter_map(|item| {
             let session_id = item.get("sessionId").and_then(Value::as_str)?;
@@ -411,13 +662,42 @@ fn newest_session(result: &Value) -> Option<SessionSummary> {
             Some(SessionSummary {
                 session_id: session_id.to_owned(),
                 updated_at: item.get("updatedAt").and_then(Value::as_i64).unwrap_or(0),
+                cwd: item.get("cwd").and_then(Value::as_str).map(str::to_owned),
                 label: item
                     .get("cwd")
                     .and_then(Value::as_str)
                     .and_then(|cwd| std::path::Path::new(cwd).file_name().map(|name| name.to_string_lossy().into_owned())),
+                running: item.get("running").and_then(Value::as_bool).unwrap_or(false),
+                blank: item.get("blank").and_then(Value::as_bool).unwrap_or(false),
             })
         })
-        .max_by_key(|summary| summary.updated_at)
+        .collect();
+    found.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    found
+}
+
+/// Read every workspace out of a `workspaces/list` result.
+///
+/// @param result - the response value.
+/// @returns the workspaces, in the order the host listed them.
+fn workspaces(result: &Value) -> Vec<Workspace> {
+    let Some(items) = result.get("items").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let workspace_id = item.get("workspaceId").and_then(Value::as_str)?;
+            if workspace_id.is_empty() {
+                return None;
+            }
+            Some(Workspace {
+                workspace_id: workspace_id.to_owned(),
+                title: item.get("title").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                path: item.get("path").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -453,6 +733,7 @@ mod tests {
     }
 
     /// A follow layer that has already started, as it is after the handshake.
+    /// A follow layer that has completed its handshake.
     fn started() -> Follow {
         let mut follow = Follow::default();
         follow.begin();
@@ -467,6 +748,128 @@ mod tests {
                 .map(|(id, updated)| json!({"sessionId": id, "updatedAt": updated, "cwd": "/work/project"}))
                 .collect::<Vec<_>>(),
         })
+    }
+
+    /// The workspace list is asked for when the picker needs it, kept, and never asked for
+    /// on top of a request that is already outstanding.
+    #[test]
+    fn the_workspace_list_is_asked_for_on_demand_and_then_cached() {
+        let mut follow = started();
+        let mut sink = Recorded::default();
+        assert_eq!(follow.request_workspaces(0), Some(Outgoing::ListWorkspaces));
+        assert!(follow.workspaces_asked());
+        // While that is in flight, a second ask waits rather than colliding with it.
+        assert_eq!(follow.request_workspaces(1), None, "one request at a time");
+
+        let result = json!({"items": [
+            {"workspaceId": "ws-1", "title": "Quorvox", "path": "/work/quorvox"},
+            {"workspaceId": "ws-2", "title": "Notes", "path": "/work/notes"},
+        ]});
+        assert_eq!(follow.resolve(Ok(result), 10, &mut sink), None, "listing asks for nothing further");
+        assert_eq!(follow.workspaces().len(), 2);
+        assert_eq!(follow.workspaces()[0].title, "Quorvox");
+        assert!(sink.joined().contains("workspaces: 2"), "{}", sink.joined());
+    }
+
+    /// A failure to list workspaces is reported and leaves the picker empty; it does not
+    /// stop conversations from being discovered.
+    #[test]
+    fn a_workspace_list_that_fails_is_reported_and_discovery_continues() {
+        let mut follow = started();
+        let mut sink = Recorded::default();
+        assert_eq!(follow.request_workspaces(0), Some(Outgoing::ListWorkspaces));
+        let error = crate::ipc::rpc::RpcError {
+            code: -32_000,
+            message: "no harness".to_owned(),
+            data: None,
+        };
+        assert_eq!(follow.resolve(Err(error), 10, &mut sink), None);
+        assert!(sink.joined().contains("could not list workspaces"), "{}", sink.joined());
+        assert!(follow.workspaces().is_empty());
+        assert_eq!(follow.next(POLL_INTERVAL_MS * 2), Some(Outgoing::ListSessions), "discovery is unaffected");
+    }
+
+    /// The list is kept whole, because the picker draws it — not just its newest entry.
+    #[test]
+    fn the_whole_list_is_kept_for_the_picker_newest_first() {
+        let mut follow = started();
+        let mut sink = Recorded::default();
+        assert_eq!(follow.next(0), Some(Outgoing::ListSessions));
+        let result = json!({"items": [
+            {"sessionId": "old", "updatedAt": 10, "cwd": "/work/project", "running": false, "blank": false},
+            {"sessionId": "busy", "updatedAt": 30, "cwd": "/work/other", "running": true, "blank": false},
+            {"sessionId": "new-blank", "updatedAt": 20, "cwd": "/work/project", "running": false, "blank": true},
+        ]});
+        let _ = follow.resolve(Ok(result), 10, &mut sink);
+        let listed: Vec<&str> = follow.sessions().iter().map(|entry| entry.session_id.as_str()).collect();
+        assert_eq!(listed, vec!["busy", "new-blank", "old"], "newest first");
+        assert!(follow.sessions()[0].running, "a turn in flight is visible in the list");
+        assert!(follow.sessions()[1].blank, "and so is a conversation with no history");
+        assert_eq!(follow.sessions()[1].label.as_deref(), Some("project"), "the workspace directory's name");
+    }
+
+    /// Choosing a conversation is a decision, and the newest-conversation rule has to stop
+    /// at it — otherwise the panel would switch away from what the user just picked.
+    #[test]
+    fn a_chosen_conversation_is_not_replaced_by_a_newer_one() {
+        let mut follow = started();
+        let mut sink = Recorded::default();
+        assert_eq!(follow.next(0), Some(Outgoing::ListSessions));
+        let _ = follow.resolve(Ok(sessions(&[("first", 10)])), 10, &mut sink);
+        // The user picks the older one.
+        assert_eq!(follow.choose("second", 20), Some(Outgoing::Attach { session_id: "second".to_owned() }));
+        assert_eq!(follow.target(), Some("second"));
+        let _ = follow.resolve(Ok(json!({})), 20, &mut sink);
+
+        // A newer conversation appears. A choice outranks it.
+        assert_eq!(follow.next(POLL_INTERVAL_MS * 2), Some(Outgoing::ListSessions));
+        let _ = follow.resolve(Ok(sessions(&[("newest", 99), ("second", 20)])), 30, &mut sink);
+        assert_eq!(follow.session_id(), Some("second"), "the choice holds");
+        assert_eq!(follow.next(POLL_INTERVAL_MS * 4), Some(Outgoing::ListSessions), "and discovery keeps refreshing the list");
+    }
+
+    /// A pin outranks a choice, and outlives the run.
+    #[test]
+    fn a_pinned_conversation_outranks_a_choice_and_the_newest() {
+        let mut follow = started();
+        let mut sink = Recorded::default();
+        assert_eq!(follow.next(0), Some(Outgoing::ListSessions));
+        let _ = follow.resolve(Ok(sessions(&[("newest", 99)])), 10, &mut sink);
+        // Pinning one that is not on screen switches to it.
+        assert_eq!(
+            follow.set_pinned(Some("pinned".to_owned()), 20),
+            Some(Outgoing::Attach { session_id: "pinned".to_owned() }),
+        );
+        assert_eq!(follow.pinned(), Some("pinned"));
+        assert_eq!(follow.target(), Some("pinned"));
+        let _ = follow.resolve(Ok(json!({})), 20, &mut sink);
+
+        // A choice does not displace a pin…
+        let _ = follow.choose("somewhere-else", 30);
+        assert_eq!(follow.target(), Some("pinned"), "the pin still wins");
+        // …and unpinning falls back to the newest, which is what the panel did before pins.
+        follow.set_pinned(None, 40);
+        follow.clear_choice();
+        assert_eq!(follow.target(), None);
+    }
+
+    /// Creating a conversation means being in it, without waiting for the next poll.
+    #[test]
+    fn creating_a_conversation_attaches_it_immediately() {
+        let mut follow = started();
+        let mut sink = Recorded::default();
+        assert_eq!(
+            follow.create(Some("ws-1"), 10),
+            Some(Outgoing::CreateSession { workspace_id: Some("ws-1".to_owned()) }),
+        );
+        assert_eq!(
+            follow.resolve(Ok(json!({"sessionId": "brand-new"})), 20, &mut sink),
+            Some(Outgoing::Attach { session_id: "brand-new".to_owned() }),
+        );
+        assert_eq!(follow.chosen(), Some("brand-new"));
+        assert_eq!(sink.marks, vec!["create brand-new".to_owned()], "the durable record names it");
+        // And the newest-conversation rule cannot take it away before the user has typed.
+        assert_eq!(follow.target(), Some("brand-new"));
     }
 
     #[test]

@@ -700,6 +700,101 @@ impl Session {
         self.send_follow(outgoing, now, sink);
     }
 
+    /// The conversations the host last listed, newest first.
+    #[must_use]
+    pub fn conversations(&self) -> &[crate::app::session::follow::SessionSummary] {
+        self.follow.sessions()
+    }
+
+    /// The workspaces the host last listed.
+    #[must_use]
+    pub fn workspaces(&self) -> &[crate::app::session::follow::Workspace] {
+        self.follow.workspaces()
+    }
+
+    /// The conversation the user pinned, if any.
+    #[must_use]
+    pub fn pinned_conversation(&self) -> Option<&str> {
+        self.follow.pinned()
+    }
+
+    /// The conversation the panel is attached to, whatever the list says.
+    #[must_use]
+    pub fn target_conversation(&self) -> Option<&str> {
+        self.follow.target()
+    }
+
+    /// Adopt a pin read from disk, without asking the host for anything.
+    ///
+    /// Called once at startup, before the first discovery answer arrives: the pin decides
+    /// which conversation that answer attaches, so it has to be in place first.
+    ///
+    /// @param session_id - the pinned conversation, if one was remembered.
+    pub fn adopt_pinned(&mut self, session_id: Option<String>) {
+        self.follow.adopt_pinned(session_id);
+    }
+
+    /// Open one conversation, now.
+    ///
+    /// @param session_id - which one.
+    /// @param sink - where the request goes.
+    /// @returns whether the request was written.
+    pub fn choose_conversation(&mut self, session_id: &str, sink: &mut dyn FrameSink) -> bool {
+        let now = rpc::now_millis();
+        let outgoing = self.follow.choose(session_id, now);
+        self.send_request(outgoing, now, sink)
+    }
+
+    /// Pin one conversation, or stop pinning any.
+    ///
+    /// @param session_id - which one, or `None`.
+    /// @param sink - where the request goes.
+    /// @returns whether the request was written, when there was one to write.
+    pub fn pin_conversation(&mut self, session_id: Option<String>, sink: &mut dyn FrameSink) -> bool {
+        let now = rpc::now_millis();
+        let outgoing = self.follow.set_pinned(session_id, now);
+        self.send_request(outgoing, now, sink)
+    }
+
+    /// Create a conversation, and be in it.
+    ///
+    /// @param workspace_id - where to create it, or `None` for the host's default.
+    /// @param sink - where the request goes.
+    /// @returns whether the request was written.
+    pub fn create_conversation(&mut self, workspace_id: Option<&str>, sink: &mut dyn FrameSink) -> bool {
+        let now = rpc::now_millis();
+        let outgoing = self.follow.create(workspace_id, now);
+        self.send_request(outgoing, now, sink)
+    }
+
+    /// Ask for the workspace list, which the picker shows and discovery does not need.
+    ///
+    /// @param sink - where the request goes.
+    /// @returns whether the request was written.
+    pub fn request_workspaces(&mut self, sink: &mut dyn FrameSink) -> bool {
+        let now = rpc::now_millis();
+        let outgoing = self.follow.request_workspaces(now);
+        self.send_request(outgoing, now, sink)
+    }
+
+    /// Send one conversation request, when there is one.
+    ///
+    /// @param outgoing - what to ask for, if anything.
+    /// @param now - caller-local time.
+    /// @param sink - where the frame goes.
+    /// @returns whether a request was written.
+    fn send_request(&mut self, outgoing: Option<Outgoing>, now: i64, sink: &mut dyn FrameSink) -> bool {
+        match outgoing {
+            Some(outgoing) => {
+                self.send_follow(outgoing, now, sink);
+                true
+            }
+            // Nothing to ask: the request would duplicate one already in flight, and the
+            // state the user asked for is already the state the layer is in.
+            None => false,
+        }
+    }
+
     /// Send one conversation request, and remember that its answer is expected.
     ///
     /// @param outgoing - what to ask for.
@@ -709,6 +804,13 @@ impl Session {
         let id = self.take_request_id();
         let frame = match &outgoing {
             Outgoing::ListSessions => rpc::request(id, "sessions/list", json!({})),
+            Outgoing::ListWorkspaces => rpc::request(id, "workspaces/list", json!({})),
+            Outgoing::CreateSession { workspace_id } => {
+                // An empty workspace id is the host's own default, which is the documented
+                // way to say "wherever you would put it" (see `docs/protocol.md` §7).
+                let workspace_id = workspace_id.clone().unwrap_or_default();
+                rpc::request(id, "session/create", json!({ "workspaceId": workspace_id }))
+            }
             Outgoing::Attach { session_id } => {
                 rpc::request(id, "session/attach", json!({ "sessionId": session_id }))
             }

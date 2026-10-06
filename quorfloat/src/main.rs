@@ -162,6 +162,24 @@ fn run() -> Result<SessionExit, String> {
             if let Ok(mut slot) = app_slot.lock() {
                 *slot = Some(cc.egui_ctx.clone());
             }
+            // The remembered pin decides which conversation the first discovery answer
+            // attaches, so it is adopted before the session is handed over — not after the
+            // window appears, by which time the wrong conversation is already on screen.
+            {
+                let remembered = dsh_quorfloat::app::pinned::Pinned::load(
+                    dsh_quorfloat::app::pinned::path_from_env()
+                        .as_deref()
+                        .unwrap_or(std::path::Path::new("")),
+                );
+                if !remembered.is_empty() {
+                    let mut session = lock(&app_session);
+                    session.adopt_pinned(remembered.session.clone());
+                    app_sink.mark(&format!(
+                        "pinned conversation {}",
+                        remembered.session.as_deref().unwrap_or("none"),
+                    ));
+                }
+            }
             let mut app = App::new(
                 app_session,
                 app_sink,
