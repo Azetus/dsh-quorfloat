@@ -168,6 +168,36 @@ impl Follow {
         Some(Outgoing::ListSessions)
     }
 
+    /// Re-subscribe to the conversation already being followed.
+    ///
+    /// For recovery, not for discovery: when the host reports that the event stream had
+    /// a gap, what is on screen is known-incomplete, and the fix is a fresh subscription
+    /// to *this* conversation. Polling for the newest one instead would silently switch
+    /// the panel to a different conversation while the user was reading this one.
+    ///
+    /// The conversation is passed in rather than read from `self` because the transcript
+    /// can know it before discovery has recorded it — a snapshot only arrives for an
+    /// attached subscription, so the two agree in practice, but a gap is no less real
+    /// when the bookkeeping lags behind it.
+    ///
+    /// @param session_id - the conversation to re-subscribe to.
+    /// @param now - caller-local time in milliseconds.
+    /// @returns the request to send.
+    pub fn resubscribe(&mut self, session_id: &str, now: i64) -> Option<Outgoing> {
+        // Following this conversation from now on, so the status line and the generation
+        // checks describe the subscription that actually exists.
+        if self.session_id.as_deref() != Some(session_id) {
+            self.session_id = Some(session_id.to_owned());
+            self.generation = None;
+        }
+        self.in_flight = Some(InFlight::Attach {
+            session_id: session_id.to_owned(),
+            label: self.label.clone(),
+            sent_at: now,
+        });
+        Some(Outgoing::Attach { session_id: session_id.to_owned() })
+    }
+
     /// Give up on an outstanding request, so the next pass can retry.
     ///
     /// Used both when the answer never came and when the frame could not be written.

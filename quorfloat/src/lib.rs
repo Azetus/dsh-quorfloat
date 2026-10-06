@@ -4,11 +4,13 @@
 //!
 //! - [`protocol`] — constants that are contracts with the TypeScript host plugin.
 //! - [`platform`] — platform/arch names in the host's vocabulary.
+//! - [`dump`] — the optional raw-frame capture, for learning what the host sends.
 //! - [`fonts`] — the bundled fallback font, so the panel can draw Chinese.
 //! - [`frame`] — NDJSON framing over a byte stream.
 //! - [`rpc`] — JSON-RPC message shapes and the inbound method surface.
 //! - [`session`] — handshake, notifications, interactions, and shutdown, over
 //!   abstract I/O.
+//! - [`transcript`] — the conversation, folded from records and streams into lines.
 //! - [`transport`] — the real stdin/stdout implementation of that I/O.
 //! - [`marker`] — the optional breadcrumb file that makes this process observable.
 //! - [`window`] — the native window, always-on-top behaviour, and the global hotkey.
@@ -19,6 +21,7 @@
 //! startup budget is running from the moment the process does.
 
 pub mod app;
+pub mod dump;
 pub mod follow;
 pub mod fonts;
 pub mod frame;
@@ -27,6 +30,7 @@ pub mod platform;
 pub mod protocol;
 pub mod rpc;
 pub mod session;
+pub mod transcript;
 pub mod transport;
 pub mod window;
 

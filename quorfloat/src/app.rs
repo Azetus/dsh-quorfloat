@@ -562,9 +562,13 @@ impl App {
             Err(poisoned) => poisoned.into_inner(),
         };
         let follow = session.follow();
+        let transcript = session.transcript();
         PanelState {
             interactions: session.interactions().to_vec(),
             handoff: session.handoff().cloned(),
+            entries: transcript.shared_entries(),
+            live: transcript.live_entry(),
+            title: transcript.title().map(str::to_owned),
             follow: FollowView {
                 session_id: follow.session_id().map(str::to_owned),
                 label: follow.label().map(str::to_owned),
@@ -628,6 +632,14 @@ struct PanelState {
     handoff: Option<Handoff>,
     /// The conversation this panel follows.
     follow: FollowView,
+    /// The conversation so far, oldest first.
+    ///
+    /// Shared, not cloned: this is read on every repaint and may hold megabytes.
+    entries: std::sync::Arc<Vec<crate::transcript::Entry>>,
+    /// The assistant message being generated, when one is.
+    live: Option<crate::transcript::Entry>,
+    /// The harness's name for this conversation, when it has chosen one.
+    title: Option<String>,
 }
 
 /// What the status line needs to know about the followed conversation.
@@ -655,7 +667,10 @@ impl FollowView {
     fn status(&self) -> String {
         match (&self.session_id, self.started) {
             (Some(id), _) => {
-                let short: String = id.chars().take(8).collect();
+                // Everything the harness calls a session starts with `session-`, so the
+                // first eight characters of one are the word "session". Take from after
+                // the prefix, which is the part that actually distinguishes two of them.
+                let short: String = id.strip_prefix("session-").unwrap_or(id).chars().take(8).collect();
                 let label = self.label.as_deref().unwrap_or("会话");
                 let gap = if self.resyncs == 0 {
                     String::new()
@@ -696,7 +711,11 @@ impl App {
             .fill(BACKGROUND)
             .inner_margin(egui::Margin::same(12))
             .show(ui, |ui| {
-                ui.label(egui::RichText::new("quorfloat").size(15.0).color(TEXT));
+                // The harness's own title when it has one: it is the name the user sees
+                // in the Harness window, so the panel says the same thing rather than
+                // guessing from the first message.
+                let heading = state.title.clone().unwrap_or_else(|| "quorfloat".to_owned());
+                wrapped(ui, egui::RichText::new(heading).size(15.0).color(TEXT));
                 ui.add_space(2.0);
                 ui.label(egui::RichText::new(hotkey_status).size(12.0).color(MUTED));
                 ui.add_space(2.0);
@@ -714,17 +733,28 @@ impl App {
 
                 if state.interactions.is_empty() {
                     ui.label(egui::RichText::new("没有待处理的请求").size(12.0).color(MUTED));
+                } else {
+                    // `auto_shrink` vertically, and bounded: a request is actionable so it
+                    // has to be on screen, but a year-old card must not push the
+                    // conversation out of the panel — which is exactly what an
+                    // `auto_shrink([false, false])` area does even when it is empty.
+                    let cards = (ui.available_height() * 0.6).max(120.0);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, true])
+                        .max_height(cards)
+                        .show(ui, |ui| {
+                            for card in &state.interactions {
+                                match card.kind() {
+                                    InteractionKind::Approval => approval_card(ui, card, &mut action),
+                                    InteractionKind::Question => question_card(ui, card, &mut action),
+                                }
+                                ui.add_space(8.0);
+                            }
+                        });
                 }
 
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    for card in &state.interactions {
-                        match card.kind() {
-                            InteractionKind::Approval => approval_card(ui, card, &mut action),
-                            InteractionKind::Question => question_card(ui, card, &mut action),
-                        }
-                        ui.add_space(8.0);
-                    }
-                });
+                ui.add_space(8.0);
+                conversation(ui, &state);
             });
 
         if let Some(action) = action {
@@ -744,6 +774,105 @@ impl App {
         }
     }
 }
+
+/// Draw the conversation.
+///
+/// Sticks to the bottom, which is the whole of the "follow the answer as it is written"
+/// behaviour: egui only keeps a scroll area pinned while it is already at the bottom, so
+/// a user who has scrolled up to read something is not yanked back by the next token.
+///
+/// @param ui - where to draw.
+/// @param state - the conversation, plus the message still being generated.
+fn conversation(ui: &mut egui::Ui, state: &PanelState) {
+    // Whatever the header and any cards did not take. This is the panel's main body, so
+    // it is the part that must never be squeezed to nothing: an empty area that expands
+    // to fill the window is what left the conversation invisible, not empty.
+    let height = ui.available_height().max(CONVERSATION_MIN_HEIGHT);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .stick_to_bottom(true)
+        .max_height(height)
+        .show(ui, |ui| {
+            if state.entries.is_empty() && state.live.is_none() {
+                ui.label(egui::RichText::new("尚无对话内容").size(12.0).color(MUTED));
+                return;
+            }
+            for entry in state.entries.iter() {
+                entry_ui(ui, entry);
+            }
+            if let Some(live) = &state.live {
+                entry_ui(ui, live);
+            }
+        });
+}
+
+/// Draw one line of the conversation.
+///
+/// @param ui - where to draw.
+/// @param entry - the line.
+fn entry_ui(ui: &mut egui::Ui, entry: &crate::transcript::Entry) {
+    use crate::transcript::{Block, Entry};
+
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new(speaker(entry)).size(11.0).color(MUTED));
+    ui.add_space(2.0);
+    match entry {
+        Entry::User { text } => {
+            wrapped(ui, egui::RichText::new(text).size(13.0).color(TEXT));
+        }
+        Entry::Assistant { blocks, streaming } => {
+            for block in blocks {
+                match block {
+                    Block::Text(text) => wrapped(ui, egui::RichText::new(text).size(13.0).color(TEXT)),
+                    // Reasoning is drawn, not hidden: it is what the model is doing, and
+                    // a panel that shows only conclusions makes a slow answer look stuck.
+                    Block::Reasoning(text) => {
+                        wrapped(ui, egui::RichText::new(text).size(12.0).color(MUTED).italics());
+                    }
+                    Block::Call { name, arguments } => {
+                        wrapped(ui, egui::RichText::new(format!("$ {name} {arguments}")).size(12.0).color(MUTED).monospace());
+                    }
+                }
+                ui.add_space(2.0);
+            }
+            if *streaming {
+                ui.label(egui::RichText::new("生成中…").size(11.0).color(MUTED));
+            }
+        }
+        Entry::Tool { text, is_error, .. } => {
+            let colour = if *is_error { BAD } else { MUTED };
+            wrapped(ui, egui::RichText::new(text).size(12.0).color(colour).monospace());
+        }
+        Entry::System { text } => wrapped(ui, egui::RichText::new(text).size(12.0).color(MUTED)),
+        Entry::Notice { text, .. } => wrapped(ui, egui::RichText::new(text).size(12.0).color(MUTED)),
+    }
+}
+
+/// Who a line is from, as the panel labels it.
+///
+/// @param entry - the line.
+/// @returns the label above it.
+#[must_use]
+fn speaker(entry: &crate::transcript::Entry) -> String {
+    use crate::transcript::Entry;
+    match entry {
+        Entry::User { .. } => "你".to_owned(),
+        Entry::Assistant { .. } => "quorfloat".to_owned(),
+        Entry::Tool { name, .. } => {
+            name.as_ref().map_or_else(|| "工具".to_owned(), |name| format!("工具 · {name}"))
+        }
+        Entry::System { .. } => "系统".to_owned(),
+        // The kind is in the label rather than only in the text: an unrecognised event
+        // is exactly the case where the reader needs to know what it was called.
+        Entry::Notice { kind, .. } => format!("事件 · {kind}"),
+    }
+}
+
+/// How tall the conversation is allowed to be when nothing else needs the space.
+///
+/// A floor, not a preference: the panel's reason to exist is the conversation, so it
+/// gets its own room even when the window is small.
+const CONVERSATION_MIN_HEIGHT: f32 = 160.0;
 
 /// The locale the panel asks the asker's own text for.
 ///
@@ -1069,6 +1198,176 @@ mod tests {
     fn app() -> (App, Recorded, Sender<Wake>) {
         let (app, recorded, _session, wake) = app_and_session();
         (app, recorded, wake)
+    }
+
+    /// A snapshot carrying one user message and one assistant message.
+    fn conversation_frame() -> Inbound {
+        Inbound::Notification {
+            method: "session/snapshot".to_owned(),
+            params: Some(serde_json::json!({
+                "sessionId": "session-1", "generation": 1, "cursor": 1, "hasMore": false,
+                "records": [
+                    {"type": "event", "event": {"type": "user/message", "seq": 0, "time": 1,
+                     "data": {"role": "user", "content": [{"type": "text", "text": "帮我看看"}]}}},
+                    {"type": "event", "event": {"type": "assistant/message", "seq": 1, "time": 2,
+                     "data": {"message": {"role": "assistant",
+                        "content": [{"type": "reasoning", "text": "想一下"},
+                                    {"type": "text", "text": "看到了"}]}}}},
+                ],
+            })),
+        }
+    }
+
+    #[test]
+    fn the_window_state_carries_the_conversation() {
+        // The window reads this every frame; if the plumbing dropped it, the panel would
+        // show a conversation that never appears while the protocol looked perfect.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        deliver(&session, &recorded, conversation_frame());
+
+        let state = app.state();
+        assert_eq!(state.entries.len(), 2, "{:?}", state.entries);
+        assert_eq!(speaker(&state.entries[0]), "你");
+        assert_eq!(speaker(&state.entries[1]), "quorfloat");
+        assert!(state.live.is_none());
+    }
+
+    #[test]
+    fn a_stream_in_flight_is_offered_as_a_live_entry() {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        deliver(&session, &recorded, conversation_frame());
+        deliver(
+            &session,
+            &recorded,
+            Inbound::Notification {
+                method: "session/stream".to_owned(),
+                params: Some(serde_json::json!({
+                    "sessionId": "session-1", "generation": 1,
+                    // The live shape, not the replay shape: see `transcript.rs`.
+                    "frame": {"type": "chunk", "revision": 3, "index": 1, "time": 2,
+                              "chunk": {"type": "text-delta", "index": 0, "text": "正在回答"}},
+                })),
+            },
+        );
+
+        let state = app.state();
+        let live = state.live.expect("the stream is offered while it is being written");
+        assert_eq!(speaker(&live), "quorfloat");
+        assert!(matches!(&live, crate::transcript::Entry::Assistant { streaming: true, .. }));
+    }
+
+    #[test]
+    fn drawing_a_conversation_does_not_panic() {
+        // A panic inside the layout closure takes the panel down with no message the
+        // user can act on, and the code that draws blocks, tool output and notices is
+        // the code with the most ways to get an index wrong.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        deliver(&session, &recorded, conversation_frame());
+        deliver(
+            &session,
+            &recorded,
+            Inbound::Notification {
+                method: "session/stream".to_owned(),
+                params: Some(serde_json::json!({
+                    "sessionId": "session-1", "generation": 1,
+                    // Deliberately a delta kind this build does not know: the drawing
+                    // path has to survive an event it cannot interpret, because that is
+                    // what a harness upgrade looks like from here.
+                    "frame": {"type": "chunk", "revision": 9, "index": 4, "time": 5,
+                              "chunk": {"type": "tool-input-delta", "index": 2, "delta": "{\"command\":"}},
+                })),
+            },
+        );
+
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| app.draw(ui));
+        output.textures_delta.clear();
+    }
+
+    /// Draw the panel at a given size and return every piece of text it produced, with
+    /// where on screen it landed.
+    fn drawn_text(app: &mut App, size: egui::Vec2) -> Vec<(String, egui::Rect)> {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+        let texts = output
+            .shapes
+            .iter()
+            .filter_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) => {
+                    Some((text.galley.text().to_owned(), egui::Rect::from_min_size(text.pos, text.galley.size())))
+                }
+                _ => None,
+            })
+            .collect();
+        output.textures_delta.clear();
+        texts
+    }
+
+    #[test]
+    fn the_conversation_is_drawn_inside_the_panel() {
+        // The regression this exists for: an empty `auto_shrink([false, false])` area
+        // above the conversation expands to the whole window, so the conversation is laid
+        // out below the visible area. The data is perfect, the panel is blank, and the
+        // only scrollbar belongs to the empty area — which is exactly what a user
+        // reported as "no conversation text, scrollbar does nothing".
+        let (mut app, recorded, session, _wake) = app_and_session();
+        deliver(&session, &recorded, conversation_frame());
+
+        let size = egui::vec2(420.0, 420.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let texts = drawn_text(&mut app, size);
+        let visible = |needle: &str| {
+            texts.iter().any(|(text, rect)| {
+                text.contains(needle)
+                    && rect.height() > 1.0
+                    && rect.min.y >= screen.min.y - 1.0
+                    && rect.max.y <= screen.max.y + 1.0
+                    && rect.min.x >= screen.min.x - 1.0
+            })
+        };
+        assert!(visible("帮我看看"), "the user's message is where it can be seen: {texts:#?}");
+        assert!(visible("看到了"), "and so is the answer: {texts:#?}");
+    }
+
+    #[test]
+    fn the_conversation_keeps_its_room_when_a_card_is_waiting() {
+        // A pending request is actionable and must be visible — but not at the cost of
+        // the conversation disappearing, which is the same bug wearing a card.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        deliver(&session, &recorded, conversation_frame());
+        deliver(
+            &session,
+            &recorded,
+            Inbound::Notification {
+                method: "interaction/open".to_owned(),
+                params: Some(serde_json::json!({
+                    "interactionId": "a-1", "sessionId": "session-1", "kind": "approval",
+                    "payload": {"toolName": "bash", "reason": "test"},
+                })),
+            },
+        );
+
+        let size = egui::vec2(420.0, 460.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let texts = drawn_text(&mut app, size);
+        assert!(
+            texts.iter().any(|(text, rect)| text.contains("帮我看看") && rect.max.y <= screen.max.y + 1.0),
+            "the conversation survives a card: {texts:#?}",
+        );
+    }
+
+    #[test]
+    fn a_notice_names_its_event_kind() {
+        // The label is where an unrecognised event announces itself.
+        let notice = crate::transcript::Entry::Notice {
+            kind: "something/new".to_owned(),
+            text: "新的东西".to_owned(),
+        };
+        assert_eq!(speaker(&notice), "事件 · something/new");
     }
 
     /// The same app, plus the session, for tests that deliver host frames into it.

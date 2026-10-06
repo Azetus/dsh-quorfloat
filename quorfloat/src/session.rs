@@ -19,9 +19,11 @@
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+use crate::dump::Dump;
 use crate::follow::{Follow, Outgoing};
 use crate::protocol::{CAPABILITIES, PROTOCOL_VERSION, error_code};
 use crate::rpc::{self, Inbound, Outcome, RpcError, Router};
+use crate::transcript::Transcript;
 
 /// Where outbound frames go.
 pub trait FrameSink {
@@ -481,6 +483,13 @@ pub struct Session {
     handoff: Option<Handoff>,
     /// The conversation this panel follows, and why that matters for ownership.
     follow: Follow,
+    /// The conversation, folded from the records and streams the host sent.
+    transcript: Transcript,
+    /// Where raw conversation frames are captured, when a capture was asked for.
+    ///
+    /// Owned here rather than read from the environment in [`Session::new`] so tests
+    /// stay hermetic and the one place that reads the environment stays in `main`.
+    dump: Dump,
     /// The id and send time of the outstanding follow request, if any.
     follow_request: Option<(i64, i64)>,
     next_request_id: i64,
@@ -503,11 +512,20 @@ impl Session {
             answers_in_flight: BTreeMap::new(),
             handoff: None,
             follow: Follow::default(),
+            transcript: Transcript::new(),
+            dump: Dump::default(),
             follow_request: None,
             next_request_id: 1,
             handshake_sent: false,
             handshake_done: false,
         }
+    }
+
+    /// Install a raw-frame capture.
+    ///
+    /// @param dump - where conversation notifications are appended verbatim.
+    pub fn set_dump(&mut self, dump: Dump) {
+        self.dump = dump;
     }
 
     /// What the host sent in `ready`, once it has.
@@ -660,8 +678,59 @@ impl Session {
             // rendered — but counted on purpose: the status line is how a user tells
             // "following and receiving" from "following and getting nothing", and the
             // two are identical from every other angle.
-            "session/snapshot" | "session/event" | "session/stream" | "session/resync" => {
+            // Dumped before it is interpreted, and for every session rather than only
+            // the followed one: the point is to see what the host sends, and filtering
+            // to what this build happens to understand would hide the kinds it does not.
+            "session/snapshot" => {
+                self.dump.record(method, params.as_ref());
+                if let Some(params) = params.as_ref() {
+                    self.transcript.apply_snapshot(params);
+                }
                 self.follow.record(method, params.as_ref(), sink);
+                // What the panel now holds, on the record. "The conversation is empty"
+                // and "the conversation never arrived" look identical on screen, and
+                // this is the line that tells them apart.
+                let title = self
+                    .transcript
+                    .title()
+                    .map_or_else(String::new, |title| format!(" title={title:?}"));
+                sink.mark(&format!(
+                    "transcript {} entries cursor={}{title}",
+                    self.transcript.entries().len(),
+                    self.transcript.cursor(),
+                ));
+                if let Some(skipped) = self.transcript.skipped().describe() {
+                    sink.mark(&skipped);
+                }
+            }
+            "session/event" => {
+                self.dump.record(method, params.as_ref());
+                if let Some(params) = params.as_ref() {
+                    self.transcript.apply_event(params);
+                }
+                self.follow.record(method, params.as_ref(), sink);
+            }
+            "session/stream" => {
+                self.dump.record(method, params.as_ref());
+                if let Some(params) = params.as_ref() {
+                    self.transcript.apply_stream(params);
+                }
+                self.follow.record(method, params.as_ref(), sink);
+            }
+            "session/resync" => {
+                self.dump.record(method, params.as_ref());
+                let detail = params
+                    .as_ref()
+                    .and_then(|params| self.transcript.apply_resync(params));
+                self.follow.record(method, params.as_ref(), sink);
+                // The gap cannot be repaired from here: what arrived is known to be
+                // incomplete, and re-subscribing is the only way to get a state that is
+                // not a guess. Recorded *and* acted on, because a resync that changes
+                // nothing on screen is indistinguishable from a lost conversation.
+                if let Some(detail) = detail {
+                    sink.mark(&format!("transcript resync {detail}"));
+                    self.resubscribe(sink);
+                }
             }
             other => sink.log(&format!("ignoring a notification this build does not use: {other}")),
         }
@@ -845,6 +914,33 @@ impl Session {
             self.follow.abandon(now);
             sink.log(&format!("could not ask about conversations: {error}"));
         }
+    }
+
+    /// Ask the host for a fresh subscription to the conversation being followed.
+    ///
+    /// Used after a reported gap. A failure here is logged and otherwise ignored: the
+    /// transcript has already recorded that its contents are incomplete, and a panel
+    /// that says so is better than one that retries in silence.
+    fn resubscribe(&mut self, sink: &mut dyn FrameSink) {
+        let target = self
+            .follow
+            .session_id()
+            .or_else(|| self.transcript.session_id())
+            .map(str::to_owned);
+        let Some(target) = target else {
+            sink.log("a resync arrived but no conversation is being followed");
+            return;
+        };
+        let now = rpc::now_millis();
+        if let Some(outgoing) = self.follow.resubscribe(&target, now) {
+            self.send_follow(outgoing, now, sink);
+        }
+    }
+
+    /// The conversation, as far as this panel knows it.
+    #[must_use]
+    pub fn transcript(&self) -> &Transcript {
+        &self.transcript
     }
 
     /// The last hand-off the host announced, if the user has not dismissed it.
@@ -1420,6 +1516,85 @@ mod tests {
         let mut sink = RecordingSink::default();
         session.report_visibility(false, &["window", "hotkey"], &mut sink);
         assert_eq!(sink.frames[0]["params"]["capabilities"], json!(["window", "hotkey"]));
+    }
+
+    /// A snapshot carrying one user message and one assistant message.
+    fn conversation_snapshot() -> serde_json::Value {
+        json!({
+            "sessionId": "session-1", "generation": 1, "cursor": 1, "hasMore": false,
+            "records": [
+                // The two wrappers are the real asymmetry: `user/message` carries its
+                // content directly, the assistant's is inside `message`.
+                {"type": "event", "event": {"type": "user/message", "seq": 0, "time": 1,
+                 "data": {"role": "user", "content": [{"type": "text", "text": "帮我看看"}]}}},
+                {"type": "event", "event": {"type": "assistant/message", "seq": 1, "time": 2,
+                 "data": {"message": {"role": "assistant",
+                    "content": [{"type": "text", "text": "看到了"}]}}}},
+            ],
+        })
+    }
+
+    #[test]
+    fn the_conversation_notifications_reach_the_transcript() {
+        // The wiring, not the model: `transcript.rs` tests what a snapshot means, this
+        // one tests that a snapshot notification is actually fed to it.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        let mut source = ScriptedSource::new(vec![notification("session/snapshot", conversation_snapshot())]);
+        session.run(&mut source, &mut sink);
+
+        let entries = session.transcript().entries();
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert_eq!(entries[0], crate::transcript::Entry::User { text: "帮我看看".to_owned() });
+        assert_eq!(session.transcript().session_id(), Some("session-1"));
+    }
+
+    #[test]
+    fn an_event_arriving_after_the_snapshot_is_appended() {
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        let mut source = ScriptedSource::new(vec![
+            notification("session/snapshot", conversation_snapshot()),
+            notification("session/event", json!({
+                "sessionId": "session-1", "generation": 1, "seq": 2, "type": "user/message", "time": 3,
+                "data": {"role": "user", "content": [{"type": "text", "text": "还有一件事"}]},
+            })),
+        ]);
+        session.run(&mut source, &mut sink);
+
+        let entries = session.transcript().entries();
+        assert_eq!(entries.len(), 3, "{entries:?}");
+        assert_eq!(entries[2], crate::transcript::Entry::User { text: "还有一件事".to_owned() });
+    }
+
+    #[test]
+    fn a_reported_gap_is_recorded_and_repaired_by_re_subscribing() {
+        // A resync that only wrote a log line would leave the panel showing a
+        // conversation with a hole in it and no way to tell.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        let mut source = ScriptedSource::new(vec![
+            notification("session/snapshot", conversation_snapshot()),
+            notification("session/resync", json!({"sessionId": "session-1", "generation": 1,
+                "reason": "sequence-gap", "expected": 2, "received": 5})),
+        ]);
+        session.run(&mut source, &mut sink);
+
+        let attached = sink
+            .frames
+            .iter()
+            .filter(|frame| frame["method"] == "session/attach")
+            .count();
+        assert_eq!(attached, 1, "the gap is repaired by asking again: {:?}", sink.frames);
+        assert!(
+            sink.marks.iter().any(|mark| mark.contains("resync")),
+            "and it is on the record: {:?}",
+            sink.marks,
+        );
+        assert!(session.transcript().entries().iter().any(|entry| matches!(
+            entry,
+            crate::transcript::Entry::Notice { kind, .. } if kind == "session/resync"
+        )));
     }
 
     #[test]

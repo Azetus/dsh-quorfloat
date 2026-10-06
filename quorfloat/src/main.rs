@@ -68,6 +68,12 @@ fn run() -> Result<SessionExit, String> {
             registered: hotkey.is_active(),
         },
     })));
+    // A capture is a development switch, not a product feature: it writes conversation
+    // text to disk, so nothing sets it for a user. Installed here rather than read
+    // inside `Session::new`, which keeps the constructor free of the environment.
+    if let Ok(mut session) = session.lock() {
+        session.set_dump(dsh_quorfloat::dump::Dump::from_env());
+    }
 
     // Shared with the sink, so a breadcrumb written from inside the session (an
     // approval arriving, an answer being applied) lands in the same file as the
