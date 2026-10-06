@@ -15,18 +15,18 @@
 //! - [`window`] — the native window, its always-on-top behaviour, and the global hotkey.
 //! - [`app`] — the event loop that drives the two of them, including while hidden.
 //!
-//! Cross-cutting: [`dump`] and [`marker`] are optional diagnostics, off unless the
+//! Cross-cutting: [`runtime`] holds what belongs to neither the wire nor the panel —
+//! today [`runtime::diag`], the optional marker and raw-frame dump, off unless the
 //! environment asks for them (`docs/prototype.md` §21.3, §23.2).
 //!
 //! The window layer sits *above* the handshake: no viewport is created until the host
 //! has answered, because the host's startup budget starts when this process does.
 
 pub mod app;
-pub mod dump;
 pub mod follow;
 pub mod fonts;
 pub mod ipc;
-pub mod marker;
+pub mod runtime;
 pub mod session;
 pub mod transcript;
 pub mod window;

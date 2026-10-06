@@ -19,7 +19,7 @@
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-use crate::dump::Dump;
+use crate::runtime::diag::dump::Dump;
 use crate::follow::{Follow, Outgoing};
 use crate::ipc::protocol::{CAPABILITIES, PROTOCOL_VERSION, error_code};
 use crate::ipc::rpc::{self, Inbound, Outcome, RpcError, Router};

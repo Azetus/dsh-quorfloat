@@ -16,7 +16,7 @@
 use std::io::{BufReader, Read, Write};
 
 use crate::ipc::frame::{Decoded, FrameReader};
-use crate::marker::Marker;
+use crate::runtime::diag::marker::Marker;
 use crate::ipc::rpc::{self, Inbound};
 use crate::session::{FrameSink, FrameSource};
 

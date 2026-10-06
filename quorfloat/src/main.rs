@@ -16,7 +16,7 @@ use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 
 use dsh_quorfloat::app::{self, App, Reader, SharedSink};
-use dsh_quorfloat::marker::Marker;
+use dsh_quorfloat::runtime::diag::marker::Marker;
 use dsh_quorfloat::session::{FrameSink, HotkeyReport, Identity, Session, SessionExit};
 use dsh_quorfloat::ipc::transport::{StdinSource, StdioSink};
 use dsh_quorfloat::window::{self, Hotkey, WindowSettings};
@@ -72,7 +72,7 @@ fn run() -> Result<SessionExit, String> {
     // text to disk, so nothing sets it for a user. Installed here rather than read
     // inside `Session::new`, which keeps the constructor free of the environment.
     if let Ok(mut session) = session.lock() {
-        session.set_dump(dsh_quorfloat::dump::Dump::from_env());
+        session.set_dump(dsh_quorfloat::runtime::diag::dump::Dump::from_env());
     }
 
     // Shared with the sink, so a breadcrumb written from inside the session (an
