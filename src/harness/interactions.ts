@@ -6,8 +6,11 @@
  * claims a request only when all of the following hold, and delegates the rest:
  *
  * 1. the owning session is one this host is currently tracking;
- * 2. the peer is connected and the channel is handshaken;
- * 3. the request has not already been settled by someone else.
+ * 2. the panel is the surface that should answer *and* is showing that session —
+ *    a panel that is open but working on another conversation defers, because a
+ *    card the user cannot see the context of is worse than the window answering;
+ * 3. the peer is connected and the channel is handshaken;
+ * 4. the request has not already been settled by someone else.
  *
  * The third rule is what makes "the main window and the floating panel both show
  * the same request, but only one answer takes effect" true rather than hopeful:
@@ -93,6 +96,14 @@ export interface InteractionsDeps {
    */
   authority(): AuthorityVerdict
   /**
+   * The conversation the panel is currently showing, if any.
+   *
+   * Read from the last `session/attach` the peer made: the panel answers for the
+   * conversation it is displaying and for no other, so this is what turns "the
+   * panel is open" into "the panel is open *on this request*".
+   */
+  panelSession(): string | undefined
+  /**
    * Whether the panel can render and answer this kind of request.
    *
    * Read from what the peer declared in `hello`, because claiming is exclusive: a
@@ -142,6 +153,7 @@ export class Interactions {
   /** Counters that make answer routing visible in diagnostics. */
   readonly #counters = {
     claimed: 0,
+    deferredForAnotherSession: 0,
     delegated: 0,
     answered: 0,
     refused: 0,
@@ -483,6 +495,19 @@ export class Interactions {
       fresh: verdict.fresh,
     })
     if (verdict.authority === 'panel') {
+      // …and only for the conversation it is showing. An open panel that is working on a
+      // different conversation cannot answer this one: the user would be looking at a card
+      // with no visible context, and the window — which is showing the request in its own
+      // transcript — is the surface that can.
+      if (this.#deps.panelSession() !== sessionId) {
+        this.#counters.deferredForAnotherSession += 1
+        this.#deps.log.debug('the panel is showing another conversation; deferring', {
+          kind,
+          request: sessionId,
+          panel: this.#deps.panelSession() ?? null,
+        })
+        return 'defer'
+      }
       // A panel answers what it can render. For anything else the request goes to the
       // next answerer *now* rather than after the claim deadline: the user would
       // otherwise be told to go and answer something that is not there yet.

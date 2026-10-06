@@ -199,6 +199,10 @@ export function createPlugin(overrides: PluginOverrides = {}) {
         ctx,
         ownedSessionIds: () => sessionLayer.ownedSessionIds(),
         authority,
+        // Which conversation the panel is showing. Together with the verdict this is what
+        // makes the panel answer only for its own conversation: an open panel that is
+        // working on something else defers, and the Harness window answers.
+        panelSession: () => sessionLayer.activeSessionId,
         // The peer declares what its build implements in `hello`, and claiming is
         // exclusive — so the panel claims only what it says it can render. Today that
         // is approvals: a question's answer is a list of selected option ids and the
@@ -273,6 +277,16 @@ export function createPlugin(overrides: PluginOverrides = {}) {
               ? (params as { sessionId: string }).sessionId
               : undefined
             if (sessionId !== undefined) void sessionLayer.attach(sessionId)
+          }
+          // The panel has stopped showing a conversation — it started a new one, or the
+          // pinned one turned out to be gone. This is what keeps approval routing honest:
+          // the panel answers only for the conversation it is showing, so a subscription
+          // nobody is looking at must not keep claiming requests for it.
+          if (method === 'session/detach') {
+            const sessionId = typeof (params as { sessionId?: unknown })?.sessionId === 'string'
+              ? (params as { sessionId: string }).sessionId
+              : undefined
+            if (sessionId !== undefined) sessionLayer.detach(sessionId)
           }
         },
       })

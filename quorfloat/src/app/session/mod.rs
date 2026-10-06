@@ -792,8 +792,15 @@ impl Session {
     /// @param sink - where the fact goes, because a panel that empties itself silently is
     ///   indistinguishable from one that lost its place.
     pub fn start_new_conversation(&mut self, sink: &mut dyn FrameSink) {
+        // Told to the host *because of what is being left*, not because of what the transcript
+        // had received: the host decides who answers approvals from the attach it was asked
+        // for, and that is exactly what is being given up here.
+        let leaving = self.follow.session_id().map(str::to_owned);
         self.follow.start_new();
-        self.forget_a_conversation_that_is_gone(sink);
+        if let Some(session_id) = leaving {
+            self.notify_detached(&session_id, sink);
+            self.transcript.reset();
+        }
     }
 
     /// Create a conversation, and be in it.
@@ -1105,6 +1112,25 @@ impl Session {
         self.send_to(&session_id, &text, sink);
     }
 
+    /// Tell the host the panel is no longer showing a conversation.
+    ///
+    /// The host decides who answers an approval, and it knows the panel's conversation from
+    /// the attach it was asked for. A panel that quietly stopped showing one would go on
+    /// claiming requests for it — for a conversation the user has left, with no context on
+    /// screen to answer from.
+    ///
+    /// A notification rather than a request: it is a fact, and there is nothing to answer.
+    ///
+    /// @param session_id - the conversation being left.
+    /// @param sink - where the notice goes. Best effort: a lost channel is reported by the
+    ///   supervisor, and a failure here must not stop the panel from starting a new one.
+    fn notify_detached(&self, session_id: &str, sink: &mut dyn FrameSink) {
+        let notice = rpc::notification("session/detach", json!({ "sessionId": session_id }));
+        if sink.send(&notice).is_ok() {
+            sink.mark(&format!("detached {session_id}"));
+        }
+    }
+
     /// Drop the transcript of a conversation the panel is no longer attached to.
     ///
     /// The two are meant to agree — the transcript learns its conversation from a snapshot,
@@ -1122,6 +1148,7 @@ impl Session {
             return;
         };
         sink.log(&format!("forgetting {session_id}: it is no longer being followed"));
+        self.notify_detached(&session_id, sink);
         self.transcript.reset();
     }
 

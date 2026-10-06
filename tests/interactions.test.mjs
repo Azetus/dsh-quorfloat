@@ -82,13 +82,26 @@ const PANEL_DECIDES = { authority: 'panel', reason: 'harness-not-visible', fresh
 const PANEL_ANSWERS = kind => kind === 'approval'
 
 /** Build interactions with a fixed ownership set and a captured notification log. */
-function build({ owned = ['session-owned'], notify, authority = () => PANEL_DECIDES, canAnswer = PANEL_ANSWERS } = {}) {
+function build({
+  owned = ['session-owned'],
+  notify,
+  authority = () => PANEL_DECIDES,
+  canAnswer = PANEL_ANSWERS,
+  panel = 'session-owned',
+} = {}) {
   const ctx = fakeContext()
   const notifications = []
   const ownerSet = new Set(owned)
   const interactions = new Interactions({
     ctx,
     ownedSessionIds: () => [...ownerSet],
+    // Which conversation the panel is showing. The default matches the requests these tests
+    // make; `panel: undefined` is the panel being open on nothing, and another id is the panel
+    // being open on something else — the case the rule added for it is about.
+    // `null` means the panel is open and attached to nothing: passing `undefined` would take
+    // the default above instead, which is how the first version of these tests managed to test
+    // the opposite of what it said.
+    panelSession: () => panel ?? undefined,
     authority,
     canAnswer,
     notify: async (method, params) => {
@@ -123,6 +136,59 @@ test('an agentless request is delegated rather than claimed', async () => {
   const { ctx } = build()
   const outcome = await ctx.dispatch('approval/request', { toolName: 'bash' }, next)
   assert.equal(outcome, delegated)
+})
+
+test('a panel that is showing another conversation defers to the window', async () => {
+  // The rule this test was added for: an open panel is not enough. The panel answers for the
+  // conversation it is displaying, and for nothing else — a card whose context is not on
+  // screen is worse than the window answering, which shows the request in its transcript.
+  const { ctx, notifications } = build({ panel: 'session-elsewhere' })
+  const outcome = await ctx.dispatch(
+    'approval/request',
+    { agent: { id: 'session-owned' }, toolName: 'bash' },
+    next,
+  )
+
+  assert.equal(outcome, delegated, 'the next listener gets it')
+  assert.deepEqual(notifications, [], 'and the panel was told nothing: it is not the answerer')
+})
+
+test('a panel that is open on nothing at all defers too', async () => {
+  // The state a freshly opened panel is in before it is attached to anything: it has no
+  // context for any request, so every request belongs to the window.
+  const { ctx } = build({ panel: null })
+  const outcome = await ctx.dispatch(
+    'approval/request',
+    { agent: { id: 'session-owned' }, toolName: 'bash' },
+    next,
+  )
+  assert.equal(outcome, delegated, 'nothing is claimed')
+})
+
+test('the panel answers for its own conversation, and only then', async () => {
+  // Both halves in one place, so that "open" and "showing this one" cannot drift apart again.
+  // A claimed dispatch does not resolve until somebody answers it — that is what claiming
+  // means — so the claimed half is observed through what the panel was told.
+  const mine = build({ panel: 'session-owned' })
+  const pending = mine.ctx.dispatch(
+    'approval/request',
+    { agent: { id: 'session-owned' }, toolName: 'bash', callId: 'call-1' },
+    next,
+  )
+  await new Promise(resolve => setImmediate(resolve))
+  const open = mine.notifications.find(entry => entry.method === 'interaction/open')
+  assert.ok(open !== undefined, 'the panel was given its own conversation')
+  mine.interactions.answer(open.params.interactionId, { kind: 'approval', outcome: 'allowed-once' })
+  assert.equal(await pending, 'allowed-once', 'and its answer settles the request')
+
+  const other = build({ panel: 'session-elsewhere' })
+  const deferred = await other.ctx.dispatch(
+    'approval/request',
+    { agent: { id: 'session-owned' }, toolName: 'bash' },
+    next,
+  )
+  assert.equal(deferred, delegated, 'while a request for another conversation is left alone')
+  assert.deepEqual(other.notifications, [], 'and the panel was not even told about it')
 })
 
 test('an owned approval is published to the peer and settles with its answer', async () => {
@@ -336,6 +402,9 @@ test('an answerer registered later still runs first (prepend)', async () => {
   const interactions = new Interactions({
     ctx,
     ownedSessionIds: () => ['session-owned'],
+    // The panel is showing the conversation the request belongs to, which is the case these
+    // tests are about; the mismatch has its own test below.
+    panelSession: () => 'session-owned',
     authority: () => PANEL_DECIDES,
     canAnswer: PANEL_ANSWERS,
     notify: async (method, params) => {
@@ -400,6 +469,9 @@ test('an unanswered claim settles instead of holding the turn forever', async ()
     {
       ctx,
       ownedSessionIds: () => ['session-owned'],
+    // The panel is showing the conversation the request belongs to, which is the case these
+    // tests are about; the mismatch has its own test below.
+    panelSession: () => 'session-owned',
       authority: () => PANEL_DECIDES,
       canAnswer: PANEL_ANSWERS,
       notify: async (method, params) => {
@@ -422,6 +494,9 @@ test('an answer arriving after the deadline is refused, not applied', async () =
     {
       ctx,
       ownedSessionIds: () => ['session-owned'],
+    // The panel is showing the conversation the request belongs to, which is the case these
+    // tests are about; the mismatch has its own test below.
+    panelSession: () => 'session-owned',
       authority: () => PANEL_DECIDES,
       canAnswer: PANEL_ANSWERS,
       notify: async (method, params) => {
@@ -447,6 +522,9 @@ test('unregister removes both listeners so nothing outlives the plugin', () => {
   const interactions = new Interactions({
     ctx,
     ownedSessionIds: () => ['session-owned'],
+    // The panel is showing the conversation the request belongs to, which is the case these
+    // tests are about; the mismatch has its own test below.
+    panelSession: () => 'session-owned',
     authority: () => PANEL_DECIDES,
     canAnswer: PANEL_ANSWERS,
     notify: async () => {},
@@ -465,6 +543,9 @@ test('an unregistered plugin never claims, and nothing hangs on its behalf', asy
   const interactions = new Interactions({
     ctx,
     ownedSessionIds: () => ['session-owned'],
+    // The panel is showing the conversation the request belongs to, which is the case these
+    // tests are about; the mismatch has its own test below.
+    panelSession: () => 'session-owned',
     authority: () => PANEL_DECIDES,
     canAnswer: PANEL_ANSWERS,
     notify: async () => {},
@@ -484,6 +565,9 @@ function buildWithAuthority(verdict, canAnswer = PANEL_ANSWERS) {
   const interactions = new Interactions({
     ctx,
     ownedSessionIds: () => ['session-owned'],
+    // The panel is showing the conversation the request belongs to, which is the case these
+    // tests are about; the mismatch has its own test below.
+    panelSession: () => 'session-owned',
     authority: () => verdict,
     canAnswer,
     notify: async (method, params) => {
@@ -614,6 +698,9 @@ test('a hint that cannot be delivered does not fail the request', async () => {
   const interactions = new Interactions({
     ctx,
     ownedSessionIds: () => ['session-owned'],
+    // The panel is showing the conversation the request belongs to, which is the case these
+    // tests are about; the mismatch has its own test below.
+    panelSession: () => 'session-owned',
     authority: () => ({ authority: 'panel', reason: 'harness-not-visible', fresh: [] }),
     canAnswer: () => false,
     notify: async (method, params) => {

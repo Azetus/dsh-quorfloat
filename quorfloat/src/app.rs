@@ -1457,6 +1457,26 @@ mod tests {
 
     /// Pinning and unpinning are the one place the panel writes a preference, and the file is
     /// what makes "always open this one" mean anything across runs.
+    /// Leaving a conversation is something the host has to hear about.
+    ///
+    /// The host decides who answers an approval, and it knows the panel's conversation from
+    /// the attach it was asked for. A panel that quietly stopped showing one would go on
+    /// claiming requests for it — so "start a new conversation" tells the host to detach.
+    #[test]
+    fn starting_a_new_conversation_tells_the_host_to_detach() {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        apply(&mut app, crate::ui::Action::NewConversation);
+
+        let frames = recorded.frames.lock().expect("frames").clone();
+        let detach = frames
+            .iter()
+            .find(|frame| frame["method"] == "session/detach")
+            .expect("the host is told");
+        assert_eq!(detach["params"]["sessionId"], "session-1");
+        assert!(detach.get("id").is_none(), "a fact, not a question: notifications carry no id");
+    }
+
     /// "Start a new conversation" is a decision about the panel, not a request to the host:
     /// nothing is created until the user has something to say.
     #[test]
