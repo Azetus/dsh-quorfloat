@@ -14,7 +14,7 @@
 //! - **The main thread only renders and toggles.** It drains a channel, decides
 //!   whether the panel should be on screen, and draws.
 //!
-//! The session state stays in [`crate::session::Session`], shared behind a mutex.
+//! The session state stays in [`crate::app::session::Session`], shared behind a mutex.
 //! The reader thread is the only writer; the main thread reads it to pick up the
 //! host's configuration.
 
@@ -23,8 +23,11 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
+pub mod session;
+
 use crate::fonts::{self, FontStatus};
-use crate::session::{ApprovalVerdict, FrameSink, Handoff, Interaction, InteractionKind, InteractionState, Session, SessionExit, WindowCommand};
+use crate::app::session::interaction::{ApprovalVerdict, Handoff, Interaction, InteractionKind, InteractionState};
+use crate::app::session::{FrameSink, Session, SessionExit, WindowCommand};
 use crate::ipc::transport::StdinSource;
 use crate::window::{Hotkey, WindowSettings};
 
@@ -635,9 +638,9 @@ struct PanelState {
     /// The conversation so far, oldest first.
     ///
     /// Shared, not cloned: this is read on every repaint and may hold megabytes.
-    entries: std::sync::Arc<Vec<crate::transcript::Entry>>,
+    entries: std::sync::Arc<Vec<crate::app::session::transcript::Entry>>,
     /// The assistant message being generated, when one is.
-    live: Option<crate::transcript::Entry>,
+    live: Option<crate::app::session::transcript::Entry>,
     /// The harness's name for this conversation, when it has chosen one.
     title: Option<String>,
 }
@@ -810,8 +813,8 @@ fn conversation(ui: &mut egui::Ui, state: &PanelState) {
 ///
 /// @param ui - where to draw.
 /// @param entry - the line.
-fn entry_ui(ui: &mut egui::Ui, entry: &crate::transcript::Entry) {
-    use crate::transcript::{Block, Entry};
+fn entry_ui(ui: &mut egui::Ui, entry: &crate::app::session::transcript::Entry) {
+    use crate::app::session::transcript::{Block, Entry};
 
     ui.add_space(6.0);
     ui.label(egui::RichText::new(speaker(entry)).size(11.0).color(MUTED));
@@ -853,8 +856,8 @@ fn entry_ui(ui: &mut egui::Ui, entry: &crate::transcript::Entry) {
 /// @param entry - the line.
 /// @returns the label above it.
 #[must_use]
-fn speaker(entry: &crate::transcript::Entry) -> String {
-    use crate::transcript::Entry;
+fn speaker(entry: &crate::app::session::transcript::Entry) -> String {
+    use crate::app::session::transcript::Entry;
     match entry {
         Entry::User { .. } => "你".to_owned(),
         Entry::Assistant { .. } => "quorfloat".to_owned(),
@@ -1084,7 +1087,7 @@ pub const CLOCK_INTERVAL_MS: u64 = 1000;
 /// callback cannot run when there is no render callback.
 ///
 /// The interval is a ceiling, not a schedule: what is actually due is decided by
-/// [`crate::follow::Follow`], which is where the policy belongs.
+/// [`crate::app::session::follow::Follow`], which is where the policy belongs.
 ///
 /// @param interval - how long to sleep between wakes.
 /// @param egui - the render context, filled in once the window exists.
@@ -1142,7 +1145,7 @@ fn measured_capabilities(hotkey_active: bool) -> Vec<&'static str> {
 mod tests {
     use super::*;
     use crate::ipc::rpc::Inbound;
-    use crate::session::{FrameSink, HotkeyReport, Identity};
+    use crate::app::session::{FrameSink, HotkeyReport, Identity};
     use std::sync::mpsc::channel;
 
     /// A sink that records instead of writing, reachable from the test afterwards.
@@ -1253,7 +1256,7 @@ mod tests {
         let state = app.state();
         let live = state.live.expect("the stream is offered while it is being written");
         assert_eq!(speaker(&live), "quorfloat");
-        assert!(matches!(&live, crate::transcript::Entry::Assistant { streaming: true, .. }));
+        assert!(matches!(&live, crate::app::session::transcript::Entry::Assistant { streaming: true, .. }));
     }
 
     #[test]
@@ -1363,7 +1366,7 @@ mod tests {
     #[test]
     fn a_notice_names_its_event_kind() {
         // The label is where an unrecognised event announces itself.
-        let notice = crate::transcript::Entry::Notice {
+        let notice = crate::app::session::transcript::Entry::Notice {
             kind: "something/new".to_owned(),
             text: "新的东西".to_owned(),
         };

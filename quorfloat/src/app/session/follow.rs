@@ -21,7 +21,7 @@
 
 use serde_json::Value;
 
-use crate::session::FrameSink;
+use crate::app::session::FrameSink;
 
 /// How often to look for a conversation that is more recent than the current one.
 ///

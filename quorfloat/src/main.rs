@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use dsh_quorfloat::app::{self, App, Reader, SharedSink};
 use dsh_quorfloat::runtime::diag::marker::Marker;
-use dsh_quorfloat::session::{FrameSink, HotkeyReport, Identity, Session, SessionExit};
+use dsh_quorfloat::app::session::{FrameSink, HotkeyReport, Identity, Session, SessionExit};
 use dsh_quorfloat::ipc::transport::{StdinSource, StdioSink};
 use dsh_quorfloat::window::{self, Hotkey, WindowSettings};
 use dsh_quorfloat::VERSION;

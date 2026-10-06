@@ -18,7 +18,7 @@ use std::io::{BufReader, Read, Write};
 use crate::ipc::frame::{Decoded, FrameReader};
 use crate::runtime::diag::marker::Marker;
 use crate::ipc::rpc::{self, Inbound};
-use crate::session::{FrameSink, FrameSource};
+use crate::app::session::{FrameSink, FrameSource};
 
 /// Writes frames to stdout, log lines to stderr, breadcrumbs to the marker file.
 pub struct StdioSink {
