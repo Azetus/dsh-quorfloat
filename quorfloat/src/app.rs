@@ -1530,6 +1530,31 @@ mod tests {
     }
 
     #[test]
+    fn top_bar_tools_are_separate_and_aligned_with_the_design() {
+        let (mut app, _, _, _) = app_and_session();
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(708.0, 620.0))),
+                ..Default::default()
+            }, |ui| app.draw(ui));
+            texts.clear();
+            for shape in &output.shapes { collect_text(&shape.shape, &mut texts); }
+            output.textures_delta.clear();
+        }
+        let glyph = |icon: crate::ui::icons::Icon| texts.iter().find(|(text, _)| text == icon.chars()).expect("header glyph").1;
+        let gear = glyph(crate::ui::icons::Icon::GearSix);
+        let close = glyph(crate::ui::icons::Icon::Close);
+        assert!(gear.right() < close.left(), "settings and close overlap: {gear:?} / {close:?}");
+        assert!((gear.center().y - close.center().y).abs() < 1.0);
+        assert!((close.center().x - gear.center().x - crate::ui::theme::ICON_BUTTON - crate::ui::theme::GAP_CLOSE).abs() < 2.0);
+        assert!(close.right() < 708.0 - f32::from(crate::ui::theme::SHADOW_ROOM_SIDE + crate::ui::theme::PAD_TOP.right));
+        assert!(close.center().y < 60.0, "the top padding is applied once");
+    }
+
+    #[test]
     fn pressing_the_gear_opens_the_settings_page() {
         // The command path the tests below skip: they call the action directly, so none of them
         // would notice a gear that is drawn but never wired, or one drawn where the design's padding
@@ -2108,9 +2133,45 @@ mod tests {
         }
         let ctx = egui::Context::default();
         crate::ui::fonts::ensure_icons(&ctx);
-        let state = footer_state_for_layout();
+        let font = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/NotoSansSC-VF.otf");
+        assert!(matches!(crate::ui::fonts::install_from(&ctx, &font), crate::ui::fonts::FontStatus::Loaded { .. }));
+        let mut state = footer_state_for_layout();
+        state.entries = std::sync::Arc::new(vec![crate::app::session::transcript::Entry::System { text: "A conversation line.\n".repeat(30) }]);
+        let efforts = &mut state.options.as_mut().unwrap().models[0].efforts;
+        efforts[0].description = Some("Prefer for routine or latency-sensitive tasks.".into());
+        efforts[1].description = Some("Use for tasks that need more careful reasoning.".into());
+        let mut off = efforts[0].clone();
+        off.id = "off".into(); off.name = "Off".into();
+        off.description = Some("Use for simple tasks that do not need reasoning.".into());
+        efforts.insert(0, off);
         click(&ctx, &state, "DeepSeek-V41-Flash");
+        let _ = frame(&ctx, &state, vec![]);
+        let (menu, _) = frame(&ctx, &state, vec![]);
+        let model_row = menu.iter().find(|(text, _)| text == "模型").expect("model row").1;
+        let effort_row = menu.iter().find(|(text, _)| text == "推理等级").expect("effort row").1;
+        let model_value = menu.iter().find(|(text, rect)| text == "DeepSeek-V41-Flash" && rect.center().y < effort_row.top()).expect("inline model").1;
+        let effort_value = menu.iter().find(|(text, rect)| text == "高" && rect.center().y < effort_row.bottom()).expect("inline effort").1;
+        assert!((model_row.center().y - model_value.center().y).abs() < 2.0);
+        assert!((effort_row.center().y - effort_value.center().y).abs() < 2.0);
+        assert!(model_row.right() < model_value.left() && effort_row.right() < effort_value.left());
+        let panel = egui::Rect::from_min_max(egui::pos2(34.0, 20.0), egui::pos2(674.0, 582.0));
+        for (text, rect) in &menu {
+            if rect.top() >= model_row.top() && rect.bottom() <= effort_row.bottom() {
+                assert!(panel.contains_rect(*rect), "menu {text:?} outside panel: {rect:?}");
+            }
+        }
         click(&ctx, &state, "推理等级");
+        for _ in 0..3 { let _ = frame(&ctx, &state, vec![]); }
+        let (effort_text, _) = frame(&ctx, &state, vec![]);
+        let menu_rect = ctx.memory(|memory| memory.area_rect(crate::ui::footer_popup_id(crate::ui::FooterKind::Effort))).expect("effort menu");
+        assert!(panel.contains_rect(menu_rect), "effort menu outside panel: {menu_rect:?}");
+        let back = effort_text.iter().find(|(text, _)| text == "‹  推理等级").expect("back row").1;
+        let first = effort_text.iter().find(|(text, _)| text == "Off").expect("first effort").1;
+        assert!(back.bottom() < first.top(), "menu header overlaps first choice: {back:?} / {first:?}");
+        for label in ["Off", "低", "高", "Prefer for routine", "Use for tasks", "Use for simple"] {
+            let rect = effort_text.iter().find(|(text, rect)| text.starts_with(label) && rect.top() < menu_rect.bottom()).unwrap_or_else(|| panic!("missing menu {label}: {effort_text:?}")).1;
+            assert!(menu_rect.contains_rect(rect), "menu clips {label}: {rect:?} outside {menu_rect:?}");
+        }
         assert!(matches!(click(&ctx, &state, "低"), Some(crate::ui::Action::SelectEffort { effort }) if effort == "low"));
         click(&ctx, &state, "DeepSeek-V41-Flash");
         click(&ctx, &state, "模型");

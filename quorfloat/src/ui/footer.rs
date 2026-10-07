@@ -66,7 +66,9 @@ fn button(ui: &mut egui::Ui, id: egui::Id, icon: Option<Icon>, label: &str, suff
     let natural = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), theme::text()).size().x;
     let width = (natural + fixed).min(ui.available_width());
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, theme::FOOTER_PICKER_HEIGHT), egui::Sense::click());
-    if response.hovered() || egui::Popup::is_id_open(ui.ctx(), id) {
+    let open = egui::Popup::is_id_open(ui.ctx(), id)
+        || (id == Kind::Config.id() && [Kind::Model, Kind::Effort].iter().any(|kind| egui::Popup::is_id_open(ui.ctx(), kind.id())));
+    if response.hovered() || open {
         ui.painter().rect_filled(rect, theme::RADIUS_PICKER, theme::soft());
     }
     let mut x = rect.left() + theme::FOOTER_PICKER_PAD;
@@ -85,7 +87,7 @@ fn button(ui: &mut egui::Ui, id: egui::Id, icon: Option<Icon>, label: &str, suff
             rect.center().y - suffix.size().y / 2.0), suffix, theme::muted());
     }
     crate::ui::icons::paint(ui, egui::pos2(rect.right() - theme::FOOTER_PICKER_PAD - theme::ICON_CHEVRON / 2.0, rect.center().y),
-        Icon::CaretDown, theme::ICON_CHEVRON, theme::muted());
+        if open { Icon::CaretUp } else { Icon::CaretDown }, theme::ICON_CHEVRON, theme::muted());
     response.on_hover_text(label)
 }
 
@@ -103,8 +105,9 @@ pub(super) fn settings(ui: &mut egui::Ui, state: &PanelState, action: &mut Optio
 fn effort_label(options: &SessionOptions) -> Option<String> {
     let model = current_model(options)?;
     if model.efforts.is_empty() { return None; }
-    Some(options.current_effort.as_ref().map_or_else(|| "默认".to_owned(), |effort|
-        model.efforts.iter().find(|option| &option.id == effort).map_or_else(|| effort.clone(), |option| option.name.clone())))
+    let effort = options.current_effort.as_ref().or(model.default_effort.as_ref())?;
+    Some(model.efforts.iter().find(|option| &option.id == effort)
+        .map_or_else(|| effort.clone(), |option| option.name.clone()))
 }
 
 fn config(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
@@ -113,12 +116,14 @@ fn config(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
     let label = current_model(options).map_or("模型", |model| model.name.as_str());
     let effort = effort_label(options);
     let response = button(ui, Kind::Config.id(), None, label, effort.as_deref(), false);
-    egui::Popup::menu(&response).id(Kind::Config.id()).frame(theme::popover_frame())
+    if response.clicked() && !egui::Popup::is_id_open(ui.ctx(), Kind::Config.id()) { *action = Some(Action::RefreshOptions); }
+    egui::Popup::menu(&response).id(Kind::Config.id()).frame(config_frame())
+        .align(egui::RectAlign::TOP_END).gap(theme::POPOVER_GAP)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-            ui.set_width(theme::POPOVER_WIDTH);
+            config_width(ui);
             for (kind, title, value) in [(Kind::Model, "模型", Some(label)), (Kind::Effort, "推理等级", effort.as_deref())] {
-                let Some(value) = value else { continue };
-                if let Some(Row::Chosen) = picker::option_row(ui, None, title, Some(value), false, false, false) {
+                if matches!(kind, Kind::Effort) && current_model(options).is_none_or(|model| model.efforts.is_empty()) { continue; }
+                if config_row(ui, title, value, true).clicked() {
                     egui::Popup::open_id(ui.ctx(), kind.id());
                 }
             }
@@ -127,11 +132,41 @@ fn config(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
     effort_menu(ui, state, action, &response);
 }
 
+/// The combined menu is 250px outside, with the design's 4px inner padding.
+fn config_frame() -> egui::Frame { theme::popover_frame().inner_margin(egui::Margin::same(theme::CONFIG_MENU_PAD)) }
+fn config_width(ui: &mut egui::Ui) {
+    ui.set_width(theme::CONFIG_MENU_WIDTH - 2.0 * (f32::from(theme::CONFIG_MENU_PAD) + theme::BORDER));
+    ui.spacing_mut().item_spacing.y = 0.0;
+}
+
+/// Label left, current value right, then the disclosure — one line as in `.q-config-row`.
+fn config_row(ui: &mut egui::Ui, label: &str, value: Option<&str>, forward: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), theme::MENU_LINE_HEIGHT + f32::from(theme::ROW_PADDING.top + theme::ROW_PADDING.bottom)), egui::Sense::click());
+    if response.hovered() { ui.painter().rect_filled(rect, theme::RADIUS_ICON_BUTTON, theme::soft()); }
+    let font = theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_META);
+    let label = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), if forward { theme::text() } else { theme::muted() });
+    let padding = f32::from(theme::ROW_PADDING.left);
+    let x = rect.left() + padding;
+    ui.painter().galley(egui::pos2(x, rect.center().y - label.size().y / 2.0), label.clone(), theme::text());
+    if let Some(value) = value {
+        let end = rect.right() - padding - theme::ICON_CHEVRON - theme::POPOVER_GAP;
+        let mut job = egui::text::LayoutJob::simple(value.to_owned(), font, theme::muted(), (end - x - label.size().x - theme::POPOVER_GAP).max(0.0));
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        let galley = ui.painter().layout_job(job);
+        ui.painter().galley(egui::pos2(end - galley.size().x, rect.center().y - galley.size().y / 2.0), galley, theme::muted());
+    }
+    if forward { crate::ui::icons::paint(ui, egui::pos2(rect.right() - padding - theme::ICON_CHEVRON / 2.0, rect.center().y), Icon::CaretRight, theme::ICON_CHEVRON, theme::muted()); }
+    response
+}
+
 fn back(ui: &mut egui::Ui, kind: Kind) {
-    if ui.button("‹ 返回模型与推理等级").clicked() {
+    let label = if matches!(kind, Kind::Model) { "‹  模型" } else { "‹  推理等级" };
+    if config_row(ui, label, None, false).clicked() {
         egui::Popup::close_id(ui.ctx(), kind.id());
         egui::Popup::open_id(ui.ctx(), Kind::Config.id());
     }
+    ui.add_space(theme::GAP_CLOSE);
 }
 
 /// Measured statistics, grouped like the design; no invented token total or absent speed.
@@ -191,24 +226,32 @@ fn model(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>, res
     let mut chosen: Option<Action> = None;
     egui::Popup::menu(response)
         .open_memory(None)
-        .frame(theme::popover_frame())
+        .frame(config_frame())
+        .align(egui::RectAlign::TOP_END).gap(theme::POPOVER_GAP)
         .id(Kind::Model.id())
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-            ui.set_min_width(theme::POPOVER_WIDTH);
+            config_width(ui);
+            prepare_catalog(ui, response.rect);
             back(ui, Kind::Model);
-            picker::popover_head(ui, "模型", "");
             if options.models.is_empty() {
                 picker::popover_note(ui, "宿主没有提供可选模型");
                 return;
             }
+            let height = menu_height(ui, response.rect);
+            egui::ScrollArea::vertical().max_height(height).show(ui, |ui| {
+            let mut provider = None;
             for model in &options.models {
+                if provider != Some(model.provider.as_str()) {
+                    picker::popover_head(ui, &model.provider_name, "");
+                    provider = Some(model.provider.as_str());
+                }
                 if let Some(Row::Chosen) = picker::option_row(
                     ui,
                     None,
                     &model.name,
-                    Some(&model.provider),
-                    current.is_some_and(|current| current.id == model.id),
+                    model.description.as_deref(),
+                    current.is_some_and(|current| current.id == model.id && current.provider == model.provider),
                     false,
                     false,
                 ) {
@@ -221,6 +264,7 @@ fn model(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>, res
                     });
                 }
             }
+            });
         });
     if let Some(chosen) = chosen {
         *action = Some(chosen);
@@ -265,20 +309,24 @@ fn effort_menu(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action
     let mut chosen = None;
     egui::Popup::menu(response)
         .open_memory(None)
-        .frame(theme::popover_frame())
+        .frame(config_frame())
+        .align(egui::RectAlign::TOP_END).gap(theme::POPOVER_GAP)
         .id(Kind::Effort.id())
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-            ui.set_min_width(theme::POPOVER_WIDTH);
+            config_width(ui);
+            prepare_catalog(ui, response.rect);
             back(ui, Kind::Effort);
-            picker::popover_head(ui, "思考档位", &current.name);
+            let height = menu_height(ui, response.rect);
+            egui::ScrollArea::vertical().max_height(height).show(ui, |ui| {
             for option in &current.efforts {
                 if let Some(Row::Chosen) =
-                    picker::option_row(ui, None, &option.name, None, Some(&option.id) == options.current_effort.as_ref(), false, false)
+                    picker::option_row(ui, None, &option.name, option.description.as_deref(), Some(&option.id) == options.current_effort.as_ref().or(current.default_effort.as_ref()), false, false)
                 {
                     chosen = Some(Action::SelectEffort { effort: option.id.clone() });
                 }
             }
+            });
         });
     if let Some(chosen) = chosen {
         *action = Some(chosen);
@@ -301,12 +349,9 @@ fn permissions(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action
         .as_ref()
         .and_then(|value| options.permissions.iter().find(|option| &option.value == value))
         .map_or_else(|| "权限".to_owned(), |option| option.name.clone());
-    // A shield that is filled when the preset is not the narrowest one: the whole point of this
-    // control is that the panel can be running with more access than the user remembers granting.
-    let elevated = options
-        .current_permission
-        .as_deref()
-        .is_some_and(|value| value != options.permissions[0].value);
+    // Catalog order is presentation order, never a ranking of access. Only the host's known
+    // full-access preset has the filled warning mark; custom presets keep a neutral shield.
+    let elevated = options.current_permission.as_deref() == Some("danger-full-access");
     let response = button(
         ui,
         Kind::Permission.id(),
@@ -315,20 +360,31 @@ fn permissions(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action
         None,
         elevated,
     );
+    if response.clicked() && !egui::Popup::is_id_open(ui.ctx(), Kind::Permission.id()) { *action = Some(Action::RefreshOptions); }
     let mut chosen = None;
     egui::Popup::menu(&response)
         .id(Kind::Permission.id())
+        .align(egui::RectAlign::TOP_START).gap(theme::POPOVER_GAP)
         .frame(theme::popover_frame())
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
-            ui.set_min_width(theme::POPOVER_WIDTH);
+            ui.set_width(theme::POPOVER_WIDTH - 2.0 * (theme::GAP_TIGHT + theme::BORDER));
+            ui.spacing_mut().item_spacing.y = 0.0;
+            prepare_catalog(ui, response.rect);
             picker::popover_head(ui, "会话权限", "");
+            let height = menu_height(ui, response.rect);
+            egui::ScrollArea::vertical().max_height(height).show(ui, |ui| {
             for option in &options.permissions {
                 if let Some(Row::Chosen) = picker::option_row(
                     ui,
-                    None,
+                    Some(match option.value.as_str() {
+                        "read-only" => Icon::Eye,
+                        "workspace-write" => Icon::FolderSimple,
+                        "danger-full-access" => Icon::Shield,
+                        _ => Icon::ShieldCheck,
+                    }),
                     &option.name,
-                    None,
+                    option.description.as_deref(),
                     Some(&option.value) == options.current_permission.as_ref(),
                     false,
                     false,
@@ -336,10 +392,11 @@ fn permissions(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action
                     chosen = Some(Action::SetPermission { value: option.value.clone() });
                 }
             }
-            picker::popover_note(ui, "权限决定沙箱范围与审批策略");
+            });
         });
     if let Some(chosen) = chosen {
         *action = Some(chosen);
+        egui::Popup::close_id(ui.ctx(), Kind::Permission.id());
     }
 }
 
@@ -353,4 +410,19 @@ fn current_model(options: &SessionOptions) -> Option<&ModelOption> {
         .models
         .iter()
         .find(|model| &model.provider == provider && &model.id == id)
+}
+
+/// Reset the Area's remembered height before laying out its header. egui's set_max_height
+/// also resets the cursor, so calling it after the header would make the first row overlap it.
+fn prepare_catalog(ui: &mut egui::Ui, anchor: egui::Rect) {
+    ui.set_max_height(menu_height(ui, anchor) + theme::MENU_LINE_HEIGHT
+        + f32::from(theme::ROW_PADDING.top + theme::ROW_PADDING.bottom) + theme::GAP_CLOSE);
+}
+
+/// Constrain catalogs to this viewport; long host-provided lists scroll instead of clipping.
+fn menu_height(ui: &egui::Ui, anchor: egui::Rect) -> f32 {
+    let heading = theme::MENU_LINE_HEIGHT + f32::from(theme::ROW_PADDING.top + theme::ROW_PADDING.bottom) + theme::GAP_CLOSE;
+    let padding = 2.0 * (theme::GAP_TIGHT + theme::BORDER);
+    (anchor.top().min(ui.ctx().viewport_rect().bottom()) - f32::from(theme::SHADOW_ROOM_TOP)
+        - theme::POPOVER_GAP - heading - padding).max(theme::MENU_LINE_HEIGHT)
 }

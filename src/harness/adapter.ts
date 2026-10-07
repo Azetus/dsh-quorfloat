@@ -668,7 +668,8 @@ class CordisHarness implements QuorfloatHarness {
     // picker is then hidden rather than shown with nothing in it — an empty menu is worse
     // than no menu, because it looks like a failure.
     let permissions: PermissionView[] = []
-    let permission: string | undefined
+    const values = sessionId === undefined ? undefined : await this.#selectionProjections(sessionId)
+    const permission = readCurrentPermission(values)
     if (this.#presets !== undefined) {
       const catalog = this.#presets.catalog()
       permissions = (catalog.options ?? []).flatMap(option => {
@@ -676,21 +677,10 @@ class CordisHarness implements QuorfloatHarness {
         const name = typeof option['name'] === 'string' ? option['name'] : undefined
         if (value === undefined || name === undefined) return []
         const description = typeof option['description'] === 'string' ? option['description'] : undefined
-        return [{ value, name, ...(description === undefined ? {} : { description }) }]
+        return [{ value, name: permissionLabel(value, name), ...(description === undefined ? {} : { description }) }]
       })
-      const session = sessionId === undefined ? undefined : this.#sessions?.get(sessionId)
-      if (session !== undefined) {
-        try {
-          permission = this.#presets.current(session)
-        } catch (error) {
-          // A session whose permissions projection is not registered yet: the catalog is
-          // still worth showing, so this degrades to "no current value" rather than failing
-          // the whole read.
-          this.#log.debug('permission preset is not resolvable yet', { sessionId, error: String(error) })
-        }
-      }
     }
-    const current = sessionId === undefined ? undefined : await this.#currentSelection(sessionId)
+    const current = readCurrentSelection(values)
     return {
       groups,
       ...(current === undefined ? {} : { current }),
@@ -789,13 +779,13 @@ class CordisHarness implements QuorfloatHarness {
    * @param sessionId - the session to read.
    * @returns the selection, or `undefined` when the projection is not available.
    */
-  async #currentSelection(sessionId: string): Promise<ModelChoiceView | undefined> {
+  async #selectionProjections(sessionId: string): Promise<unknown> {
     if (this.#controller.projections === undefined) return undefined
     try {
       const value = await this.#controller.projections({ sessionId }, new AbortController().signal)
-      return readCurrentSelection(value)
+      return value
     } catch (error) {
-      this.#log.debug('the model selection is unavailable', { sessionId, error: String(error) })
+      this.#log.debug('session selection projections are unavailable', { sessionId, error: String(error) })
       return undefined
     }
   }
@@ -986,10 +976,9 @@ export function readModelGroups(value: unknown): ModelGroupView[] {
 /**
  * Read what one session has selected now.
  *
- * The `modelSelection` projection carries `lastUsed` and a `pending` switch. **The pending
- * one wins when it is present**: it is the choice made but not yet used by a step, and a
- * picker that showed `lastUsed` would snap back to the old model after every change until
- * the next prompt.
+ * The public wire projection exposes `next`, already resolved by Harness from its internal
+ * `pending ?? lastUsed` state (session-controller/src/model-selection-projection.ts).
+ * Internal state is not a second supported wire format.
  *
  * @param value - a projections response.
  * @returns the selection, or `undefined` when this build does not report one.
@@ -1000,14 +989,44 @@ export function readCurrentSelection(value: unknown): ModelChoiceView | undefine
   const projection = values['modelSelection']
   if (typeof projection !== 'object' || projection === null) return undefined
   const record = projection as Record<string, unknown>
-  const candidate = record['pending'] ?? record['lastUsed']
+  const candidate = record['next']
   if (typeof candidate !== 'object' || candidate === null) return undefined
   const selection = candidate as Record<string, unknown>
   const provider = typeof selection['provider'] === 'string' ? selection['provider'] : undefined
   const model = typeof selection['model'] === 'string' ? selection['model'] : undefined
-  if (provider === undefined || model === undefined) return undefined
+  if (!provider || !model) return undefined
   const effort = typeof selection['reasoningEffort'] === 'string' ? selection['reasoningEffort'] : undefined
   return { provider, model, ...(effort === undefined ? {} : { reasoningEffort: effort }) }
+}
+
+/**
+ * Match Harness's Chinese UI labels without defining its selectable options.
+ * Source: ui-permission-presets/src/client/{presentation,locales}.ts.
+ * Only the conventional built-in label is translated; configured labels pass through.
+ * @param value - stable key from the catalog.
+ * @param name - host-supplied display label.
+ * @returns localized built-in label or the original custom name.
+ */
+function permissionLabel(value: string, name: string): string {
+  const labels: Record<string, readonly [string, string]> = {
+    'read-only': ['Read Only', '仅可查看'],
+    'workspace-write': ['Workspace Write', '工作区内修改'],
+    'danger-full-access': ['Full access', '完全权限'],
+  }
+  const label = Object.hasOwn(labels, value) ? labels[value] : undefined
+  return label !== undefined && (name === value || name === label[0]) ? label[1] : name
+}
+
+/**
+ * Read the cold-safe public permission selection, without requiring a live Agent/Session.
+ * @param value - a sessionController.projections response.
+ * @returns the host's current value, or nothing for an unfamiliar projection.
+ */
+export function readCurrentPermission(value: unknown): string | undefined {
+  const permissions = projectionValues(value)?.['permissions']
+  if (typeof permissions !== 'object' || permissions === null) return undefined
+  const current = (permissions as Record<string, unknown>)['currentValue']
+  return typeof current === 'string' && current.length > 0 ? current : undefined
 }
 
 /**

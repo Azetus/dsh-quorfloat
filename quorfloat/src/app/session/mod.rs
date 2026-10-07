@@ -321,7 +321,7 @@ pub struct Session {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SettingRequest {
     /// `session/options`: the catalogs.
-    Options,
+    Options { session_id: Option<String> },
     /// `session/select`: model and reasoning effort.
     SelectModel,
     /// `session/permission`: the permission preset.
@@ -333,10 +333,14 @@ enum SettingRequest {
 pub struct ModelOption {
     /// Provider route, sent back with a choice.
     pub provider: String,
+    /// Host-provided display name for the provider group.
+    pub provider_name: String,
     /// The provider's own model id.
     pub id: String,
     /// The label a person reads.
     pub name: String,
+    /// Description supplied by Harness, never a local preset table.
+    pub description: Option<String>,
     /// The efforts this model accepts, in the host's order.
     pub efforts: Vec<EffortOption>,
     /// The effort the host defaults to, when it names one.
@@ -350,6 +354,8 @@ pub struct EffortOption {
     pub id: String,
     /// The label a person reads.
     pub name: String,
+    /// Description supplied by Harness, never a local preset table.
+    pub description: Option<String>,
 }
 
 /// One permission preset the host offers.
@@ -359,6 +365,8 @@ pub struct PermissionOption {
     pub value: String,
     /// The label a person reads.
     pub name: String,
+    /// Description supplied by Harness, never a local preset table.
+    pub description: Option<String>,
 }
 
 /// What the host says may be chosen for the attached conversation.
@@ -674,8 +682,12 @@ impl Session {
             if request_id == Some(pending) {
                 self.follow_request = None;
                 let now = rpc::now_millis();
+                let previous = (self.follow.session_id().map(str::to_owned), self.follow.generation());
                 if let Some(outgoing) = self.follow.resolve(outcome, now, sink) {
                     self.send_follow(outgoing, now, sink);
+                }
+                if previous != (self.follow.session_id().map(str::to_owned), self.follow.generation()) {
+                    self.request_options(sink);
                 }
                 self.forget_a_conversation_that_is_gone(sink);
                 // The conversation a waiting prompt needed may have just come into existence.
@@ -1018,7 +1030,9 @@ impl Session {
             Some(session_id) => json!({ "sessionId": session_id }),
             None => json!({}),
         };
-        self.setting_requests.insert(id, SettingRequest::Options);
+        // Only the newest catalog read may settle, even when a menu is reopened quickly.
+        self.setting_requests.retain(|_, request| !matches!(request, SettingRequest::Options { .. }));
+        self.setting_requests.insert(id, SettingRequest::Options { session_id: self.follow.session_id().map(str::to_owned) });
         if let Err(error) = sink.send(&rpc::request(id, "session/options", params)) {
             self.setting_requests.remove(&id);
             self.setting_failure = Some(format!("无法读取可选项：{error}"));
@@ -1096,7 +1110,8 @@ impl Session {
             Ok(result) => {
                 self.setting_failure = None;
                 match request {
-                    SettingRequest::Options => {
+                    SettingRequest::Options { session_id } => {
+                        if session_id.as_deref() != self.follow.session_id() { return; }
                         self.options = Some(parse_options(&result));
                         // On the record as a mark: "the model list is empty" is a question about
                         // this line, and the panel cannot show what it was never given.
@@ -1143,6 +1158,7 @@ impl Session {
     /// session, so carrying them across a switch would show one conversation's permissions beside
     /// another's contents — which is the one thing this control exists to make visible.
     fn forget_settings_for_another_conversation(&mut self) {
+        self.setting_requests.retain(|_, request| !matches!(request, SettingRequest::Options { .. }));
         if let Some(options) = &mut self.options {
             options.current_model = None;
             options.current_effort = None;
@@ -1736,13 +1752,15 @@ pub fn parse_options(result: &Value) -> SessionOptions {
                                     .get("name")
                                     .and_then(Value::as_str)
                                     .unwrap_or(id);
-                                Some(EffortOption { id: id.to_owned(), name: name.to_owned() })
+                                Some(EffortOption { id: id.to_owned(), name: name.to_owned(), description: effort.get("description").and_then(Value::as_str).map(str::to_owned) })
                             })
                             .collect()
                     })
                     .unwrap_or_default();
                 options.models.push(ModelOption {
                     provider: provider.to_owned(),
+                    provider_name: group.get("name").and_then(Value::as_str).unwrap_or(provider).to_owned(),
+                    description: model.get("description").and_then(Value::as_str).map(str::to_owned),
                     id: id.to_owned(),
                     name: model
                         .get("name")
@@ -1767,7 +1785,7 @@ pub fn parse_options(result: &Value) -> SessionOptions {
                     .get("name")
                     .and_then(Value::as_str)
                     .unwrap_or(value);
-                Some(PermissionOption { value: value.to_owned(), name: name.to_owned() })
+                Some(PermissionOption { value: value.to_owned(), name: name.to_owned(), description: permission.get("description").and_then(Value::as_str).map(str::to_owned) })
             })
             .collect();
     }
@@ -2231,6 +2249,18 @@ mod tests {
     /// The request the session last wrote.
     fn last_request(sink: &RecordingSink) -> serde_json::Value {
         sink.frames.last().expect("a request was written").clone()
+    }
+
+    #[test]
+    fn attaching_refreshes_options_and_old_session_answers_cannot_replace_them() {
+        let (mut session, mut sink) = followed();
+        let request = sink.frames.iter().rev().find(|frame| frame["method"] == "session/options").expect("attachment requests current selections").clone();
+        assert_eq!(request["params"]["sessionId"], "session-1");
+        session.start_new_conversation(&mut sink);
+        session.on_frame(Inbound::Response { id: request["id"].clone(), outcome: Ok(json!({
+            "current": {"provider": "old", "model": "old-model"}, "permission": "old-permission"
+        })) }, &mut sink);
+        assert!(session.options().is_none_or(|options| options.current_model.is_none() && options.current_permission.is_none()));
     }
 
     #[test]

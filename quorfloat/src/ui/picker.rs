@@ -361,50 +361,52 @@ pub(super) fn picker_button(
         )
         .size()
         .x;
-    let width = (label_width + theme::ICON_PICKER * 2.0 + theme::ICON_CHEVRON + theme::GAP_TIGHT * 3.0 + 14.0)
-        .min(220.0);
-    let height = theme::ICON + 10.0;
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    let leading = icon.map_or(0.0, |_| theme::ICON_PICKER + theme::GAP_TIGHT);
+    let pin = if marked { theme::ICON_CHEVRON + theme::GAP_TIGHT } else { 0.0 };
+    let fixed = theme::FOOTER_PICKER_PAD * 2.0 + leading + pin + theme::ICON_CHEVRON + theme::GAP_TIGHT;
+    let width = (label_width + fixed).min(theme::PICKER_MAX_WIDTH).min(ui.available_width());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, theme::FOOTER_PICKER_HEIGHT), egui::Sense::click());
     if open || response.hovered() {
-        ui.painter().rect_filled(rect, egui::CornerRadius::same(theme::RADIUS_PICKER), theme::soft());
+        ui.painter().rect_filled(rect, theme::RADIUS_PICKER, theme::soft());
     }
-    let mut cursor = rect.left() + 7.0;
+    let mut cursor = rect.left() + theme::FOOTER_PICKER_PAD;
     let middle = rect.center().y;
-    // Optional for the same reason the option rows' mark is: the footer's pickers show a value
-    // rather than a place, and not all of them want a symbol beside it.
     if let Some(icon) = icon {
         icons::paint(ui, egui::pos2(cursor + theme::ICON_PICKER / 2.0, middle), icon, theme::ICON_PICKER, theme::muted());
-        cursor += theme::ICON_PICKER + theme::GAP_TIGHT;
+        cursor += leading;
     }
-    // The label is clipped rather than allowed to push the tools off the bar; egui has no
-    // ellipsis on a painter, so the truncation happens through the layout width above.
-    ui.painter().text(
-        egui::pos2(cursor, middle),
-        egui::Align2::LEFT_CENTER,
-        label,
-        theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_META),
-        theme::text(),
-    );
-    let colour = if marked { theme::accent() } else { theme::muted() };
-    icons::paint(
-        ui,
-        egui::pos2(rect.right() - 7.0 - theme::ICON_CHEVRON / 2.0, middle),
-        Icon::CaretDown,
-        theme::ICON_CHEVRON,
-        colour,
-    );
+    let mut job = egui::text::LayoutJob::simple(label.to_owned(), theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_META), theme::text(), (width - fixed).max(0.0));
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    let galley = ui.painter().layout_job(job);
+    ui.painter().galley(egui::pos2(cursor, middle - galley.size().y / 2.0), galley, theme::text());
+    let caret_x = rect.right() - theme::FOOTER_PICKER_PAD - theme::ICON_CHEVRON / 2.0;
+    if marked {
+        icons::paint(ui, egui::pos2(caret_x - pin, middle), Icon::PushPin, theme::ICON_CHEVRON, theme::accent());
+    }
+    icons::paint(ui, egui::pos2(caret_x, middle), if open { Icon::CaretUp } else { Icon::CaretDown }, theme::ICON_CHEVRON, theme::muted());
     response
 }
 
 /// The title line of a popover: what the list is, and how much of it there is.
 pub(super) fn popover_head(ui: &mut egui::Ui, title: &str, detail: &str) {
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(title).size(theme::TEXT_SMALL).color(theme::text()));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(egui::RichText::new(detail).size(theme::TEXT_SMALL).color(theme::muted()));
-        });
-    });
-    ui.add_space(2.0);
+    let pad = theme::MENU_HEAD_PADDING;
+    let font = theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_SMALL);
+    let width = ui.available_width();
+    let mut title_job = egui::text::LayoutJob::simple(title.to_owned(), font.clone(), theme::text(),
+        (width - f32::from(pad.left + pad.right)).max(0.0));
+    title_job.wrap.max_rows = 1;
+    title_job.wrap.break_anywhere = true;
+    let title = ui.painter().layout_job(title_job);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, theme::MENU_DETAIL_HEIGHT + f32::from(pad.top + pad.bottom)), egui::Sense::hover());
+    let y = rect.top() + f32::from(pad.top);
+    ui.painter().galley(egui::pos2(rect.left() + f32::from(pad.left), y), title.clone(), theme::text());
+    let mut job = egui::text::LayoutJob::simple(detail.to_owned(), font, theme::muted(),
+        (width - f32::from(pad.left + pad.right) - title.size().x - theme::MENU_ICON_GAP).max(0.0));
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    let detail = ui.painter().layout_job(job);
+    ui.painter().galley(egui::pos2(rect.right() - f32::from(pad.right) - detail.size().x, y), detail, theme::muted());
 }
 
 /// A popover's closing advice.
@@ -449,71 +451,43 @@ pub(super) fn option_row(
     pinned: bool,
     pinnable: bool,
 ) -> Option<Row> {
+    let pin_width = if pinnable { theme::ICON_BUTTON + theme::GAP_CLOSE } else { 0.0 };
+    let width = (ui.available_width() - pin_width).max(0.0);
+    let padding = f32::from(theme::ROW_PADDING.left);
+    let leading = icon.map_or(0.0, |_| theme::ICON_PICKER + theme::MENU_ICON_GAP);
+    let text_width = (width - padding * 2.0 - leading - theme::ICON_PICKER - theme::GAP_TIGHT).max(0.0);
+    let mut job = egui::text::LayoutJob::simple(name.to_owned(), theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_META), theme::text(), text_width);
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    let title = ui.painter().layout_job(job);
+    let detail = detail.filter(|text| !text.is_empty()).map(|text| {
+        let mut job = egui::text::LayoutJob::simple(text.to_owned(), theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_SMALL), theme::muted(), text_width);
+        job.wrap.max_rows = 3;
+        ui.painter().layout_job(job)
+    });
+    let title_height = title.size().y.max(theme::MENU_LINE_HEIGHT);
+    let detail_height = detail.as_ref().map_or(0.0, |galley| galley.size().y.max(theme::MENU_DETAIL_HEIGHT) + theme::BORDER);
+    let height = title_height + detail_height + f32::from(theme::ROW_PADDING.top + theme::ROW_PADDING.bottom);
     let mut reported = None;
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        let pin_width = if pinnable { theme::ICON_BUTTON } else { 0.0 };
-        let width = ui.available_width() - pin_width;
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(width, theme::TEXT_META * 2.0 + 6.0),
-            egui::Sense::click(),
-        );
-        if response.hovered() {
-            ui.painter().rect_filled(rect, egui::CornerRadius::same(theme::RADIUS_PICKER), theme::soft());
-        }
-        let mut cursor = rect.left() + 9.0;
-        let middle = rect.center().y;
-        if let Some(icon) = icon {
-            icons::paint(ui, egui::pos2(cursor + theme::ICON_PICKER / 2.0, middle), icon, theme::ICON_PICKER, theme::muted());
-            cursor += theme::ICON_PICKER + theme::GAP_TIGHT;
-        }
-        ui.painter().text(
-            egui::pos2(cursor, middle - 8.0),
-            egui::Align2::LEFT_CENTER,
-            name,
-            theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_META),
-            theme::text(),
-        );
-        if let Some(detail) = detail {
-            ui.painter().text(
-                egui::pos2(cursor, middle + 8.0),
-                egui::Align2::LEFT_CENTER,
-                detail,
-                theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_SMALL),
-                theme::muted(),
-            );
-        }
-        if chosen {
-            icons::paint(
-                ui,
-                egui::pos2(rect.right() - 9.0 - theme::ICON_PICKER / 2.0, middle),
-                Icon::Check,
-                theme::ICON_PICKER,
-                theme::accent(),
-            );
-        }
-        if response.clicked() {
-            reported = Some(Row::Chosen);
-        }
-
+        ui.spacing_mut().item_spacing.x = theme::GAP_CLOSE;
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+        if response.hovered() { ui.painter().rect_filled(rect, theme::RADIUS_PICKER, theme::soft()); }
+        if let Some(icon) = icon { icons::paint(ui, egui::pos2(rect.left() + padding + theme::ICON_PICKER / 2.0, rect.center().y), icon, theme::ICON_PICKER, theme::muted()); }
+        let x = rect.left() + padding + leading;
+        let y = rect.top() + f32::from(theme::ROW_PADDING.top);
+        ui.painter().galley(egui::pos2(x, y + (title_height - title.size().y) / 2.0), title, theme::text());
+        if let Some(detail) = detail { ui.painter().galley(egui::pos2(x, y + title_height + theme::BORDER), detail, theme::muted()); }
+        if chosen { icons::paint(ui, egui::pos2(rect.right() - padding - theme::ICON_PICKER / 2.0, rect.center().y), Icon::Check, theme::ICON_PICKER, theme::accent()); }
+        if response.clicked() { reported = Some(Row::Chosen); }
+        response.on_hover_text(name);
         if pinnable {
-            let (pin_rect, pin) = ui.allocate_exact_size(
-                egui::vec2(theme::ICON_BUTTON, theme::ICON_BUTTON),
-                egui::Sense::click(),
-            );
-            if pin.hovered() || pinned {
-                let fill = if pinned { theme::soft() } else { theme::soft() };
-                ui.painter().rect_filled(pin_rect, egui::CornerRadius::same(theme::RADIUS_SMALL_BUTTON), fill);
-            }
-            let colour = if pinned { theme::accent() } else { theme::muted() };
-            let mark = if pinned { Icon::PushPin } else { Icon::PushPinSlash };
-            icons::paint(ui, pin_rect.center(), mark, theme::ICON_PICKER, colour);
-            if pin.clicked() {
-                reported = Some(Row::PinToggled);
-            }
-            if pin.hovered() {
-                pin.on_hover_text(if pinned { "取消固定" } else { "固定" });
-            }
+            let (pin_rect, pin) = ui.allocate_exact_size(egui::Vec2::splat(theme::ICON_BUTTON), egui::Sense::click());
+            if pin.hovered() || pinned { ui.painter().rect_filled(pin_rect, theme::RADIUS_SMALL_BUTTON, theme::soft()); }
+            icons::paint(ui, pin_rect.center(), if pinned { Icon::PushPin } else { Icon::PushPinSlash }, theme::ICON_PICKER,
+                if pinned { theme::accent() } else { theme::muted() });
+            if pin.clicked() { reported = Some(Row::PinToggled); }
+            pin.on_hover_text(if pinned { "取消固定" } else { "固定" });
         }
     });
     reported

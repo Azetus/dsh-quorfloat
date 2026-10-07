@@ -32,6 +32,8 @@ pub enum Icon {
     Chat,
     /// The disclosure marker on a picker.
     CaretDown,
+    /// An open disclosure.
+    CaretUp,
     /// Pinned: this workspace or conversation opens again.
     PushPin,
     /// Not pinned.
@@ -75,7 +77,7 @@ pub enum Icon {
 }
 
 /// Every icon this build knows, for the checks that have to consider all of them.
-pub const ALL: [Icon; 24] = [
+pub const ALL: [Icon; 25] = [
     Icon::Folder,
     Icon::FolderSimple,
     Icon::Chat,
@@ -100,6 +102,7 @@ pub const ALL: [Icon; 24] = [
     Icon::KeyReturn,
     Icon::ShiftUp,
     Icon::CaretRight,
+    Icon::CaretUp,
 ];
 
 /// The icons the design itself names.
@@ -140,6 +143,7 @@ impl Icon {
             Self::FolderSimple => "folder-simple",
             Self::Chat => "chat",
             Self::CaretDown => "caret-down",
+            Self::CaretUp => "caret-up",
             Self::PushPin => "push-pin",
             Self::PushPinSlash => "push-pin-slash",
             Self::GearSix => "gear-six",
@@ -171,6 +175,7 @@ impl Icon {
             Self::FolderSimple => egui_phosphor::regular::FOLDER_SIMPLE,
             Self::Chat => egui_phosphor::regular::CHAT,
             Self::CaretDown => egui_phosphor::regular::CARET_DOWN,
+            Self::CaretUp => egui_phosphor::regular::CARET_UP,
             Self::PushPin => egui_phosphor::regular::PUSH_PIN,
             Self::PushPinSlash => egui_phosphor::regular::PUSH_PIN_SLASH,
             Self::GearSix => egui_phosphor::regular::GEAR_SIX,

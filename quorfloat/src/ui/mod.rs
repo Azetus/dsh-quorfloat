@@ -245,7 +245,7 @@ pub(crate) fn draw(
                     // no thread, so the same measurement is what the page itself occupies.
                     let chrome_above = ui.cursor().min.y - panel_top;
                     let footer = footer_height(ui, state);
-                    if settings_view {
+                    if settings_view || (state.entries.is_empty() && state.live.is_none()) {
                         footer_bar(ui, state, action);
                         return PanelLayout {
                             desired_height: (chrome_above + footer)
@@ -310,6 +310,7 @@ fn open_picker_from_env(ctx: &egui::Context) {
         "workspace" => picker::popup_id(picker::Kind::Workspace),
         // The footer's three, which need the panel to have been given options by the host: a
         // screenshot cannot click a button, and the arrangement is the thing being looked at.
+        "config" => footer_popup_id(FooterKind::Config),
         "model" => footer_popup_id(FooterKind::Model),
         "effort" => footer_popup_id(FooterKind::Effort),
         "permission" => footer_popup_id(FooterKind::Permission),
@@ -371,91 +372,42 @@ const SECTION_GAP: f32 = 8.0;
 /// *selectable* apart from the session name, so a drag that starts on the metadata selects
 /// it and a drag that starts on the name moves the window.
 fn top_bar(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
-    let bar = ui
-        .scope(|ui| {
-            ui.style_mut().interaction.selectable_labels = false;
-            let frame = egui::Frame::NONE.inner_margin(theme::PAD_TOP);
-            frame.show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = theme::GAP_TIGHT;
-                    // The brand, at the design's weight and letter spacing: it is a mark, not
-                    // a sentence, and it never changes.
-                    ui.label(
-                        egui::RichText::new("DeepSeek")
-                            .font(theme::font(ui.ctx(), theme::Weight::Medium, theme::TEXT_BRAND))
-                            .extra_letter_spacing(theme::BRAND_LETTER_SPACING)
-                            .color(text()),
-                    );
-                    ui.add_space(theme::GAP);
-                    // Where the panel is: the workspace, then the conversation inside it. Both
-                    // are pickers now — the conversation list exists, so the carets open
-                    // something (see `ui/picker.rs`).
-                    let mut occupied = Vec::new();
-                    let workspace = picker::workspaces(ui, state);
-                    if workspace.action.is_some() {
-                        *action = workspace.action.clone();
-                    }
-                    occupied.push(workspace.button);
-                    ui.label(egui::RichText::new("/").size(theme::TEXT_META).color(theme::line()));
-                    let conversations = picker::conversations(ui, state);
-                    if conversations.action.is_some() {
-                        *action = conversations.action.clone();
-                    }
-                    occupied.push(conversations.button);
-                    // The tools, pushed to the far end.
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // The panel's own top-right corner: the two buttons are placed against it
-                        // rather than against the cursor, so they stay put when the pickers to
-                        // their left change width.
-                        let corner = egui::pos2(ui.max_rect().right(), ui.max_rect().top());
-                        let hint = match &state.hotkey {
-                            Some(spec) => format!("收起面板（{spec}）"),
-                            None => "收起面板".to_owned(),
-                        };
-                        let close = corner_icon_button(
-                            ui,
-                            icons::Icon::Close,
-                            &hint,
-                            false,
-                            corner,
-                        );
-                        occupied.push(close.rect);
-                        // `Esc` closes the panel — unless the settings row is listening for a chord,
-                        // in which case the row's own handler is what should see it. Otherwise
-                        // recording a shortcut that begins with Escape would put the panel away.
-                        let escape = !state.recording
-                            && ui.input(|input| input.key_pressed(egui::Key::Escape));
-                        if close.clicked() || escape {
-                            *action = Some(Action::Hide);
-                        }
-                        // The settings, next to the way out: both are about the panel rather than
-                        // about the conversation, and the design puts them together at this end.
-                        // It stays lit while the page is open, which is how the user can tell that
-                        // they are on it — the design's `aria-pressed`.
-                        let gear = corner_icon_button(
-                            ui,
-                            icons::Icon::GearSix,
-                            "悬浮窗设置",
-                            state.settings_open,
-                            corner,
-                        );
-                        occupied.push(gear.rect);
-                        if gear.clicked() {
-                            *action = Some(if state.settings_open {
-                                Action::CloseSettings
-                            } else {
-                                Action::OpenSettings
-                            });
-                        }
-                    });
-                    occupied
-                })
-                // The occupied rects travel out through the frames that drew them, because
-                // the drag handle is computed from them below.
-                .inner
-            })
-            .inner
+    let bar = egui::Frame::NONE.inner_margin(theme::PAD_TOP).show(ui, |ui| {
+        ui.style_mut().interaction.selectable_labels = false;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), theme::ICON_BUTTON), egui::Sense::hover());
+        let close_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.right() - theme::ICON_BUTTON, rect.top()), egui::Vec2::splat(theme::ICON_BUTTON));
+        let gear_rect = close_rect.translate(egui::vec2(-theme::ICON_BUTTON - theme::GAP_CLOSE, 0.0));
+        let content = egui::Rect::from_min_max(rect.min, egui::pos2(gear_rect.left() - theme::GAP_TOP, rect.bottom()));
+        let mut occupied = vec![close_rect, gear_rect];
+        ui.scope_builder(egui::UiBuilder::new().max_rect(content).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+            ui.spacing_mut().item_spacing.x = theme::GAP_CLOSE;
+            ui.label(egui::RichText::new("DeepSeek")
+                .font(theme::font(ui.ctx(), theme::Weight::Medium, theme::TEXT_BRAND))
+                .extra_letter_spacing(theme::BRAND_LETTER_SPACING).color(text()));
+            ui.add_space(theme::GAP_TOP - theme::GAP_CLOSE);
+            let room = ui.available_rect_before_wrap();
+            let workspace_room = egui::Rect::from_min_size(room.min, egui::vec2((room.width() - theme::GAP_TOP) / 2.0, rect.height()));
+            let workspace = ui.scope_builder(egui::UiBuilder::new().max_rect(workspace_room)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| picker::workspaces(ui, state)).inner;
+            if workspace.action.is_some() { *action = workspace.action; }
+            occupied.push(workspace.button);
+            ui.label(egui::RichText::new("/").size(theme::TEXT_META).color(theme::line()));
+            let conversation = picker::conversations(ui, state);
+            if conversation.action.is_some() { *action = conversation.action; }
+            occupied.push(conversation.button);
         });
+        let hint = state.hotkey.as_ref().map_or_else(|| "收起面板".to_owned(), |spec| format!("收起面板（{spec}）"));
+        let close = ui.interact(close_rect, ui.id().with("close"), egui::Sense::click());
+        paint_icon_button(ui, close_rect, icons::Icon::Close, &hint, false, &close);
+        if close.clicked() || (!state.recording && ui.input(|input| input.key_pressed(egui::Key::Escape))) {
+            *action = Some(Action::Hide);
+        }
+        let gear = ui.interact(gear_rect, ui.id().with("settings"), egui::Sense::click());
+        paint_icon_button(ui, gear_rect, icons::Icon::GearSix, "悬浮窗设置", state.settings_open, &gear);
+        if gear.clicked() { *action = Some(if state.settings_open { Action::CloseSettings } else { Action::OpenSettings }); }
+        occupied
+    });
     let occupied = bar.inner;
     // The bar is the window's drag handle — an undecorated window has no title bar — but it
     // is also where the controls live, and a handle registered over a button swallows the
@@ -531,40 +483,6 @@ pub(super) fn icon_button(
     paint_icon_button(ui, rect, icon, tooltip, false, &response)
 }
 
-/// The same button, placed against a known corner and able to stay lit.
-///
-/// The top bar's two controls sit at the panel's own top-right corner, and the design's rectangle
-/// for them is that corner inset by the bar's padding. Measuring from the corner rather than from
-/// wherever the layout cursor happens to be is what makes the button's position a fact a test can
-/// compute — and what keeps it in place when the pickers to its left change width, which is the
-/// reason the row is laid out right-to-left at all.
-///
-/// @param ui - where to draw.
-/// @param icon - which picture.
-/// @param tooltip - what it does, shown on hover.
-/// @param lit - whether to report "this control's view is open" by staying highlighted.
-/// @param corner - the panel's own top-right corner.
-/// @returns the response, so the caller can act on a click.
-pub(super) fn corner_icon_button(
-    ui: &mut egui::Ui,
-    icon: icons::Icon,
-    tooltip: &str,
-    lit: bool,
-    corner: egui::Pos2,
-) -> egui::Response {
-    let size = egui::vec2(theme::ICON_BUTTON, theme::ICON_BUTTON);
-    let rect = egui::Rect::from_min_size(
-        egui::pos2(
-            corner.x - f32::from(theme::PAD_TOP.right) - size.x,
-            corner.y + f32::from(theme::PAD_TOP.top),
-        ),
-        size,
-    );
-    let response =
-        ui.interact(rect, ui.id().with((icon.name(), "top-bar")), egui::Sense::click());
-    paint_icon_button(ui, rect, icon, tooltip, lit, &response)
-}
-
 /// What both of the above draw: the surface, the glyph, and the hint.
 ///
 /// @param ui - where to draw.
@@ -591,7 +509,7 @@ fn paint_icon_button(
             theme::soft(),
         );
     }
-    let colour = if lit { theme::accent() } else { ui.style().interact(response).fg_stroke.color };
+    let colour = if lit { theme::accent() } else { theme::muted() };
     // The icon family, not the text one: a private-use codepoint laid out in a text font is
     // a tofu box, which is exactly what the first look at this panel showed.
     icons::paint(ui, rect.center(), icon, theme::ICON, colour);

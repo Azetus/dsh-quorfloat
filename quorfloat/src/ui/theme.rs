@@ -569,6 +569,20 @@ pub const FOOTER_INFO_HEIGHT: f32 = 20.0;
 
 /// Gap between the parts of a row (`gap:14px` in the top bar, `gap:10px` in the footer).
 pub const GAP: f32 = 10.0;
+/// Header brand/context gap from `.q-top`.
+pub const GAP_TOP: f32 = 14.0;
+/// Maximum context label control width; its real budget may be smaller.
+pub const PICKER_MAX_WIDTH: f32 = 220.0;
+/// Menu dimensions from `.q-config-menu` and `.q-config-row`.
+pub const CONFIG_MENU_WIDTH: f32 = 250.0;
+pub const CONFIG_MENU_PAD: i8 = 4;
+pub const POPOVER_GAP: f32 = 7.0;
+pub const MENU_LINE_HEIGHT: f32 = 19.2;
+/// Menu header padding and option icon gap from the design.
+pub const MENU_HEAD_PADDING: egui::Margin = egui::Margin { left: 9, right: 9, top: 7, bottom: 8 };
+/// Space between a menu icon and its label.
+pub const MENU_ICON_GAP: f32 = 8.0;
+pub const MENU_DETAIL_HEIGHT: f32 = 17.6;
 
 /// A tighter gap, for icons against their labels (`gap:6px`).
 /// The horizontal padding of the card section: the composer's, because a card is about what the
