@@ -3611,13 +3611,45 @@ mod tests {
     }
 
     #[test]
-    fn a_notice_names_its_event_kind() {
-        // The label is where an unrecognised event announces itself.
-        let notice = crate::app::session::transcript::Entry::Notice {
-            kind: "something/new".to_owned(),
-            text: "新的东西".to_owned(),
-        };
-        assert_eq!(speaker(&notice), "事件 · something/new");
+    fn an_approvals_own_events_leave_no_line_on_screen() {
+        // What the panel used to draw, in the middle of a conversation: `事件 · approval/asked` /
+        // `write 请求提权`, then `事件 · approval/decided` / `提权请求：rejected` — plus a line for every
+        // kind this build had never seen. The card is where an approval is answered, and once it is
+        // answered there is nothing left to read: the tool result carries the consequence. So the
+        // events are counted (and, for unknown kinds, named) in the marker and drawn nowhere.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        deliver(&session, &recorded, snapshot_with(serde_json::json!([
+            {"type": "event", "event": {"type": "user/message", "seq": 0, "time": 1,
+             "data": {"role": "user", "content": [{"type": "text", "text": "在工作区下面创建一个 test.md"}]}}},
+            {"type": "event", "event": {"type": "turn/start", "seq": 1, "time": 2, "data": {"turn": 1}}},
+            {"type": "event", "event": {"type": "approval/asked", "seq": 2, "time": 3,
+             "data": {"toolName": "write", "justification": "创建 test.md"}}},
+            {"type": "event", "event": {"type": "approval/decided", "seq": 3, "time": 4,
+             "data": {"outcome": "rejected"}}},
+            {"type": "event", "event": {"type": "something/new", "seq": 4, "time": 5,
+             "data": {"title": "新的东西"}}},
+            {"type": "event", "event": {"type": "assistant/message", "seq": 5, "time": 6,
+             "data": {"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "确认：文件没有被创建。"}]}}}},
+            {"type": "event", "event": {"type": "turn/end", "seq": 6, "time": 7,
+             "data": {"turn": 1, "reason": {"kind": "completed"}}}},
+        ])));
+
+        let size = egui::vec2(708.0, 620.0);
+        let all = painted(&drawn_text(&mut app, size));
+        assert!(all.contains("确认：文件没有被创建。"), "the answer is the conversation: {all}");
+        for hidden in [
+            "事件 ·", "approval", "请求提权", "提权请求", "新的东西", "something/new", "未识别",
+        ] {
+            assert!(!all.contains(hidden), "nothing draws {hidden:?}: {all}");
+        }
+        // And the event nobody understood is still on the record by name.
+        let marks = recorded.marks();
+        assert!(
+            marks.iter().any(|mark| mark.contains("something/new")),
+            "the unknown kind reaches the marker: {marks:?}",
+        );
     }
 
     /// The same app, plus the session, for tests that deliver host frames into it.

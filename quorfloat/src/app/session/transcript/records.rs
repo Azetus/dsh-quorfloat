@@ -83,15 +83,3 @@ pub(super) fn find_call_id(data: &Value) -> Option<String> {
         .find_map(|block| block.get("id").and_then(Value::as_str))
         .map(str::to_owned)
 }
-
-/// A short description of an unrecognised event, so its line says more than its name.
-pub(super) fn summarize(data: &Value) -> String {
-    for key in ["title", "text", "message", "reason", "id", "name"] {
-        if let Some(value) = data.get(key) {
-            if let Some(text) = value.as_str() {
-                return text.chars().take(120).collect();
-            }
-        }
-    }
-    String::new()
-}

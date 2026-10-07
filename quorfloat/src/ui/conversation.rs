@@ -159,11 +159,6 @@ fn turn_ui(
     if let Some(question) = split.question {
         entry_ui(ui, question, markdown);
     }
-    // What the harness said during this turn is not the model's working and is not folded: a resync
-    // or an approval decision is something to act on.
-    for entry in &split.loose {
-        entry_ui(ui, entry, markdown);
-    }
     // The answer in flight is a line of the working as far as its thinking goes: it has no line of
     // the turn yet, and while the model thinks it is the only thing happening.
     let mut held = split.held;
@@ -210,9 +205,8 @@ struct TurnSplit<'a> {
     /// The user's question — the turn's first line, always drawn and never folded: it is the
     /// signpost that makes a long conversation scannable.
     question: Option<&'a Entry>,
-    /// What the harness told the user during the turn. Drawn outside the disclosure.
-    loose: Vec<&'a Entry>,
-    /// The model's working, in the order it happened. Empty when there is nothing to disclose.
+    /// Everything the model produced except its final answer, in the order it happened. Empty when
+    /// the turn produced nothing but its answer.
     held: Vec<Held<'a>>,
     /// The answer — everything from the answer line on.
     answer: Vec<&'a Entry>,
@@ -235,18 +229,11 @@ fn split_turn(turn: &[Entry]) -> TurnSplit<'_> {
     let from = if question.is_some() { 1 } else { 0 };
     let answer_at = answer_index(turn);
     let answer_from = answer_at.unwrap_or(turn.len());
-    let mut loose = Vec::new();
-    let mut held = Vec::new();
-    // Every line between the question and the answer is drawn exactly once: the harness's own lines
-    // outside the disclosure, the model's working inside it. Letting either side drop a line is how a
-    // notice about the session disappears behind `已完成`.
-    for entry in &turn[from..answer_from] {
-        if is_process_line(entry) {
-            held.push(Held::Working(entry));
-        } else {
-            loose.push(entry);
-        }
-    }
+    // **Everything between the question and the answer is held.** There is no third case to weigh up:
+    // a group runs from its question to the next one (`next_turn_start`), so the only lines it can
+    // contain are the model's own — its reasoning, its tool calls, their results, its narration. The
+    // one line that is drawn outside is the answer, and that is decided by `answer_index`.
+    let mut held: Vec<Held<'_>> = turn[from..answer_from].iter().map(Held::Working).collect();
     // The answering message's own reasoning is part of the working, and it goes last: it is the last
     // thing the model thought before it answered. Holding the line *whole* would put the answer inside
     // the fold as well, and folding the answer's reasoning separately — which is what this panel used
@@ -257,21 +244,7 @@ fn split_turn(turn: &[Entry]) -> TurnSplit<'_> {
             held.push(Held::Reasoning(&turn[at]));
         }
     }
-    TurnSplit { question, loose, held, answer: turn[answer_from..].iter().collect() }
-}
-
-/// Whether a line is part of the model working rather than something the user wrote or needs.
-///
-/// @param entry - the line.
-/// @returns whether it belongs inside the process fold.
-fn is_process_line(entry: &Entry) -> bool {
-    match entry {
-        Entry::Assistant { blocks, .. } => !blocks.is_empty(),
-        Entry::Tool { .. } | Entry::System { .. } => true,
-        // A question, a notice about the harness, and an approval decision are the user's business,
-        // not the model's working: they stay outside the fold.
-        Entry::User { .. } | Entry::Notice { .. } => false,
-    }
+    TurnSplit { question, held, answer: turn[answer_from..].iter().collect() }
 }
 
 /// Whether a line carries reasoning of its own.
@@ -653,10 +626,6 @@ pub(super) fn entry_ui(
             speaker_line(ui, entry);
             wrapped(ui, theme::meta(ui.ctx(), text));
         }
-        Entry::Notice { text, .. } => {
-            speaker_line(ui, entry);
-            wrapped(ui, theme::meta(ui.ctx(), text));
-        }
     }
 }
 
@@ -740,9 +709,6 @@ pub(crate) fn speaker(entry: &crate::app::session::transcript::Entry) -> String 
             name.as_ref().map_or_else(|| "工具".to_owned(), |name| format!("工具 · {name}"))
         }
         Entry::System { .. } => "系统".to_owned(),
-        // The kind is in the label rather than only in the text: an unrecognised event
-        // is exactly the case where the reader needs to know what it was called.
-        Entry::Notice { kind, .. } => format!("事件 · {kind}"),
     }
 }
 
@@ -800,7 +766,6 @@ mod tests {
         let split = split_turn(turn);
         let mut indexes: Vec<usize> = Vec::new();
         indexes.extend(split.question.map(|entry| position(turn, entry)));
-        indexes.extend(split.loose.iter().map(|entry| position(turn, entry)));
         indexes.extend(split.held.iter().map(|row| match row {
             Held::Working(entry) | Held::Reasoning(entry) => position(turn, entry),
         }));
@@ -899,27 +864,6 @@ mod tests {
     }
 
     #[test]
-    fn notices_are_not_part_of_the_working() {
-        // A notice is about the harness, not about what the model did — the user may need to act on it,
-        // and folding it away would hide a session resync behind "已完成". A turn that *did* work is
-        // the case that matters: with a tool call beside it, the old split dropped the notice instead
-        // of disclosing it.
-        let turn = vec![
-            question("看看"),
-            Entry::Notice { kind: "session/resync".to_owned(), text: "内容不完整".to_owned() },
-            assistant(vec![reasoning("重新读一遍"), call("bash")]),
-            tool("README.md"),
-            assistant(vec![prose("看完了。")]),
-        ];
-        let split = split_turn(&turn);
-        assert_eq!(split.loose, vec![&turn[1]], "the notice stays outside the fold");
-        assert!(
-            !split.held.iter().any(|row| matches!(row, Held::Working(entry) if std::ptr::eq(*entry, &turn[1]))),
-            "and is not inside it: {split:?}",
-        );
-    }
-
-    #[test]
     fn every_line_of_a_turn_is_drawn_exactly_once() {
         // The invariant behind a line that vanished into a fold: whatever a turn is made of, each of
         // its lines is named by some part of the split. The one line that may be named twice is the
@@ -927,28 +871,28 @@ mod tests {
         // the part that is not the answer and the part that is, not a duplicate.
         let turn = vec![
             question("看看"),
-            Entry::Notice { kind: "approval/asked".to_owned(), text: "bash 请求提权".to_owned() },
             assistant(vec![reasoning("先看一眼"), call("bash")]),
             tool("README.md src"),
-            Entry::Notice { kind: "approval/decided".to_owned(), text: "提权请求：rejected".to_owned() },
             assistant(vec![reasoning("记下来了"), prose("这个仓库只有 README 和 src。")]),
         ];
         assert_eq!(
             named(&turn),
-            vec![0, 1, 2, 3, 4, 5, 5],
+            vec![0, 1, 2, 3, 3],
             "every line once, and the answer twice — held for its thinking, answered for its reply",
         );
     }
 
     #[test]
     fn a_group_before_the_first_question_is_drawn_once() {
-        // A transcript can open with the harness talking before the user does: a resync notice, an
-        // approval decision. That group has no question, and it is still drawn exactly once — the
-        // version before this one drew its first line a second time in the question's place.
-        let turn = vec![Entry::Notice { kind: "session/resync".to_owned(), text: "内容不完整".to_owned() }];
+        // A transcript can open with the model already talking: the buffer keeps the newest lines, so
+        // a long conversation loses its first question. That group has no question, and it is still
+        // drawn exactly once — the version before this one drew such a line a second time in the
+        // question's place.
+        let turn = vec![assistant(vec![reasoning("接着上次继续"), call("bash")])];
         let split = split_turn(&turn);
         assert_eq!(split.question, None, "there is no question in this group");
-        assert_eq!(split.loose, vec![&turn[0]], "and the line is loose");
+        assert_eq!(split.held, vec![Held::Working(&turn[0])], "its working is held");
+        assert!(split.answer.is_empty(), "and it has answered nothing yet");
         assert_eq!(named(&turn), vec![0], "named once, not twice");
     }
 }

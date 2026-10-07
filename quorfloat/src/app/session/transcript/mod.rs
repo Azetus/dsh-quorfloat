@@ -8,9 +8,11 @@
 //!   would call conversation become entries. The ones that describe the machinery
 //!   (`step/start`, `request/header`, …) are skipped, and the count is reported, because
 //!   "we hid 40 events" is a very different statement from "nothing arrived".
-//! - **An unknown kind becomes a visible line.** It is never dropped. A renderer that
-//!   silently ignores what it does not recognise turns a harness upgrade into messages
-//!   that are missing with no way to tell.
+//! - **Nothing but the conversation is drawn, and nothing is lost by it.** An unknown
+//!   kind gets no line (the reader asked for a conversation window, not an event log —
+//!   2026-10-07), but it is *counted by kind and named in the marker*, so a harness
+//!   upgrade still cannot look like silence: `transcript skipped: … 2 unrecognised
+//!   (something/new, other/thing)`.
 //!
 //! Everything here is fed from frames that can arrive twice, out of order, from a
 //! previous subscription, or not at all. The bookkeeping that makes that safe — `seq`
@@ -25,7 +27,7 @@ use serde_json::Value;
 mod records;
 mod stream;
 
-use self::records::{content_blocks, find_call_id, message_text, summarize};
+use self::records::{content_blocks, find_call_id, message_text};
 use self::stream::Live;
 
 /// How many entries are kept. A floating panel is not an archive: past this, the oldest
@@ -81,14 +83,6 @@ pub enum Entry {
         /// Line text.
         text: String,
     },
-    /// Something this build does not render in detail — including kinds it has never
-    /// heard of. Visible on purpose.
-    Notice {
-        /// The event kind, so the line can be acted on rather than puzzled over.
-        kind: String,
-        /// A short human description.
-        text: String,
-    },
 }
 
 /// The conversation as it stands, built only from frames the host sent.
@@ -131,6 +125,9 @@ pub struct Transcript {
     /// not have.
     injected: std::collections::BTreeSet<String>,
     unknown: usize,
+    /// The kinds behind `unknown`, so hiding them from the panel does not hide them from
+    /// whoever has to explain a harness upgrade.
+    unknown_kinds: std::collections::BTreeSet<String>,
 }
 
 impl Transcript {
@@ -228,6 +225,7 @@ impl Transcript {
             stale: self.stale,
             internal: self.internal,
             unknown: self.unknown,
+            unknown_kinds: self.unknown_kinds.iter().cloned().collect(),
             dropped: self.dropped,
         }
     }
@@ -328,9 +326,10 @@ impl Transcript {
     /// Fold in a `session/resync`: the host lost the thread.
     ///
     /// Whatever is on screen is now known-incomplete, and this module cannot repair it
-    /// by itself — the answer is a fresh subscription. What it *can* do is say so, both
-    /// to the caller (which re-attaches) and to the transcript, so the gap is visible
-    /// rather than inferred from a conversation that quietly skips a turn.
+    /// by itself — the answer is a fresh subscription. What it *can* do is say so to the
+    /// caller, which re-attaches **and puts the gap on the marker**: the panel draws no
+    /// line for it any more (2026-10-07), so the record is where "the history skipped a
+    /// turn" has to live.
     ///
     /// @param params - the notification parameters.
     /// @returns the reason string, for the caller's log line.
@@ -342,11 +341,8 @@ impl Transcript {
             (Some(expected), Some(received)) => format!("{reason} (expected {expected}, received {received})"),
             _ => reason.to_owned(),
         };
-        Arc::make_mut(&mut self.entries).push(Entry::Notice {
-            kind: "session/resync".to_owned(),
-            text: format!("会话回执不连续，重新订阅中：{detail}"),
-        });
-        self.cap();
+        // Counted rather than drawn: it is one of the background events the panel hides.
+        self.internal += 1;
         Some(detail)
     }
 
@@ -420,17 +416,6 @@ impl Transcript {
                     self.title = Some(title.to_owned());
                 }
             }
-            "approval/asked" => {
-                let tool = data.get("toolName").and_then(Value::as_str).unwrap_or("unknown");
-                self.push(Entry::Notice {
-                    kind: kind.to_owned(),
-                    text: format!("{tool} 请求提权"),
-                });
-            }
-            "approval/decided" => {
-                let outcome = data.get("outcome").and_then(Value::as_str).unwrap_or("unknown");
-                self.push(Entry::Notice { kind: kind.to_owned(), text: format!("提权请求：{outcome}") });
-            }
             // A turn boundary is state rather than a line: the composer reads it, and a
             // rule drawn between every turn would be noise in a panel this short.
             "turn/start" => self.turn_active = true,
@@ -445,7 +430,12 @@ impl Transcript {
             // is how this was found — it is the same kind of fact as `permission/preset` (a durable
             // note about the session, not a line of the conversation), and it was reaching the
             // transcript as `事件 · model/selection / 未识别的事件` every time the model changed.
-            "step/start" | "step/end" | "command/run" | "command/done" | "workspace/changes"
+            // The approval log is the same kind of fact: the *card* is where a user answers, and
+            // once it is answered there is nothing to read — the tool result that follows carries
+            // the consequence. Drawing "请求提权 / 提权请求：rejected" put two lines of event log in
+            // the middle of a conversation (see `docs/progress.md` §4).
+            "approval/asked" | "approval/decided"
+            | "step/start" | "step/end" | "command/run" | "command/done" | "workspace/changes"
             | "session/end-seed" | "permission/preset" | "sandbox/mode" | "approval/policy" | "agent/inbox/spliced"
             | "request/header" | "request/context" | "session/title-llm-request"
             | "model/selection" | "assistant/attempt" | "llm/retry" | "llm/retry-started"
@@ -460,18 +450,16 @@ impl Transcript {
             | "web/deepseek-search-llm-request" => {
                 self.internal += 1;
             }
-            // A generation step named in `data`, or something this build has never seen.
+            // A kind this build has never seen. **Counted and named, never drawn**: the panel is a
+            // conversation window, and the marker is where "the harness sent something we do not
+            // understand" is answered (`docs/AGENT.md` §4.4).
             other => {
                 if other.starts_with("session-log-") {
                     self.internal += 1;
                     return;
                 }
                 self.unknown += 1;
-                let hint = summarize(data);
-                self.push(Entry::Notice {
-                    kind: other.to_owned(),
-                    text: if hint.is_empty() { "未识别的事件".to_owned() } else { hint },
-                });
+                self.unknown_kinds.insert(other.to_owned());
             }
         }
     }
@@ -576,7 +564,6 @@ fn bounded(entry: Entry) -> Entry {
     match entry {
         Entry::User { text } => Entry::User { text: clip(text) },
         Entry::System { text } => Entry::System { text: clip(text) },
-        Entry::Notice { kind, text } => Entry::Notice { kind, text: clip(text) },
         Entry::Tool { name, text, is_error } => Entry::Tool { name, text: clip(text), is_error },
         Entry::Assistant { blocks, streaming } => Entry::Assistant {
             blocks: blocks
@@ -632,7 +619,7 @@ fn from_the_user(data: &Value, seen: &mut std::collections::BTreeSet<String>) ->
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Skipped {
     /// Records at or below the cursor.
     pub duplicates: usize,
@@ -640,8 +627,10 @@ pub struct Skipped {
     pub stale: usize,
     /// Machinery this build does not draw.
     pub internal: usize,
-    /// Kinds this build does not recognise — drawn, but counted.
+    /// Kinds this build does not recognise — counted, and named in `unknown_kinds`.
     pub unknown: usize,
+    /// Those kinds by name, so the line says *what* arrived rather than only how much.
+    pub unknown_kinds: Vec<String>,
     /// Entries dropped to stay within the buffer limit.
     pub dropped: usize,
 }
@@ -670,7 +659,11 @@ impl Skipped {
             parts.push(format!("{} internal", self.internal));
         }
         if self.unknown > 0 {
-            parts.push(format!("{} unrecognised", self.unknown));
+            parts.push(if self.unknown_kinds.is_empty() {
+                format!("{} unrecognised", self.unknown)
+            } else {
+                format!("{} unrecognised ({})", self.unknown, self.unknown_kinds.join(", "))
+            });
         }
         if self.dropped > 0 {
             parts.push(format!("{} dropped", self.dropped));
@@ -898,19 +891,22 @@ mod tests {
     }
 
     #[test]
-    fn an_unrecognised_kind_is_visible_and_named() {
-        // The rule that matters most: a harness upgrade must not look like silence.
+    fn an_unrecognised_kind_is_named_in_the_log_rather_than_drawn() {
+        // The rule that matters most: a harness upgrade must not look like silence. Since 2026-10-07
+        // the answer lives in the marker instead of the thread — the panel is a conversation window,
+        // and "we do not understand `something/new`" is a fact for whoever reads the log, not a line
+        // for whoever is reading an answer.
         let mut transcript = Transcript::new();
         transcript.apply_snapshot(&snapshot(
             vec![record(0, "something/new", json!({"title": "新的东西"}))],
             0,
             1,
         ));
-        assert_eq!(
-            transcript.entries(),
-            &[Entry::Notice { kind: "something/new".to_owned(), text: "新的东西".to_owned() }],
-        );
-        assert_eq!(transcript.skipped().unknown, 1);
+        assert!(transcript.entries().is_empty(), "nothing is drawn: {:?}", transcript.entries());
+        let skipped = transcript.skipped();
+        assert_eq!(skipped.unknown, 1);
+        let described = skipped.describe().expect("a line for the log");
+        assert!(described.contains("something/new"), "and it names the kind: {described}");
     }
 
     #[test]
@@ -1196,15 +1192,16 @@ mod tests {
     }
 
     #[test]
-    fn a_resync_is_visible_in_the_transcript() {
+    fn a_resync_is_recorded_without_a_line_in_the_conversation() {
         let mut transcript = Transcript::new();
         transcript.apply_snapshot(&snapshot(vec![], 5, 1));
         let detail = transcript.apply_resync(&json!({"sessionId": "session-1", "generation": 1,
             "reason": "sequence-gap", "expected": 6, "received": 9}));
         assert_eq!(detail.as_deref(), Some("sequence-gap (expected 6, received 9)"));
-        let Entry::Notice { kind, text } = &transcript.entries()[0] else { panic!("notice") };
-        assert_eq!(kind, "session/resync");
-        assert!(text.contains("expected 6"), "{text}");
+        // The repair is automatic and the caller marks it; what the panel no longer does is write an
+        // event line about it into the conversation.
+        assert!(transcript.entries().is_empty(), "nothing is drawn: {:?}", transcript.entries());
+        assert_eq!(transcript.skipped().internal, 1, "and it is counted as set aside");
     }
 
     #[test]

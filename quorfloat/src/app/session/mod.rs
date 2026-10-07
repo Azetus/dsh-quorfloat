@@ -2109,7 +2109,8 @@ mod tests {
     #[test]
     fn a_reported_gap_is_recorded_and_repaired_by_re_subscribing() {
         // A resync that only wrote a log line would leave the panel showing a
-        // conversation with a hole in it and no way to tell.
+        // conversation with a hole in it and no way to tell. (What has changed since 2026-10-07 is
+        // where "there was a hole" is legible: the marker, not the thread.)
         let mut session = Session::new(identity());
         let mut sink = RecordingSink::default();
         let mut source = ScriptedSource::new(vec![
@@ -2130,10 +2131,17 @@ mod tests {
             "and it is on the record: {:?}",
             sink.marks,
         );
-        assert!(session.transcript().entries().iter().any(|entry| matches!(
-            entry,
-            crate::app::session::transcript::Entry::Notice { kind, .. } if kind == "session/resync"
-        )));
+        // The conversation is exactly what the snapshot carried: the gap added no line to it.
+        assert_eq!(
+            session.transcript().entries().len(),
+            2,
+            "and the conversation keeps no line for it: {:?}",
+            session.transcript().entries(),
+        );
+        assert!(
+            !session.transcript().entries().iter().any(|entry| format!("{entry:?}").contains("重新订阅")),
+            "nor anything that reads like one",
+        );
     }
 
     #[test]
