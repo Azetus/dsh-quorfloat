@@ -178,13 +178,18 @@ fn back(ui: &mut egui::Ui, kind: Kind) {
 ///
 /// **Nothing is invented**: a group whose figures were not reported is left out entirely rather
 /// than drawn with a placeholder, because a dash where a number belongs reads as "zero".
-fn stat_items(stats: Stats) -> Vec<(Icon, String)> {
+fn stat_items(stats: Stats) -> Vec<StatItem> {
     // Rounds, steps, and the generation speed when it was measured.
     let mut counts = format!("{} 轮 {} 步", stats.turns, stats.steps);
     if let Some(speed) = stats.tokens_per_second {
         counts += &format!(" · {} tok/s", format_speed(speed));
     }
-    let mut items = vec![(Icon::Gauge, counts)];
+    let mut items = vec![StatItem {
+        icon: Some(Icon::Gauge),
+        ring: None,
+        tooltip: "会话轮数、执行步数与生成速度".to_owned(),
+        label: counts,
+    }];
 
     // Cumulative tokens and the cache-hit share, which belong together.
     let mut tokens = Vec::new();
@@ -195,13 +200,29 @@ fn stat_items(stats: Stats) -> Vec<(Icon, String)> {
         tokens.push(format!("缓存命中 {}", format_percent(percent)));
     }
     if !tokens.is_empty() {
-        items.push((Icon::Database, tokens.join(" · ")));
+        items.push(StatItem {
+            icon: Some(Icon::Database),
+            ring: None,
+            tooltip: "累计消耗 Token 与缓存命中率".to_owned(),
+            label: tokens.join(" · "),
+        });
     }
 
-    // Context occupancy, as a bare percentage: the icon already says what it measures, and the
-    // design's own element is `<span id="q-stat-context-value">0%</span>` with no words at all.
+    // Context occupancy: **a ring, not the design's pie glyph**. The upstream Harness draws this one
+    // measurement as a filled ring (`ContextMeter.tsx`), so a static pie here would be the only place
+    // in either UI where the same number has two different pictures. The reading keeps the design's
+    // bare percentage — the ring already says what it measures.
     if let Some(percent) = context_percent(&stats) {
-        items.push((Icon::ChartPie, format_percent(percent)));
+        let detail = match (stats.context_tokens, stats.context_limit) {
+            (Some(used), Some(limit)) => format!("当前上下文已用 {used} / {limit} token"),
+            _ => "当前上下文使用百分比".to_owned(),
+        };
+        items.push(StatItem {
+            icon: None,
+            ring: Some(Ring { percent }),
+            tooltip: detail,
+            label: format_percent(percent),
+        });
     }
     items
 }
@@ -276,29 +297,165 @@ fn format_speed(speed: f64) -> String {
     }
 }
 
+/// The context-occupancy ring: its diameter, and the width of its stroke.
+///
+/// Both are the upstream meter's own numbers (`ContextMeter.tsx`: a 14px viewBox with a 2px stroke,
+/// radius 5.5). Kept in step with it on purpose, because the panel shows the same measurement as the
+/// Harness's own footer and two rings of different weights read as two different meters.
+const RING_DIAMETER: f32 = theme::ICON_STAT;
+/// The ring's nominal radius: where the *fill's* centre line sits, and half way through the track.
+const RING_RADIUS: f32 = (RING_DIAMETER - RING_STROKE) / 2.0;
+const RING_STROKE: f32 = 2.0;
+
+/// An arc through this many steps. A polyline is how the ring gets drawn — epaint 0.36 has no arc
+/// or ring shape (only circle, ellipse and path) — and 24 steps put each segment well under a pixel
+/// at this radius, so the result is smooth without being wasteful.
+pub(crate) const RING_STEPS: usize = 24;
+
+/// The context-occupancy ring: a track, a share of it filled, and nothing else.
+///
+/// This is the design's `ContextMeter` in egui's vocabulary. The upstream draws it as an SVG circle
+/// whose `strokeDasharray` is `circumference * percent / 100`, rotated -90° so it starts at twelve
+/// o'clock; the egui equivalent is a stroked circle plus a polyline along the same arc. The one thing
+/// SVG has here that epaint 0.36 does not is `stroke-linecap: round` — the arc ends flat, which at a
+/// 2px stroke on a 13px ring is not something an eye can find.
+struct Ring {
+    /// The share filled, 0–100.
+    percent: f64,
+}
+
+/// The radius each stroke is handed, in the panel's own terms.
+///
+/// The two differ by half a stroke width **on purpose**: `tessellate_circle` strokes a circle
+/// entirely outside its radius (`.outside()`), while `Shape::line` centres the stroke on its path. So
+/// the radius that puts the track's band where the fill's band is, is not the fill's radius. Computing
+/// both here rather than inline in [`Ring::draw`] is what lets a test check the relationship instead
+/// of restating it.
+///
+/// @returns `(track, fill)`, the radius for each stroke.
+fn band_radii() -> (f32, f32) {
+    (RING_RADIUS - RING_STROKE / 2.0, RING_RADIUS)
+}
+
+impl Ring {
+    /// The arc's points, for the painter — or `None` when the share is zero.
+    ///
+    /// Split out from the drawing so it can be asserted: a ring that draws nothing at 0% and a full
+    /// circle at 100% is the whole contract, and "it looked round in the screenshot" cannot check it.
+    ///
+    /// @param center - the ring's centre.
+    /// @param radius - its radius.
+    /// @returns the points along the arc, or `None` when there is no arc to draw.
+    fn arc_points(&self, center: egui::Pos2, radius: f32) -> Option<Vec<egui::Pos2>> {
+        let share = (self.percent / 100.0).clamp(0.0, 1.0) as f32;
+        if share <= 0.0 {
+            // Zero is a real reading (an empty context) and it must not draw a mark: a dot at
+            // twelve o'clock reads as "a little bit used", which is the opposite of the truth.
+            return None;
+        }
+        // A full ring is a closed circle rather than a polyline: the last point would otherwise land
+        // exactly on the first and the seam shows as a notch.
+        let steps = ((RING_STEPS as f32 * share).ceil() as usize).max(2);
+        let sweep = std::f32::consts::TAU * share;
+        Some(
+            (0..=steps)
+                .map(|step| {
+                    // Start at twelve o'clock and go clockwise, as the upstream's `rotate(-90)`.
+                    let angle = -std::f32::consts::FRAC_PI_2 + sweep * step as f32 / steps as f32;
+                    center + egui::vec2(angle.cos(), angle.sin()) * radius
+                })
+                .collect(),
+        )
+    }
+
+    /// Draw it.
+    ///
+    /// @param ui - where to draw.
+    /// @param center - the ring's centre.
+    fn draw(&self, ui: &egui::Ui, center: egui::Pos2) {
+        // **The two strokes do not take the same radius, and that is the whole trick.**
+        //
+        // `tessellate_circle` converts a circle's stroke with `.outside()` — a stroked circle is drawn
+        // entirely *outside* its radius, spanning `r .. r + width` — while `Shape::line` centres the
+        // stroke on the path, spanning `r - width/2 .. r + width/2`. Passing one number to both
+        // therefore puts the fill half a stroke width inside the track, which at 13px reads as the
+        // bright arc bulging out of the faint ring (reported from a screenshot, and it was right).
+        //
+        // So each is given the radius that puts its *band* in the same place: the track starts half a
+        // stroke width in, the fill sits on the nominal circle.
+        let (track_radius, fill_radius) = band_radii();
+        // The track: the same hairline the panel's borders use, so it reads as a groove rather than
+        // as a second figure beside the fill.
+        ui.painter().circle_stroke(
+            center,
+            track_radius,
+            egui::Stroke::new(RING_STROKE, theme::line()),
+        );
+        // The fill: the muted text tone, which is the upstream's own choice
+        // (`--dsw-alias-label-tertiary`) and sits at the same weight as the figure beside it.
+        match self.arc_points(center, fill_radius) {
+            Some(points) => {
+                // `Shape::line`, **not** `closed_line`: closing the polyline adds a chord between its
+                // first and last points, so a 75% share draws a lens cutting across the ring's middle.
+                // Tried it, looked at it, reverted.
+                ui.painter().add(egui::Shape::line(
+                    points,
+                    egui::Stroke::new(RING_STROKE, theme::muted()),
+                ));
+            }
+            None => {
+                // Nothing used: an empty track. Said with a bare circle so the ring does not vanish
+                // when the figure happens to be zero.
+                ui.painter().circle_stroke(center, track_radius, egui::Stroke::new(RING_STROKE, theme::line()));
+            }
+        }
+    }
+}
+
+/// One item of the statistics group: a leading mark, a reading, and what to say on hover.
+struct StatItem {
+    /// The Phosphor icon, when the mark is an icon.
+    icon: Option<Icon>,
+    /// The occupancy ring, when the mark is a ring.
+    ring: Option<Ring>,
+    /// The reading.
+    label: String,
+    /// The hover text, which says what the reading measures.
+    tooltip: String,
+}
+
 /// A fixed right-aligned group: allocate first, then paint within its rectangle.
 pub(super) fn statistics(ui: &mut egui::Ui, stats: Option<Stats>) {
     let Some(stats) = stats else { return };
     let items = stat_items(stats);
     let font = theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_SMALL);
-    let widths: Vec<f32> = items.iter().map(|(_, text)| ui.painter().layout_no_wrap(text.clone(), font.clone(), theme::muted()).size().x
+    let widths: Vec<f32> = items.iter().map(|item| ui.painter().layout_no_wrap(item.label.clone(), font.clone(), theme::muted()).size().x
         + theme::ICON_STAT + theme::GAP_STAT_LABEL).collect();
     let natural = widths.iter().sum::<f32>() + theme::GAP_STATS * (items.len() - 1) as f32;
     let width = natural.min(ui.available_width());
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, theme::FOOTER_INFO_HEIGHT), egui::Sense::hover());
     let budget = (width - theme::GAP_STATS * (items.len() - 1) as f32) / items.len() as f32;
     let mut x = rect.left();
-    for ((icon, label), natural_width) in items.into_iter().zip(widths) {
+    for (item, natural_width) in items.into_iter().zip(widths) {
         let item_width = if natural > width { budget } else { natural_width };
-        crate::ui::icons::paint(ui, egui::pos2(x + theme::ICON_STAT / 2.0, rect.center().y), icon, theme::ICON_STAT, theme::muted());
-        let mut job = egui::text::LayoutJob::simple(label.clone(), font.clone(), theme::muted(),
+        // The mark occupies the same 13px slot either way, so a ring and an icon keep the group's
+        // rhythm — and so the readings stay on one baseline whether or not the ring is there.
+        let mark = egui::pos2(x + theme::ICON_STAT / 2.0, rect.center().y);
+        if let Some(ring) = &item.ring {
+            ring.draw(ui, mark);
+        } else if let Some(icon) = item.icon {
+            crate::ui::icons::paint(ui, mark, icon, theme::ICON_STAT, theme::muted());
+        }
+        let mut job = egui::text::LayoutJob::simple(item.label.clone(), font.clone(), theme::muted(),
             (item_width - theme::ICON_STAT - theme::GAP_STAT_LABEL).max(0.0));
         job.wrap.max_rows = 1;
         job.wrap.break_anywhere = true;
         let galley = ui.painter().layout_job(job);
         ui.painter().galley(egui::pos2(x + theme::ICON_STAT + theme::GAP_STAT_LABEL, rect.center().y - galley.size().y / 2.0), galley, theme::muted());
+        // The id comes from the label rather than the kind: a ring has no icon to be named by, and
+        // two items never carry the same reading.
         ui.interact(egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(item_width, rect.height())),
-            ui.id().with(icon.name()), egui::Sense::hover()).on_hover_text(label);
+            ui.id().with(&item.label), egui::Sense::hover()).on_hover_text(item.tooltip);
         x += item_width + theme::GAP_STATS;
     }
 }
@@ -516,4 +673,162 @@ fn menu_height(ui: &egui::Ui, anchor: egui::Rect) -> f32 {
     let padding = 2.0 * (theme::GAP_TIGHT + theme::BORDER);
     (anchor.top().min(ui.ctx().viewport_rect().bottom()) - f32::from(theme::SHADOW_ROOM_TOP)
         - theme::POPOVER_GAP - heading - padding).max(theme::MENU_LINE_HEIGHT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ring's centre, for geometry assertions.
+    fn centre() -> egui::Pos2 {
+        egui::pos2(100.0, 50.0)
+    }
+
+    #[test]
+    fn the_ring_starts_at_twelve_oclock_and_sweeps_clockwise() {
+        // The upstream meter draws its share with `strokeDasharray` on a circle rotated -90°, which
+        // starts the arc at twelve o'clock. Starting at three o'clock instead — the natural default
+        // for an angle of zero — would put the filled part in a different place from the Harness's
+        // own footer, for the same number.
+        let ring = Ring { percent: 25.0 };
+        let points = ring.arc_points(centre(), 5.5).expect("a quarter has an arc");
+        let radius = 5.5;
+        // The first point is straight up from the centre.
+        assert!((points[0].x - centre().x).abs() < 0.01, "starts at twelve: {:?}", points[0]);
+        assert!((points[0].y - (centre().y - radius)).abs() < 0.01, "and above the centre: {:?}", points[0]);
+        // A quarter turn clockwise lands at three o'clock, to the right.
+        let last = points[points.len() - 1];
+        assert!((last.x - (centre().x + radius)).abs() < 0.01, "ends at three: {last:?}");
+        assert!((last.y - centre().y).abs() < 0.01, "on the centre line: {last:?}");
+    }
+
+    #[test]
+    fn the_arc_lies_exactly_on_the_track() {
+        // The fill and the track are two different shapes — a `CircleShape` and a `PathShape` — built
+        // from two different stroke types, so "the same radius was passed to both" is not the same
+        // claim as "they are concentric". This asserts the second one: every point of the arc is on
+        // the circle the track draws, and the arc's ends are the track's own vertices.
+        //
+        // The fill is given the nominal radius and the track starts half a stroke width inside it,
+        // because `tessellate_circle` draws a circle's stroke *outside* its radius (`.outside()`) while
+        // `Shape::line` centres one on its path. This asserts the arc is where it is meant to be; the
+        // relationship between the two bands is checked by `the_two_strokes_are_banded_the_same`.
+        let centre = centre();
+        let radius = RING_RADIUS;
+        for percent in [1.0, 12.5, 25.0, 50.0, 75.0, 99.0, 100.0] {
+            let points = Ring { percent }.arc_points(centre, radius).expect("an arc");
+            for point in &points {
+                let distance = (*point - centre).length();
+                assert!(
+                    (distance - radius).abs() < 1e-4,
+                    "{percent}%: a point sits {distance} from the centre, not {radius}",
+                );
+            }
+            // Twelve o'clock is where the track's own top vertex is — the arc does not merely start
+            // "near the top", it starts on the circle.
+            let first = points[0];
+            assert!((first.x - centre.x).abs() < 1e-4, "{percent}%: starts off the vertical: {first:?}");
+            assert!((first.y - (centre.y - radius)).abs() < 1e-4, "{percent}%: starts below the top: {first:?}");
+        }
+        // And the radius both shapes are given is the same expression, so a change to either constant
+        // cannot move one without the other.
+        assert_eq!(radius, (RING_DIAMETER - RING_STROKE) / 2.0);
+    }
+
+    #[test]
+    fn the_two_strokes_are_banded_the_same() {
+        // The bug this exists for: both strokes were given `(13 - 2) / 2 = 5.5` and looked offset,
+        // because a stroked circle spans `r .. r + width` while a polyline spans
+        // `r - width/2 .. r + width/2`. The fill therefore sat half a stroke width *inside* the
+        // track, and at 13px that reads as the bright arc bulging out of the ring.
+        //
+        // The rule, not the pixels — and read from the same helper `draw` uses, so a change there
+        // cannot leave this test asserting a copy of the old arrangement (which is exactly what the
+        // first version did: it passed with the bug re-introduced, because it restated the formula
+        // instead of reading it).
+        let (track_radius, fill_radius) = band_radii();
+        // A circle's stroke spans `radius .. radius + width`; a polyline's spans
+        // `radius - width/2 .. radius + width/2`.
+        let track_band = (track_radius, track_radius + RING_STROKE);
+        let fill_band = (fill_radius - RING_STROKE / 2.0, fill_radius + RING_STROKE / 2.0);
+        assert!(
+            (track_band.0 - fill_band.0).abs() < f32::EPSILON
+                && (track_band.1 - fill_band.1).abs() < f32::EPSILON,
+            "the two strokes must occupy one band: track {track_band:?}, fill {fill_band:?}",
+        );
+        // And the ring fits the slot it was given, so it cannot push the row taller than the icons
+        // beside it. The bound is a radius rather than a diameter: 5.5 + 1 = 6.5 is the half-slot.
+        let half_slot = RING_DIAMETER / 2.0;
+        assert!(
+            track_band.1 <= half_slot + f32::EPSILON,
+            "the ring's outer edge {} must stay inside half the slot {half_slot}",
+            track_band.1,
+        );
+    }
+
+    #[test]
+    fn a_zero_share_draws_no_arc_at_all() {
+        // Zero is a real reading — an empty context — and a dot at twelve o'clock reads as "a little
+        // bit used", which is the opposite of the truth. So there is no arc to draw, only the track.
+        assert!(Ring { percent: 0.0 }.arc_points(centre(), 5.5).is_none());
+    }
+
+    #[test]
+    fn a_full_share_is_a_whole_ring_and_an_oversized_one_is_capped() {
+        // A prompt larger than the window is a real state, and "103% of a circle" is not a picture:
+        // the share is clamped, so the ring closes rather than overlapping itself.
+        for percent in [100.0, 103.0, 1_000.0] {
+            let points = Ring { percent }.arc_points(centre(), 5.5).expect("a full share has an arc");
+            let first = points[0];
+            let last = points[points.len() - 1];
+            assert!(
+                (first.x - last.x).abs() < 0.01 && (first.y - last.y).abs() < 0.01,
+                "{percent}% closes the ring: {first:?} vs {last:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn the_arc_resolution_follows_the_share() {
+        // Steps are spent where the arc is: a 1% share drawn with 24 segments would put every point
+        // within a fraction of a pixel of the next, and a full ring drawn with two would be a chord.
+        let small = Ring { percent: 1.0 }.arc_points(centre(), 5.5).expect("an arc");
+        let full = Ring { percent: 100.0 }.arc_points(centre(), 5.5).expect("an arc");
+        assert!(small.len() >= 2, "a tiny share is still a line: {}", small.len());
+        assert!(full.len() > small.len(), "and a full ring spends the segments: {} vs {}", full.len(), small.len());
+        assert!(full.len() <= RING_STEPS + 1, "without exceeding the budget: {}", full.len());
+    }
+
+    #[test]
+    fn the_context_group_is_a_ring_rather_than_an_icon() {
+        // The one structural fact about the third group: its mark is drawn, not looked up. The pie
+        // glyph it used to use is gone from the vocabulary entirely, so a regression cannot silently
+        // bring it back.
+        let items = stat_items(Stats {
+            turns: 3,
+            steps: 9,
+            context_tokens: Some(11_159),
+            context_limit: Some(1_000_000),
+            ..Stats::default()
+        });
+        let last = items.last().expect("the ring group is there");
+        assert!(last.ring.is_some(), "the occupancy group draws a ring");
+        assert!(last.icon.is_none(), "and no icon");
+        assert_eq!(last.label, "1%", "with the bare percentage the design asks for");
+        assert!(last.tooltip.contains("11159"), "and the figures on hover: {}", last.tooltip);
+    }
+
+    #[test]
+    fn the_ring_group_is_absent_when_the_window_is_unknown() {
+        // A share of an unknown total is not a number anybody can act on, and a ring is no better:
+        // it would either be empty (claiming zero) or full (claiming everything).
+        let items = stat_items(Stats {
+            turns: 1,
+            steps: 1,
+            context_tokens: Some(11_159),
+            context_limit: None,
+            ..Stats::default()
+        });
+        assert!(items.iter().all(|item| item.ring.is_none()), "{:?}", items.len());
+    }
 }

@@ -1965,6 +1965,134 @@ mod tests {
         }
     }
 
+    /// Every polyline in a shape tree.
+    ///
+    /// Recursive because `Shape::Vec` is how a `Ui`'s painting arrives at the frame. It collects
+    /// into a `Vec` rather than taking a callback on purpose: a generic closure parameter here is
+    /// monomorphised once per nesting level, and `rustc` gives up with "reached the recursion limit
+    /// while instantiating `collect_paths::<&mut &mut &mut …>`".
+    ///
+    /// @param shape - the shape to walk.
+    /// @returns the points of every `Shape::Path` under it.
+    fn collect_paths(shape: &egui::Shape) -> Vec<Vec<egui::Pos2>> {
+        match shape {
+            egui::Shape::Path(path) => vec![path.points.clone()],
+            egui::Shape::Vec(shapes) => shapes.iter().flat_map(collect_paths).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Every circle the frame strokes, as `(centre, radius)`.
+    ///
+    /// @param shape - the shape to walk.
+    /// @returns one entry per stroked circle.
+    fn collect_circles(shape: &egui::Shape) -> Vec<(egui::Pos2, f32)> {
+        match shape {
+            egui::Shape::Circle(circle) => vec![(circle.center, circle.radius)],
+            egui::Shape::Vec(shapes) => shapes.iter().flat_map(collect_circles).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_context_ring_is_rasterised_with_an_arc_for_its_share() {
+        // The screenshot cannot check this one: at a 1% share the arc is under a pixel long, so a
+        // ring that draws nothing but its track looks identical to a correct one. The raster can be
+        // checked, though — epaint emits the arc as a polyline (`Shape::Path`), and its points sit
+        // on the ring's radius, which is a fact about what was drawn rather than about code paths.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        {
+            let mut sink = RecordingSink(recorded.clone());
+            session.lock().expect("session").on_frame(
+                Inbound::Notification {
+                    method: "session/stats".to_owned(),
+                    params: Some(serde_json::json!({
+                        "sessionId": "session-1",
+                        "stats": {"turns": 1, "steps": 1, "contextTokens": 500_000, "contextLimit": 1_000_000},
+                    })),
+                },
+                &mut sink,
+            );
+        }
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let size = egui::vec2(708.0, 620.0);
+        let mut paths: Vec<Vec<egui::Pos2>> = Vec::new();
+        let mut circles: Vec<(egui::Pos2, f32)> = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    focused: true,
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ui| {
+                    let _ = app.draw_panel(ui);
+                },
+            );
+            paths = output
+                .shapes
+                .iter()
+                .flat_map(|clipped| collect_paths(&clipped.shape))
+                .collect();
+            circles = output
+                .shapes
+                .iter()
+                .flat_map(|clipped| collect_circles(&clipped.shape))
+                .collect();
+            output.textures_delta.clear();
+        }
+        // The ring is a pair of shapes: a stroked circle for the track and a polyline for the share.
+        // The track is the anchor for the assertion — it says where the ring *is*, and the arc is then
+        // whatever polyline has its points on that circle. (Finding the arc by looking for a constant
+        // radius about its own centroid does not work: the centroid of a half circle is not its
+        // centre, so the radii vary by pixels and a chevron icon passes the test while the arc fails.)
+        let (centre, radius) = circles
+            .iter()
+            .copied()
+            .find(|(_, radius)| (*radius - (crate::ui::theme::ICON_STAT - 2.0) / 2.0).abs() < 0.1)
+            .unwrap_or_else(|| panic!("the occupancy ring's track is stroked: {circles:?}"));
+
+        let arc = paths
+            .iter()
+            .find(|points| {
+                points.len() >= 3
+                    && points
+                        .iter()
+                        .all(|p| ((*p - centre).length() - radius).abs() < 0.2)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "the share is drawn on the track's circle (centre {centre:?}, r {radius:.1}): {:?}",
+                    paths.iter().map(|p| p.len()).collect::<Vec<_>>(),
+                )
+            });
+
+        // A 50% share sweeps half the circle. The count is asserted as a range rather than against
+        // the ring's own step budget: `RING_STEPS` is private to the footer, and importing it just to
+        // write the bound would couple this test to a number it does not care about — what matters is
+        // that a half share is emphatically neither a dot (too few points to be a line) nor a closed
+        // ring (which would sweep the whole circle and land back at the top).
+        assert!(
+            (8..=20).contains(&arc.len()),
+            "a half share is a half arc: {} points",
+            arc.len(),
+        );
+        // Starting at twelve o'clock and running clockwise: the first point is directly above the
+        // centre and the last directly below it.
+        let first = arc[0];
+        let last = arc[arc.len() - 1];
+        assert!(
+            (first.x - centre.x).abs() < 0.2 && first.y < centre.y,
+            "the arc starts at twelve o'clock: {first:?} about {centre:?}",
+        );
+        assert!(
+            (last.x - centre.x).abs() < 0.2 && last.y > centre.y,
+            "and a half share ends at six: {last:?} about {centre:?}",
+        );
+    }
+
     #[test]
     fn a_partial_cache_hit_is_never_shown_as_a_full_one() {
         // The figure exists to be read as "how much did I pay full price for", so rounding 99.6% up

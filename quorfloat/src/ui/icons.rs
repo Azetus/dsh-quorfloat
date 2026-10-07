@@ -70,14 +70,12 @@ pub enum Icon {
     Gauge,
     /// Cache usage.
     Database,
-    /// Context occupancy.
-    ChartPie,
     /// A folded section, pointing right.
     CaretRight,
 }
 
 /// Every icon this build knows, for the checks that have to consider all of them.
-pub const ALL: [Icon; 25] = [
+pub const ALL: [Icon; 24] = [
     Icon::Folder,
     Icon::FolderSimple,
     Icon::Chat,
@@ -98,7 +96,6 @@ pub const ALL: [Icon; 25] = [
     Icon::Plus,
     Icon::Gauge,
     Icon::Database,
-    Icon::ChartPie,
     Icon::KeyReturn,
     Icon::ShiftUp,
     Icon::CaretRight,
@@ -110,7 +107,7 @@ pub const ALL: [Icon; 25] = [
 /// Kept apart from [`ALL`] so that the cross-check against the mockup stays meaningful: the
 /// design's map is what those icons are checked against, while an icon for a control the
 /// design does not have — the keyboard hints, here — is a choice this panel made and says so.
-pub const DESIGNED: [Icon; 21] = [
+pub const DESIGNED: [Icon; 20] = [
     Icon::Folder,
     Icon::FolderSimple,
     Icon::Chat,
@@ -131,7 +128,6 @@ pub const DESIGNED: [Icon; 21] = [
     Icon::Plus,
     Icon::Gauge,
     Icon::Database,
-    Icon::ChartPie,
 ];
 
 impl Icon {
@@ -160,7 +156,6 @@ impl Icon {
             Self::Plus => "plus",
             Self::Gauge => "gauge",
             Self::Database => "database",
-            Self::ChartPie => "chart-pie",
             Self::KeyReturn => "key-return",
             Self::ShiftUp => "arrow-fat-up",
             Self::CaretRight => "caret-right",
@@ -192,7 +187,6 @@ impl Icon {
             Self::Plus => egui_phosphor::regular::PLUS,
             Self::Gauge => egui_phosphor::regular::GAUGE,
             Self::Database => egui_phosphor::regular::DATABASE,
-            Self::ChartPie => egui_phosphor::regular::CHART_PIE,
             Self::KeyReturn => egui_phosphor::regular::KEY_RETURN,
             Self::ShiftUp => egui_phosphor::regular::ARROW_FAT_UP,
             Self::CaretRight => egui_phosphor::regular::CARET_RIGHT,
