@@ -696,6 +696,9 @@ impl App {
             theme: self.settings.theme,
             recording: self.hotkey_recording,
             recording_hint: self.hotkey_hint.clone(),
+            stats: session.stats(),
+            options: session.options().cloned(),
+            setting_failure: session.setting_failure().map(str::to_owned),
             prompt_line: session.prompt_delivery().describe(),
             prompt_sending: session.prompt_delivery().is_sending(),
             turn_active: transcript.is_turn_active(),
@@ -861,6 +864,29 @@ impl App {
                 // reason to end the recording and make the user click again.
                 self.hotkey_hint = Some(hint);
             }
+            Action::SelectModel { provider, model, effort } => {
+                session.select_model(&provider, &model, effort.as_deref(), &mut sink);
+            }
+            Action::SelectEffort { effort } => {
+                // The model is unchanged, so the current one is taken from what the host last
+                // reported rather than from the click: the click named an effort, not a model.
+                let current = session
+                    .options()
+                    .and_then(|options| options.current_model.clone());
+                match current {
+                    Some((provider, model)) => {
+                        session.select_model(&provider, &model, Some(&effort), &mut sink);
+                    }
+                    None => {
+                        // Nothing to pair the effort with, which means the panel never learned
+                        // which model is in use. Saying so is better than sending a selection with
+                        // an invented provider.
+                        self.sink.log("an effort was chosen before the model was known");
+                    }
+                }
+            }
+            Action::SetPermission { value } => session.set_permission(&value, &mut sink),
+            Action::RefreshOptions => session.request_options(&mut sink),
             Action::SetHotkey(spec) => {
                 // Only a change is worth acting on: re-registering the same accelerator would drop
                 // and retake a grab the user already has, and a desktop where it was taken by
@@ -1009,6 +1035,15 @@ pub(crate) struct PanelState {
     pub(crate) recording: bool,
     /// Why the last chord was refused, while the row is listening.
     pub(crate) recording_hint: Option<String>,
+    /// The followed conversation's statistics, once the host has reported any.
+    pub(crate) stats: Option<crate::app::session::Stats>,
+    /// What may be chosen for it — models, reasoning efforts, permission presets.
+    pub(crate) options: Option<crate::app::session::SessionOptions>,
+    /// Why the last model or permission change was refused, if it was.
+    ///
+    /// A refused change is invisible otherwise: the panel would go on showing the old value as if
+    /// the click had never happened.
+    pub(crate) setting_failure: Option<String>,
 }
 
 /// What the status line needs to know about the followed conversation.
@@ -1823,6 +1858,204 @@ mod tests {
         assert_eq!(
             accelerator.2, palette.text,
             "the box's accelerator is the panel's text colour, not a dim inactive grey",
+        );
+    }
+
+    /// Put the host's answer into the session, the way a response frame would.
+    ///
+    /// @param session - the session to fill.
+    /// @param recorded - for the frame the request writes.
+    /// @returns nothing; the answer is applied in place.
+    fn give_options(
+        session: &Arc<Mutex<Session>>,
+        recorded: &Recorded,
+        result: serde_json::Value,
+    ) {
+        let mut sink = RecordingSink(recorded.clone());
+        let mut guard = session.lock().expect("session");
+        guard.request_options(&mut sink);
+        let id = recorded
+            .frames
+            .lock()
+            .expect("frames")
+            .last()
+            .expect("an options request")["id"]
+            .clone();
+        guard.on_frame(Inbound::Response { id, outcome: Ok(result) }, &mut sink);
+    }
+
+    #[test]
+    fn the_footer_shows_the_statistics_the_host_reported() {
+        // The figures only, and nothing when there are none: an empty strip is honest, and "0 tok/s"
+        // reads as a stalled model rather than as "not measured yet".
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        let size = egui::vec2(708.0, 620.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+
+        // Before the host says anything, the strip says nothing.
+        let empty = drawn_text(&mut app, size);
+        assert!(!visible(&empty, "轮", screen), "no counts before they are reported: {:?}", on_screen(&empty, screen));
+
+        {
+            let mut sink = RecordingSink(recorded.clone());
+            session.lock().expect("session").on_frame(
+                Inbound::Notification {
+                    method: "session/stats".to_owned(),
+                    params: Some(serde_json::json!({
+                        "sessionId": "session-1",
+                        "stats": {
+                            "turns": 3, "steps": 7, "tokensPerSecond": 200.0,
+                            "cacheHitPercent": 75, "contextTokens": 4000, "contextLimit": 128000,
+                        },
+                    })),
+                },
+                &mut sink,
+            );
+        }
+        let drawn = drawn_text(&mut app, size);
+        assert!(visible(&drawn, "3 轮 7 步", screen), "the counts: {:?}", on_screen(&drawn, screen));
+        assert!(visible(&drawn, "200 tok/s", screen), "the output speed");
+        assert!(visible(&drawn, "缓存命中 75%", screen), "the cache share");
+        // 4000 of 128000 is 3%, rounded down: a share is what a person can act on, and the raw pair
+        // is not.
+        assert!(visible(&drawn, "上下文 3%", screen), "the context share");
+    }
+
+    #[test]
+    fn the_reported_statistics_are_absent_rather_than_zero_when_unmeasurable() {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        {
+            let mut sink = RecordingSink(recorded.clone());
+            session.lock().expect("session").on_frame(
+                Inbound::Notification {
+                    method: "session/stats".to_owned(),
+                    params: Some(serde_json::json!({"sessionId": "session-1", "stats": {"turns": 0, "steps": 0}})),
+                },
+                &mut sink,
+            );
+        }
+        let size = egui::vec2(708.0, 620.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let drawn = drawn_text(&mut app, size);
+        assert!(visible(&drawn, "0 轮 0 步", screen), "the counts are real figures");
+        assert!(!visible(&drawn, "tok/s", screen), "but no speed was measured: {:?}", on_screen(&drawn, screen));
+        assert!(!visible(&drawn, "缓存命中", screen));
+    }
+
+    #[test]
+    fn the_footer_offers_the_models_and_permissions_the_host_listed() {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        give_options(
+            &session,
+            &recorded,
+            serde_json::json!({
+                "groups": [{"id": "deepseek", "name": "DeepSeek", "models": [
+                    {"id": "v41-flash", "name": "V4.1 Flash", "efforts": [
+                        {"id": "low", "name": "低"}, {"id": "high", "name": "高"},
+                    ], "defaultEffort": "low"},
+                ]}],
+                "current": {"provider": "deepseek", "model": "v41-flash", "reasoningEffort": "high"},
+                "permissions": [
+                    {"value": "read-only", "name": "只读"},
+                    {"value": "workspace-write", "name": "工作区修改"},
+                ],
+                "permission": "read-only",
+            }),
+        );
+
+        let size = egui::vec2(708.0, 620.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let drawn = drawn_text(&mut app, size);
+        // Each control shows the value in effect, which is what makes the strip a report rather than
+        // a row of buttons.
+        assert!(visible(&drawn, "V4.1 Flash", screen), "the model in use: {:?}", on_screen(&drawn, screen));
+        assert!(visible(&drawn, "高", screen), "the effort in use");
+        assert!(visible(&drawn, "只读", screen), "the permission in use");
+    }
+
+    #[test]
+    fn the_footer_offers_nothing_it_was_not_given() {
+        // The rule that keeps the strip honest: no options means no controls. A picker with an empty
+        // menu reads as a failure, and a made-up model name reads as a fact.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        let size = egui::vec2(708.0, 620.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let drawn = drawn_text(&mut app, size);
+        // The panel draws the words only when it has values; the fallback labels would be the
+        // giveaway that a control was drawn without anything behind it.
+        for absent in ["模型", "权限"] {
+            assert!(
+                !visible(&drawn, absent, screen),
+                "no {absent} control without options: {:?}",
+                on_screen(&drawn, screen),
+            );
+        }
+    }
+
+    #[test]
+    fn the_footer_groups_do_not_print_over_each_other() {
+        // The bug this exists for: the key hints and the statistics were drawn into the same
+        // rectangle and printed on top of one another ("esc 关闭" through "缓存命中 90%"). It was
+        // caught by looking at a screenshot after four attempts at the layout, so it is caught here
+        // instead — from the rectangles, which is what "on top of each other" means.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        give_options(
+            &session,
+            &recorded,
+            serde_json::json!({
+                "groups": [{"provider": "deepseek-official", "name": "DeepSeek",
+                            "models": [{"id": "v41-flash", "name": "V4.1 Flash", "efforts": []}]}],
+                "current": {"provider": "deepseek-official", "model": "v41-flash"},
+                "permissions": [{"value": "read-only", "name": "只读"}],
+                "permission": "read-only",
+            }),
+        );
+        {
+            let mut sink = RecordingSink(recorded.clone());
+            session.lock().expect("session").on_frame(
+                Inbound::Notification {
+                    method: "session/stats".to_owned(),
+                    params: Some(serde_json::json!({
+                        "sessionId": "session-1",
+                        "stats": {"turns": 3, "steps": 9, "tokensPerSecond": 229.0,
+                                  "cacheHitPercent": 90, "contextTokens": 4000, "contextLimit": 128000},
+                    })),
+                },
+                &mut sink,
+            );
+        }
+
+        let size = egui::vec2(708.0, 620.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let drawn = drawn_text(&mut app, size);
+        // The strip is the bottom of the panel: everything below the last thread content. The footer's
+        // own rows are the lowest ones drawn.
+        let lowest = drawn
+            .iter()
+            .filter(|(_, rect)| screen.contains_rect(*rect))
+            .map(|(_, rect)| rect.bottom())
+            .fold(f32::MIN, f32::max);
+        let strip = drawn.iter().filter(|(_, rect)| rect.bottom() > lowest - 60.0).collect::<Vec<_>>();
+        // Two groups, and their text must not overlap horizontally: the hints' right edge is left of
+        // the statistics' left edge.
+        let hint = strip
+            .iter()
+            .find(|(text, _)| text.contains("发送"))
+            .unwrap_or_else(|| panic!("the key hints are in the strip: {:?}", on_screen(&drawn, screen)));
+        let counts = strip
+            .iter()
+            .find(|(text, _)| text.contains("轮"))
+            .unwrap_or_else(|| panic!("the statistics are in the strip: {:?}", on_screen(&drawn, screen)));
+        assert!(
+            hint.1.right() <= counts.1.left(),
+            "the hints end at {} and the statistics begin at {}: they are printed over each other",
+            hint.1.right(),
+            counts.1.left(),
         );
     }
 

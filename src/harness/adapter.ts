@@ -181,17 +181,166 @@ export interface QuorfloatHarness {
    * @returns a handle that stops the subscription.
    */
   follow(sessionId: string, onFrame: (frame: FollowFrame) => void): FollowHandle
+  /**
+   * Read what may be chosen for one session, and what is chosen now.
+   *
+   * Two upstream sources behind one call, because a picker needs both halves at the
+   * same moment: the model catalog (`sessionController.modelCatalog`, process-wide) and the
+   * permission presets (`permissionPresets.catalog` / `current`, per session). A picker
+   * that fetched them separately could render a list beside a stale value.
+   *
+   * @param sessionId - durable session identity, or `undefined` before one is attached —
+   *   the catalogs are still readable then, which is what lets the picker be ready.
+   * @returns the selectable options and the current values.
+   */
+  options(sessionId?: string): Promise<SessionOptionsView>
+  /**
+   * Switch one session's model and reasoning effort.
+   *
+   * **Both in one call**, because upstream holds them in one `ModelSelection`: choosing a
+   * model resets the effort to that model's default, so sending them separately would
+   * briefly register an effort the new model may not have.
+   *
+   * @param sessionId - target session.
+   * @param selection - provider, model, and the effort to pair with them.
+   */
+  selectModel(sessionId: string, selection: ModelChoiceView): Promise<void>
+  /**
+   * Apply one permission preset to a session.
+   *
+   * A preset is *not* a sandbox mode: it decides the sandbox mode **and** the approval
+   * policy together, and it is recorded as its own durable event. Setting a bare mode
+   * would leave the two halves disagreeing.
+   *
+   * @param sessionId - target session.
+   * @param value - the preset's stable value, as the catalog spelled it.
+   */
+  setPermission(sessionId: string, value: string): Promise<void>
+  /**
+   * Read a session's statistics without activating its Agent.
+   *
+   * Cold-safe on the same terms as {@link QuorfloatHarness.cursor}: it reads registered
+   * projections out of the session log rather than waking anything.
+   *
+   * @param sessionId - durable session identity.
+   * @returns the statistics, or `undefined` when the session is gone.
+   */
+  stats(sessionId: string): Promise<SessionStatsView | undefined>
+}
+
+/** One reasoning effort a model offers. */
+export interface EffortView {
+  /** Stable value sent back on selection. */
+  readonly id: string
+  /** The label a person reads. */
+  readonly name: string
+  /** One sentence on what it does, when the provider supplies one. */
+  readonly description?: string
+}
+
+/** One selectable model. */
+export interface ModelView {
+  /** Provider-owned model id. */
+  readonly id: string
+  /** The label a person reads. */
+  readonly name: string
+  /** One sentence about the model, when the provider supplies one. */
+  readonly description?: string
+  /** The efforts this model accepts, empty when it has no reasoning control. */
+  readonly efforts: readonly EffortView[]
+  /** The effort the provider defaults to, when it names one. */
+  readonly defaultEffort?: string
+}
+
+/** One provider's models. */
+export interface ModelGroupView {
+  /** Provider route, sent back with the chosen model. */
+  readonly provider: string
+  /** The label a person reads. */
+  readonly name: string
+  /** The models under this provider, in the catalog's order. */
+  readonly models: readonly ModelView[]
+}
+
+/** One selectable permission preset. */
+export interface PermissionView {
+  /** Stable value sent back when chosen. */
+  readonly value: string
+  /** The label a person reads. */
+  readonly name: string
+  /** One sentence on what the preset allows, when it has one. */
+  readonly description?: string
+}
+
+/** The model half of a selection: what is chosen now, and what may be. */
+export interface ModelChoiceView {
+  /** Provider route of the current model. */
+  readonly provider: string
+  /** The current model's id. */
+  readonly model: string
+  /** The current reasoning effort, when one is set. */
+  readonly reasoningEffort?: string
+}
+
+/** Everything a session's pickers need, in one answer. */
+export interface SessionOptionsView {
+  /** The models available, grouped by provider. */
+  readonly groups: readonly ModelGroupView[]
+  /** What is selected now, or `undefined` when nothing is attached yet. */
+  readonly current?: ModelChoiceView
+  /** The permission presets available. */
+  readonly permissions: readonly PermissionView[]
+  /** The permission preset in effect, or `undefined` when unknown. */
+  readonly permission?: string
+}
+
+/** A session's statistics, reduced to what the panel shows. */
+export interface SessionStatsView {
+  /** Distinct turns with at least one closed step. */
+  readonly turns: number
+  /** Closed steps. */
+  readonly steps: number
+  /** Output tokens per second over the steps that reported usage, or `undefined`. */
+  readonly tokensPerSecond?: number
+  /** Cache-read share of the prompt, as a percentage, or `undefined`. */
+  readonly cacheHitPercent?: number
+  /** Prompt size of the most recent request, when the provider reported one. */
+  readonly contextTokens?: number
+  /** The model's context capacity, when known. */
+  readonly contextLimit?: number
 }
 
 /** Structural view of the one upstream service this plugin depends on. */
 interface SessionControllerLike {
   inspect(sessionId: string, signal: AbortSignal): Promise<{ events?: readonly Record<string, unknown>[] }>
+  /** The process-wide model catalog; `undefined` on a build without one. */
+  modelCatalog?(): Promise<unknown>
+  /** Switch one session's model and reasoning effort together. */
+  selectModel?(request: unknown): Promise<unknown>
+  /** Read every registered projection for one session, cold. */
+  projections?(request: unknown, signal: AbortSignal): Promise<unknown>
   list(request: unknown, signal: AbortSignal): Promise<{ items?: readonly Record<string, unknown>[] }>
   create(request: unknown): Promise<{ sessionId?: unknown }>
   prompt(request: unknown, signal: AbortSignal): Promise<unknown>
   cancel(request: unknown): unknown
   page(request: unknown, signal: AbortSignal): Promise<{ records?: readonly unknown[]; hasMore?: unknown }>
   follow(request: unknown, signal: AbortSignal): AsyncIterable<Record<string, unknown>>
+}
+
+/** Structural view of the live-session store: `get` by id, no Agent activation. */
+interface SessionsLike {
+  /** The live Session for an id, or `undefined` when it is not loaded. */
+  get(id: string): unknown
+}
+
+/** Structural view of the permission-preset service. */
+interface PermissionPresetsLike {
+  /** Every currently selectable preset, process-wide. */
+  catalog(): { options?: readonly Record<string, unknown>[] }
+  /** The preset value in effect for one session. */
+  current(session: unknown): string
+  /** Switch one session's preset; the only write path. */
+  set(session: unknown, name: string): void
 }
 
 /** Structural view of the workspace registry. */
@@ -262,7 +411,15 @@ export function createHarnessFromContext(
   if (probe.missing.length > 0) return { probe }
   const controller = get('sessionController') as SessionControllerLike
   const registry = get('workspaceRegistry') as WorkspaceRegistryLike | undefined
-  return { harness: new CordisHarness(controller, registry, log), probe }
+  // Permission presets are their own service, and **optional**: a build without the
+  // interaction package has no presets to offer, and the panel then hides the picker
+  // rather than showing one with nothing in it.
+  const presets = get('permissionPresets') as PermissionPresetsLike | undefined
+  // The session store is how a `Session` object is obtained from an id. It is only
+  // consulted for the two writes that need one (a permission switch, a model switch);
+  // the reads that answer pickers never need it.
+  const sessions = get('sessions') as SessionsLike | undefined
+  return { harness: new CordisHarness(controller, registry, presets, sessions, log), probe }
 }
 
 /**
@@ -272,20 +429,43 @@ export function createHarnessFromContext(
 class CordisHarness implements QuorfloatHarness {
   readonly #controller: SessionControllerLike
   readonly #registry: WorkspaceRegistryLike | undefined
+  readonly #presets: PermissionPresetsLike | undefined
+  readonly #sessions: SessionsLike | undefined
   readonly #log: AdapterLogger
   /** Counters that make upstream translation problems visible in diagnostics. */
-  readonly #counters = { listCalls: 0, createCalls: 0, promptCalls: 0, cancelled: 0, followOpened: 0, followClosed: 0, cursorCalls: 0 }
+  readonly #counters = {
+    listCalls: 0,
+    createCalls: 0,
+    promptCalls: 0,
+    cancelled: 0,
+    followOpened: 0,
+    followClosed: 0,
+    cursorCalls: 0,
+    selectModelCalls: 0,
+    permissionCalls: 0,
+    statsCalls: 0,
+  }
   /** Titles by session, with the `updatedAt` they were read at. */
   readonly #titles = new Map<string, { updatedAt: number; title: string | undefined }>()
 
   /**
    * @param controller - the live session controller service.
    * @param registry - the workspace registry, when composed.
+   * @param presets - the permission-preset service, when composed.
+   * @param sessions - the live-session store, when composed.
    * @param log - logger for translation warnings.
    */
-  constructor(controller: SessionControllerLike, registry: WorkspaceRegistryLike | undefined, log: AdapterLogger) {
+  constructor(
+    controller: SessionControllerLike,
+    registry: WorkspaceRegistryLike | undefined,
+    presets: PermissionPresetsLike | undefined,
+    sessions: SessionsLike | undefined,
+    log: AdapterLogger,
+  ) {
     this.#controller = controller
     this.#registry = registry
+    this.#presets = presets
+    this.#sessions = sessions
     this.#log = log
   }
 
@@ -481,6 +661,145 @@ class CordisHarness implements QuorfloatHarness {
     return { accepted: true }
   }
 
+  /** {@inheritDoc QuorfloatHarness.options} */
+  async options(sessionId?: string): Promise<SessionOptionsView> {
+    const groups = await this.#modelGroups()
+    // The permission half is absent on a build without the interaction package, and the
+    // picker is then hidden rather than shown with nothing in it — an empty menu is worse
+    // than no menu, because it looks like a failure.
+    let permissions: PermissionView[] = []
+    let permission: string | undefined
+    if (this.#presets !== undefined) {
+      const catalog = this.#presets.catalog()
+      permissions = (catalog.options ?? []).flatMap(option => {
+        const value = typeof option['value'] === 'string' ? option['value'] : undefined
+        const name = typeof option['name'] === 'string' ? option['name'] : undefined
+        if (value === undefined || name === undefined) return []
+        const description = typeof option['description'] === 'string' ? option['description'] : undefined
+        return [{ value, name, ...(description === undefined ? {} : { description }) }]
+      })
+      const session = sessionId === undefined ? undefined : this.#sessions?.get(sessionId)
+      if (session !== undefined) {
+        try {
+          permission = this.#presets.current(session)
+        } catch (error) {
+          // A session whose permissions projection is not registered yet: the catalog is
+          // still worth showing, so this degrades to "no current value" rather than failing
+          // the whole read.
+          this.#log.debug('permission preset is not resolvable yet', { sessionId, error: String(error) })
+        }
+      }
+    }
+    const current = sessionId === undefined ? undefined : await this.#currentSelection(sessionId)
+    return {
+      groups,
+      ...(current === undefined ? {} : { current }),
+      permissions,
+      ...(permission === undefined ? {} : { permission }),
+    }
+  }
+
+  /** {@inheritDoc QuorfloatHarness.selectModel} */
+  async selectModel(sessionId: string, selection: ModelChoiceView): Promise<void> {
+    if (this.#controller.selectModel === undefined) {
+      throw new HarnessError('unavailable', 'this Harness build cannot select a model', { sessionId })
+    }
+    this.#counters.selectModelCalls += 1
+    await this.#controller.selectModel({
+      sessionId,
+      provider: selection.provider,
+      model: selection.model,
+      ...(selection.reasoningEffort === undefined ? {} : { reasoningEffort: selection.reasoningEffort }),
+    })
+  }
+
+  /** {@inheritDoc QuorfloatHarness.setPermission} */
+  async setPermission(sessionId: string, value: string): Promise<void> {
+    const presets = this.#presets
+    const session = this.#sessions?.get(sessionId)
+    if (presets === undefined) {
+      throw new HarnessError('unavailable', 'this Harness build has no permission presets', { sessionId })
+    }
+    if (session === undefined) {
+      // The Session store has not loaded this session. The writes are `Session`-shaped
+      // upstream (a preset appends an event to the log), so there is nothing to write to
+      // rather than something to work around.
+      throw new HarnessError('unavailable', 'this session is not loaded, so its permissions cannot change', { sessionId })
+    }
+    this.#counters.permissionCalls += 1
+    // `set` rather than a sandbox-mode write: a preset decides the sandbox mode *and* the
+    // approval policy, records its own durable event, and is the upstream's only switch.
+    presets.set(session, value)
+  }
+
+  /** {@inheritDoc QuorfloatHarness.stats} */
+  async stats(sessionId: string): Promise<SessionStatsView | undefined> {
+    if (this.#controller.projections === undefined) return undefined
+    this.#counters.statsCalls += 1
+    const abort = new AbortController()
+    let value: unknown
+    try {
+      value = await this.#controller.projections({ sessionId }, abort.signal)
+    } catch (error) {
+      // Statistics are an adornment: a session that cannot report them still works, and a
+      // panel that failed to draw its input because a counter was unavailable would be a
+      // worse panel. The failure is logged rather than raised.
+      this.#log.debug('session statistics are unavailable', { sessionId, error: String(error) })
+      return undefined
+    }
+    return readStats(value)
+  }
+
+  /**
+   * The model catalog as picker groups.
+   *
+   * @returns the groups, or an empty list when this build has no catalog.
+   */
+  async #modelGroups(): Promise<ModelGroupView[]> {
+    if (this.#controller.modelCatalog === undefined) {
+      // Said out loud: "the model menu is empty" has two very different causes — a build without the
+      // method, and a build whose providers all failed — and they are indistinguishable from the
+      // panel alone.
+      this.#log.warn('this Harness build has no model catalog method')
+      return []
+    }
+    try {
+      const catalog = await this.#controller.modelCatalog()
+      const groups = readModelGroups(catalog)
+      if (groups.length === 0) {
+        // The upstream answer also carries *why* each provider could not be listed (a missing key, an
+        // unreachable route). Dropping that is how "the model menu is empty" becomes unanswerable, so
+        // it goes to the log where the reason is readable.
+        this.#log.warn('the model catalog listed no models', { failures: (catalog as Record<string, unknown>)['failures'] ?? [] })
+      }
+      return groups
+    } catch (error) {
+      this.#log.warn('the model catalog could not be read', error)
+      return []
+    }
+  }
+
+  /**
+   * What is selected for one session now.
+   *
+   * Read from the `modelSelection` projection rather than from the agent: the projection is
+   * what the *next* step will use, which is the value a picker must show — reading the
+   * last-used model from the log would show what the previous step ran with.
+   *
+   * @param sessionId - the session to read.
+   * @returns the selection, or `undefined` when the projection is not available.
+   */
+  async #currentSelection(sessionId: string): Promise<ModelChoiceView | undefined> {
+    if (this.#controller.projections === undefined) return undefined
+    try {
+      const value = await this.#controller.projections({ sessionId }, new AbortController().signal)
+      return readCurrentSelection(value)
+    } catch (error) {
+      this.#log.debug('the model selection is unavailable', { sessionId, error: String(error) })
+      return undefined
+    }
+  }
+
   /** {@inheritDoc QuorfloatHarness.follow} */
   follow(sessionId: string, onFrame: (frame: FollowFrame) => void): FollowHandle {
     this.#counters.followOpened += 1
@@ -524,6 +843,171 @@ class CordisHarness implements QuorfloatHarness {
       },
     }
   }
+}
+
+/**
+ * Read the projection baseline's `values` map.
+ *
+ * Upstream answers `{asOfSeq, values}`; anything else is a shape this build does not
+ * recognise, and the rule for those is to report nothing rather than to guess — a wrong
+ * token count is worse than no token count.
+ *
+ * @param value - a projections response.
+ * @returns the values map, or `undefined`.
+ */
+function projectionValues(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const values = (value as Record<string, unknown>)['values']
+  if (typeof values !== 'object' || values === null) return undefined
+  return values as Record<string, unknown>
+}
+
+/** A finite, non-negative number, or `undefined`. */
+function count(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/**
+ * Reduce the statistics projections to what the panel shows.
+ *
+ * Two projections, because they answer different questions: `sessionStats` counts turns,
+ * steps and time; `tokenUsage` counts tokens, and the cache-hit share and the output speed
+ * are ratios of those. Either can be absent — a session with no completed step has no
+ * speed — so every field is optional and the panel decides what it can draw.
+ *
+ * @param value - a projections response.
+ * @returns the statistics, or `undefined` when this build has none for the session.
+ */
+export function readStats(value: unknown): SessionStatsView | undefined {
+  const values = projectionValues(value)
+  if (values === undefined) return undefined
+  const stats = values['sessionStats']
+  const usage = values['tokenUsage']
+  const pressure = values['contextPressure']
+  const statsRecord = typeof stats === 'object' && stats !== null ? stats as Record<string, unknown> : {}
+  const usageRecord = typeof usage === 'object' && usage !== null ? usage as Record<string, unknown> : {}
+  const pressureRecord = typeof pressure === 'object' && pressure !== null ? pressure as Record<string, unknown> : {}
+
+  const turns = count(statsRecord['turns'])
+  const steps = count(statsRecord['steps'])
+  if (turns === undefined && steps === undefined && Object.keys(usageRecord).length === 0) {
+    return undefined
+  }
+
+  // Output speed: the reported output tokens over the reported decode time. Both are
+  // needed, and a zero decode time is *not* an infinite speed.
+  const decodeTokens = count(statsRecord['decodeTokens'])
+  const decodeMs = count(statsRecord['decodeMs'])
+  const tokensPerSecond = decodeTokens !== undefined && decodeMs !== undefined && decodeMs > 0
+    ? decodeTokens / (decodeMs / 1000)
+    : undefined
+
+  // Cache-hit share: cache reads over the whole prompt, which is what a person means by
+  // "how much was cached" — reads alone would report 100% for a tiny prompt.
+  const cacheRead = count(usageRecord['cacheReadTokens'])
+  const uncached = count(usageRecord['uncachedInputTokens'])
+  const cacheWrite = count(usageRecord['cacheWriteTokens']) ?? 0
+  const prompt = (cacheRead ?? 0) + (uncached ?? 0) + cacheWrite
+  const cacheHitPercent = cacheRead !== undefined && prompt > 0
+    ? Math.round((cacheRead / prompt) * 100)
+    : undefined
+
+  return {
+    turns: turns ?? 0,
+    steps: steps ?? 0,
+    ...(tokensPerSecond === undefined || tokensPerSecond <= 0 ? {} : { tokensPerSecond }),
+    ...(cacheHitPercent === undefined ? {} : { cacheHitPercent }),
+    ...(count(pressureRecord['pressureTokens']) === undefined
+      ? {}
+      : { contextTokens: count(pressureRecord['pressureTokens']) as number }),
+    ...(count(pressureRecord['capacityTokens']) === undefined
+      ? {}
+      : { contextLimit: count(pressureRecord['capacityTokens']) as number }),
+  }
+}
+
+/**
+ * Reduce the model catalog to picker groups.
+ *
+ * Every level is checked rather than trusted: a provider group with no usable models is
+ * dropped instead of rendering an empty header, and a model with no id cannot be selected
+ * so it is not offered.
+ *
+ * @param value - a `modelCatalog()` response.
+ * @returns the groups, possibly empty.
+ */
+export function readModelGroups(value: unknown): ModelGroupView[] {
+  if (typeof value !== 'object' || value === null) return []
+  const groups = (value as Record<string, unknown>)['groups']
+  if (!Array.isArray(groups)) return []
+  const read = (item: unknown): ModelView | undefined => {
+    if (typeof item !== 'object' || item === null) return undefined
+    const record = item as Record<string, unknown>
+    const id = typeof record['id'] === 'string' ? record['id'] : undefined
+    if (id === undefined || id === '') return undefined
+    const reasoning = typeof record['reasoning'] === 'object' && record['reasoning'] !== null
+      ? record['reasoning'] as Record<string, unknown>
+      : undefined
+    const efforts: EffortView[] = Array.isArray(reasoning?.['efforts'])
+      ? (reasoning?.['efforts'] as unknown[]).flatMap(entry => {
+        if (typeof entry !== 'object' || entry === null) return []
+        const effort = entry as Record<string, unknown>
+        const effortId = typeof effort['id'] === 'string' ? effort['id'] : undefined
+        if (effortId === undefined || effortId === '') return []
+        const name = typeof effort['name'] === 'string' ? effort['name'] : effortId
+        const description = typeof effort['description'] === 'string' ? effort['description'] : undefined
+        return [{ id: effortId, name, ...(description === undefined ? {} : { description }) }]
+      })
+      : []
+    const defaultEffort = typeof reasoning?.['defaultEffort'] === 'string' ? reasoning['defaultEffort'] : undefined
+    const description = typeof record['description'] === 'string' ? record['description'] : undefined
+    return {
+      id,
+      name: typeof record['name'] === 'string' && record['name'] !== '' ? record['name'] : id,
+      ...(description === undefined ? {} : { description }),
+      efforts,
+      ...(defaultEffort === undefined ? {} : { defaultEffort }),
+    }
+  }
+  return groups.flatMap(group => {
+    if (typeof group !== 'object' || group === null) return []
+    const record = group as Record<string, unknown>
+    const provider = typeof record['id'] === 'string' ? record['id'] : undefined
+    if (provider === undefined || provider === '') return []
+    const models: ModelView[] = Array.isArray(record['models'])
+      ? (record['models'] as unknown[]).flatMap(item => read(item) ?? [])
+      : []
+    return models.length === 0
+      ? []
+      : [{ provider, name: typeof record['name'] === 'string' && record['name'] !== '' ? record['name'] : provider, models }]
+  })
+}
+
+/**
+ * Read what one session has selected now.
+ *
+ * The `modelSelection` projection carries `lastUsed` and a `pending` switch. **The pending
+ * one wins when it is present**: it is the choice made but not yet used by a step, and a
+ * picker that showed `lastUsed` would snap back to the old model after every change until
+ * the next prompt.
+ *
+ * @param value - a projections response.
+ * @returns the selection, or `undefined` when this build does not report one.
+ */
+export function readCurrentSelection(value: unknown): ModelChoiceView | undefined {
+  const values = projectionValues(value)
+  if (values === undefined) return undefined
+  const projection = values['modelSelection']
+  if (typeof projection !== 'object' || projection === null) return undefined
+  const record = projection as Record<string, unknown>
+  const candidate = record['pending'] ?? record['lastUsed']
+  if (typeof candidate !== 'object' || candidate === null) return undefined
+  const selection = candidate as Record<string, unknown>
+  const provider = typeof selection['provider'] === 'string' ? selection['provider'] : undefined
+  const model = typeof selection['model'] === 'string' ? selection['model'] : undefined
+  if (provider === undefined || model === undefined) return undefined
+  const effort = typeof selection['reasoningEffort'] === 'string' ? selection['reasoningEffort'] : undefined
+  return { provider, model, ...(effort === undefined ? {} : { reasoningEffort: effort }) }
 }
 
 /**

@@ -12,7 +12,16 @@
  * guards, dedup keys, sequence checks) are unit-testable without a runtime.
  */
 
-import type { FollowFrame, FollowHandle, QuorfloatHarness, SessionSummaryView, WorkspaceView } from './adapter.js'
+import type {
+  FollowFrame,
+  FollowHandle,
+  ModelChoiceView,
+  QuorfloatHarness,
+  SessionOptionsView,
+  SessionStatsView,
+  SessionSummaryView,
+  WorkspaceView,
+} from './adapter.js'
 import { HarnessError } from './adapter.js'
 
 /** Minimal logger shape used here. */
@@ -204,6 +213,49 @@ export class SessionLayer {
     return true
   }
 
+  /**
+   * Push one session's statistics to the peer.
+   *
+   * Called on attach and once per finished turn rather than per frame: the numbers only change when
+   * a step closes, and the read is a projection walk. It is also fired after a prompt is admitted,
+   * because that is when `running` flips and the panel's footer starts showing progress.
+   *
+   * A failure is logged and swallowed — statistics are an adornment, and no session call may fail
+   * because a counter could not be read.
+   *
+   * @param sessionId - the session to report on.
+   */
+  async refreshStats(sessionId: string): Promise<void> {
+    let stats: SessionStatsView | undefined
+    try {
+      stats = await this.#deps.harness.stats(sessionId)
+    } catch (error) {
+      this.#deps.log.debug('statistics read failed', { sessionId, error: String(error) })
+      return
+    }
+    if (stats === undefined) return
+    await this.#deps.notify('session/stats', { sessionId, stats })
+  }
+
+  /** Read the model and permission choices the panel offers. */
+  async readOptions(sessionId?: string): Promise<SessionOptionsView> {
+    return await this.#deps.harness.options(sessionId)
+  }
+
+  /** Switch one session's model and reasoning effort. */
+  async selectModel(sessionId: string, selection: ModelChoiceView): Promise<void> {
+    await this.#deps.harness.selectModel(sessionId, selection)
+    // The picker's own answer is the projection the host just wrote; re-reading it here means the
+    // panel shows what was *accepted* rather than what it asked for.
+    this.#deps.onStateChange?.(sessionId, 'model-selected', selection)
+  }
+
+  /** Apply one permission preset. */
+  async setPermission(sessionId: string, value: string): Promise<void> {
+    await this.#deps.harness.setPermission(sessionId, value)
+    this.#deps.onStateChange?.(sessionId, 'permission-set', { value })
+  }
+
   /** Stop every subscription; used on plugin unload and on channel loss. */
   detachAll(reason: string): void {
     for (const state of this.#follows.values()) this.#closeFollow(state, reason)
@@ -315,6 +367,10 @@ export class SessionLayer {
           projections: frame.projections,
           assistantStream: frame.assistantStream,
         })
+        // The snapshot carries projections, but only this one: their later updates travel on a
+        // different stream the panel does not open. So the first statistics are sent here, and
+        // refreshed when a turn closes.
+        await this.refreshStats(sessionId)
         return
       }
       case 'event': {
@@ -354,6 +410,12 @@ export class SessionLayer {
           time: frame.time,
           data: frame.data,
         })
+        // The one event that makes the statistics stale: `turn/end` closes the last step of a turn,
+        // which is exactly when turns, steps, decode time and token usage stop changing. Awaited so
+        // the panel receives the totals no later than the event that produced them.
+        if (frame.eventType === 'turn/end' || frame.eventType === 'step/end') {
+          await this.refreshStats(sessionId)
+        }
         return
       }
       case 'assistant-stream': {

@@ -17,6 +17,7 @@
 
 mod cards;
 mod composer;
+mod footer;
 mod conversation;
 mod geometry;
 mod picker;
@@ -25,6 +26,7 @@ mod table;
 
 /// The one thing the app needs from the picker: the id of the workspace menu, so a send that
 /// has no workspace to create in can open the menu that chooses one.
+pub(crate) use footer::{Kind as FooterKind, popup_id as footer_popup_id};
 pub(crate) use picker::{Kind as PickerKind, popup_id as picker_popup_id};
 /// The display-only soft wrapper, reachable from the panel's tests.
 #[cfg(test)]
@@ -122,6 +124,29 @@ pub enum Action {
         /// What is wrong with it, phrased for the user.
         hint: String,
     },
+    /// Switch the conversation's model, and the reasoning effort to pair with it.
+    ///
+    /// Both together, because the host holds them in one selection.
+    SelectModel {
+        /// Provider route of the chosen model.
+        provider: String,
+        /// The chosen model's id.
+        model: String,
+        /// The effort to pair with it, or `None` for the host's default.
+        effort: Option<String>,
+    },
+    /// Change only the reasoning effort, keeping the current model.
+    SelectEffort {
+        /// The chosen effort's id.
+        effort: String,
+    },
+    /// Apply a permission preset to the conversation.
+    SetPermission {
+        /// The preset's stable value.
+        value: String,
+    },
+    /// Ask the host what may be chosen, after a read failed or before the first one.
+    RefreshOptions,
     /// Hold a different global accelerator.
     ///
     /// The accelerator in the host's spelling — the same string the host writes in its own config and
@@ -221,7 +246,7 @@ pub(crate) fn draw(
                     let chrome_above = ui.cursor().min.y - panel_top;
                     let footer = footer_height(ui);
                     if settings_view {
-                        footer_bar(ui, state);
+                        footer_bar(ui, state, action);
                         return PanelLayout {
                             desired_height: (chrome_above + footer)
                                 .clamp(MIN_PANEL_HEIGHT, state.max_height),
@@ -254,7 +279,7 @@ pub(crate) fn draw(
                             conversation(ui, state, thread, markdown)
                         })
                         .inner;
-                    footer_bar(ui, state);
+                    footer_bar(ui, state, action);
                     PanelLayout {
                         desired_height: (chrome_above + thread_padding + content + footer)
                             .clamp(MIN_PANEL_HEIGHT, state.max_height),
@@ -283,6 +308,11 @@ fn open_picker_from_env(ctx: &egui::Context) {
     let id = match which.trim().to_ascii_lowercase().as_str() {
         "session" => picker::popup_id(picker::Kind::Conversation),
         "workspace" => picker::popup_id(picker::Kind::Workspace),
+        // The footer's three, which need the panel to have been given options by the host: a
+        // screenshot cannot click a button, and the arrangement is the thing being looked at.
+        "model" => footer_popup_id(FooterKind::Model),
+        "effort" => footer_popup_id(FooterKind::Effort),
+        "permission" => footer_popup_id(FooterKind::Permission),
         _ => return,
     };
     if !egui::Popup::is_id_open(ctx, id) {
@@ -609,7 +639,31 @@ fn cards(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
 /// @param ui - the frame, for the item spacing.
 /// @returns the strip's height.
 fn footer_height(ui: &egui::Ui) -> f32 {
-    theme::TEXT_SMALL + 4.0 + f32::from(theme::PAD_FOOTER.top + theme::PAD_FOOTER.bottom) + ui.spacing().item_spacing.y
+    // Two rows and the gap between them, plus the frame's padding: the strip is no longer one line,
+    // and predicting "one line" is what let it draw past the bottom of the panel.
+    2.0 * footer_row_height(ui)
+        + theme::GAP_CLOSE
+        + f32::from(theme::PAD_FOOTER.top + theme::PAD_FOOTER.bottom)
+        + ui.spacing().item_spacing.y
+}
+
+/// How tall the footer's single row is.
+///
+/// **Measured from the things in it, not predicted from a font size.** The row holds a key chip, a
+/// picker button and a line of text, and the chip is the tallest of the three: a frame with a border
+/// and vertical padding around an 11-point line. Predicting "one line of small text" is what let the
+/// strip draw past the bottom of the panel — twice, because the second attempt predicted a different
+/// wrong number.
+///
+/// @param ui - for the live `TextStyle` heights.
+/// @returns the row's height, borders included.
+fn footer_row_height(ui: &egui::Ui) -> f32 {
+    let text = ui.text_style_height(&egui::TextStyle::Small);
+    // The chip: one line, a hairline top and bottom, and one pixel of padding above and below.
+    let chip = text + 2.0 * theme::BORDER + 2.0;
+    // The picker button: `theme::ICON + 10.0` in `picker_button`, and never less than the icon button.
+    let picker = (theme::ICON + 10.0).max(theme::ICON_BUTTON);
+    chip.max(picker).max(text)
 }
 
 /// Which turn the panel is on, in the design's wording.
@@ -666,53 +720,113 @@ fn kbd(ui: &mut egui::Ui, keys: &[icons::Icon], what: &str) {
 /// the right. The keys are spelled out rather than drawn as `↵` and `⇧` because the bundled
 /// fonts have no glyphs for them — the first version showed two tofu boxes where the user
 /// was supposed to read a keyboard.
-fn footer_bar(ui: &mut egui::Ui, state: &PanelState) {
+fn footer_bar(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
     let frame = egui::Frame::NONE.inner_margin(theme::PAD_FOOTER);
     frame.show(ui, |ui| {
-        ui.horizontal(|ui| {
-            // While a turn is being worked on the hints give way to what is happening: the design does
-            // the same (its `shortcuts()` is restored when the turn ends), and a key hint is worth
-            // less than knowing whether the model is still going.
-            if state.turn_active {
-                ui.label(theme::meta(
-                    ui.ctx(),
-                    &format!("{} · 正在生成", turn_label(state)),
-                ));
-                return;
-            }
-            ui.spacing_mut().item_spacing.x = theme::GAP_TIGHT;
-            // The keys are drawn as chips, which is how the design shows them: a key is a thing
-            // you press, and a bordered box says so at a glance. `KEY_RETURN` and a fat up arrow
-            // are the font's nearest glyphs to ↵ and ⇧ — the shift symbol it does not have.
-            kbd(ui, &[icons::Icon::KeyReturn], "发送");
-            kbd(ui, &[icons::Icon::ShiftUp, icons::Icon::KeyReturn], "换行");
-            kbd(ui, &[], "关闭");
-            // The right-hand side is empty unless there is something to say. It used to report
-            // what the panel was following on every frame, which under the current design is
-            // both stale ("following the newest" no longer exists) and noise: the session picker
-            // in the top bar answers that question, and the composer answers the one that
-            // matters — whether a message can be sent.
-            let status = state
-                .prompt_line
-                .clone()
-                .or_else(|| state.fonts_warning.clone());
-            if let Some(status) = status {
-                let colour = if state.prompt_line.is_none() && state.fonts_warning.is_some() {
-                    warn_text()
-                } else {
-                    muted()
-                };
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        // **One row, and the right-hand side is placed before the left.** The panel is 640 wide and
+        // this strip now carries key hints, statistics and three controls; laying the hints out first
+        // and then asking for "the rest" left the statistics printed over them, because a
+        // right-to-left area inside a horizontal row starts wherever the row's cursor has got to. So
+        // the controls are placed against the strip's right edge first, and the hints take what is
+        // genuinely left over — which is also the order of importance when space runs short.
+        // **One rectangle, allocated, with both groups drawn inside it.** The strip used to place two
+        // children into the space the frame had already handed out, and the frame had measured that
+        // space from a *prediction* of one text line — so a strip holding chips, statistics and three
+        // controls drew past the bottom of the panel it had asked for, which the layout invariant test
+        // caught as "the lowest text is at 397, but the panel asked for 228".
+        // **The idiomatic pattern, and the one that works.** `with_layout(right_to_left)` inside a
+        // horizontal row is how egui itself lays out a left label beside right-aligned controls: the
+        // inner layout is given the row's remaining width and starts at its right edge. Four earlier
+        // attempts failed by placing *children* — `new_child` does not move the parent's cursor, and a
+        // right-to-left child starts from the width it is given rather than from the row's edge — so
+        // the hints and the statistics ended up printed over each other. The row itself is what
+        // carries the position here, and there is nothing left to measure or predict.
+        // **Two rows, because the content does not fit in one.** The strip now carries key hints, up
+        // to four statistics, three pickers and a status line; at 640 pixels the left group and the
+        // right group overlap, and the attempts to make one row work by measuring and placing cost
+        // more than the second row does. Splitting them is also what the panel's own hierarchy wants:
+        // the first row is about *this conversation* (what the keys do, or that it is still
+        // generating), and the second is about *its settings* (what it ran with, and what it may be
+        // changed to). The design's own single strip is the thing to reconcile later, with the final
+        // styling.
+        ui.vertical(|ui| {
+            // **The width is pinned before the rows are drawn.** A vertical layout sizes itself to its
+            // children, so the rows inside it were given a shrunken width — the right-hand group then
+            // ran off the panel's right edge, and the statistics printed over the hints. `set_width`
+            // takes what the panel actually has.
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = theme::GAP_CLOSE;
+            // The first row: the keys, and whatever the panel has to report.
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::GAP_TIGHT;
+                // While a turn is being worked on the hints give way to what is happening: the design
+                // does the same (its `shortcuts()` is restored when the turn ends), and a key hint is
+                // worth less than knowing whether the model is still going.
+                if state.turn_active {
                     ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(status).size(theme::TEXT_SMALL).color(colour),
-                        )
-                        .truncate(),
+                        egui::Label::new(theme::meta(ui.ctx(), &format!("{} · 正在生成", turn_label(state)))).truncate(),
                     );
+                } else {
+                    // The keys are drawn as chips, which is how the design shows them: a key is a thing
+                    // you press, and a bordered box says so at a glance. `KEY_RETURN` and a fat up arrow
+                    // are the font's nearest glyphs to ↵ and ⇧ — the shift symbol it does not have.
+                    kbd(ui, &[icons::Icon::KeyReturn], "发送");
+                    kbd(ui, &[icons::Icon::ShiftUp, icons::Icon::KeyReturn], "换行");
+                    kbd(ui, &[], "关闭");
+                }
+                if let Some(status) = status_line(state) {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(status.text).size(theme::TEXT_SMALL).color(status.colour),
+                            )
+                            .truncate(),
+                        );
+                    });
+                }
+            });
+            // The second row: the statistics, and the three settings. Both are about the conversation
+            // rather than about the keys, and they are laid out from the right so the controls keep
+            // their place whatever the statistics end up saying.
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = theme::GAP_TIGHT;
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = theme::GAP_TIGHT;
+                    footer::settings(ui, state, action);
+                    ui.add_space(theme::GAP);
+                    footer::statistics(ui, state.stats);
                 });
-            }
+            });
         });
     });
+}
+
+/// What the panel has to report, and how loudly.
+struct Status {
+    /// The sentence.
+    text: String,
+    /// Its colour.
+    colour: egui::Color32,
+}
+
+/// The one line the panel owes the user, if any.
+///
+/// Precedence is by how much the user needs to know: what just happened to their message, then why a
+/// setting did not change, then the font warning that has been true since startup.
+///
+/// @param state - everything the panel knows.
+/// @returns the line and its colour, or `None` when there is nothing to say.
+fn status_line(state: &PanelState) -> Option<Status> {
+    if let Some(prompt) = &state.prompt_line {
+        return Some(Status { text: prompt.clone(), colour: muted() });
+    }
+    if let Some(failure) = &state.setting_failure {
+        return Some(Status { text: failure.clone(), colour: warn_text() });
+    }
+    state
+        .fonts_warning
+        .as_ref()
+        .map(|warning| Status { text: warning.clone(), colour: warn_text() })
 }
 
 #[cfg(test)]

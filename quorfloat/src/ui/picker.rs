@@ -50,8 +50,11 @@ impl Kind {
 }
 
 /// What a row reported.
+///
+/// `pub(super)` because the footer's pickers use the same rows, and a row that reported something
+/// its caller could not name would be a row only half shared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Row {
+pub(super) enum Row {
     /// The user chose this one.
     Chosen,
     /// The user pinned it, or unpinned it.
@@ -83,7 +86,7 @@ pub(super) fn workspaces(ui: &mut egui::Ui, state: &PanelState) -> Outcome {
         .or(state.pinned_workspace.as_deref())
         .and_then(|id| state.workspaces.iter().find(|workspace| workspace.workspace_id == id))
         .map_or_else(|| "工作区".to_owned(), |workspace| workspace.title.clone());
-    let button = picker_button(ui, Kind::Workspace, Icon::Folder, &current, state.pinned_workspace.is_some());
+    let button = picker_button(ui, Kind::Workspace.id(), Some(Icon::Folder), &current, state.pinned_workspace.is_some());
 
     let mut action = None;
     egui::Popup::menu(&button)
@@ -106,7 +109,7 @@ pub(super) fn workspaces(ui: &mut egui::Ui, state: &PanelState) -> Outcome {
                     popover_note(ui, "Harness 里还没有工作区。");
                     popover_hint(ui, "在 Harness 中打开一个文件夹，再回来点「重新查询」。");
                 }
-                if let Some(Row::Chosen) = option_row(ui, Icon::Search, "重新查询", None, false, false, false) {
+                if let Some(Row::Chosen) = option_row(ui, Some(Icon::Search), "重新查询", None, false, false, false) {
                     action = Some(Action::RefreshWorkspaces);
                 }
             }
@@ -114,7 +117,7 @@ pub(super) fn workspaces(ui: &mut egui::Ui, state: &PanelState) -> Outcome {
                 let chosen = state.current_workspace.as_deref() == Some(workspace.workspace_id.as_str());
                 let pinned = state.pinned_workspace.as_deref() == Some(workspace.workspace_id.as_str());
                 let detail = newest_in(state, workspace).map(|newest| short_time(newest.updated_at, now()));
-                match option_row(ui, Icon::Folder, &workspace.title, detail.as_deref(), chosen, pinned, true) {
+                match option_row(ui, Some(Icon::Folder), &workspace.title, detail.as_deref(), chosen, pinned, true) {
                     Some(Row::Chosen) => {
                         // Switching workspace means switching to what is in it. With nothing
                         // in it there is nowhere to go, and the hint below says so.
@@ -157,7 +160,7 @@ pub(super) fn conversations(ui: &mut egui::Ui, state: &PanelState) -> Outcome {
                 .map_or_else(|| short_id(id).to_owned(), str::to_owned)
         })
         .unwrap_or_else(|| "新会话".to_owned());
-    let button = picker_button(ui, Kind::Conversation, Icon::Chat, &current, state.pinned.is_some());
+    let button = picker_button(ui, Kind::Conversation.id(), Some(Icon::Chat), &current, state.pinned.is_some());
 
     let mut action = None;
     egui::Popup::menu(&button)
@@ -172,7 +175,7 @@ pub(super) fn conversations(ui: &mut egui::Ui, state: &PanelState) -> Outcome {
             // something the list shows by existing.
             popover_head(ui, "会话", &workspace_title(state));
             if let Some(Row::Chosen) =
-                option_row(ui, Icon::Plus, "开始新会话", Some("发送时创建"), false, false, false)
+                option_row(ui, Some(Icon::Plus), "开始新会话", Some("发送时创建"), false, false, false)
             {
                 // Not "create one now": the design creates the conversation when the user
                 // submits, so this clears whatever the panel was pinned or switched to and
@@ -199,7 +202,7 @@ pub(super) fn conversations(ui: &mut egui::Ui, state: &PanelState) -> Outcome {
                 let pinned = state.pinned.as_deref() == Some(conversation.session_id.as_str());
                 let name = conversation_name(state, conversation);
                 let detail = describe(conversation, now());
-                match option_row(ui, Icon::Chat, &name, Some(&detail), attached, pinned, true) {
+                match option_row(ui, Some(Icon::Chat), &name, Some(&detail), attached, pinned, true) {
                     Some(Row::Chosen) => {
                         action = Some(Action::ChooseConversation { session_id: conversation.session_id.clone() });
                         egui::Popup::close_id(ui.ctx(), Kind::Conversation.id());
@@ -333,13 +336,19 @@ fn now() -> i64 {
 /// The button a popover hangs from.
 ///
 /// @param ui - where to draw.
-/// @param kind - which picker, for the id that remembers whether it is open.
-/// @param icon - the leading mark.
+/// @param id - the popup this button belongs to, which is also what remembers whether it is open.
+/// @param icon - the leading mark, when the button has one.
 /// @param label - what it says.
 /// @param marked - whether something about it is pinned, which is drawn in the accent colour.
 /// @returns the response, for the popup to anchor to.
-fn picker_button(ui: &mut egui::Ui, kind: Kind, icon: Icon, label: &str, marked: bool) -> egui::Response {
-    let open = egui::Popup::is_id_open(ui.ctx(), kind.id());
+pub(super) fn picker_button(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    icon: Option<Icon>,
+    label: &str,
+    marked: bool,
+) -> egui::Response {
+    let open = egui::Popup::is_id_open(ui.ctx(), id);
     // Measured, because the button has to make room for its label and then clip it: the
     // tools beside it stay where they are whatever a workspace or a conversation is called.
     let label_width = ui
@@ -361,8 +370,12 @@ fn picker_button(ui: &mut egui::Ui, kind: Kind, icon: Icon, label: &str, marked:
     }
     let mut cursor = rect.left() + 7.0;
     let middle = rect.center().y;
-    icons::paint(ui, egui::pos2(cursor + theme::ICON_PICKER / 2.0, middle), icon, theme::ICON_PICKER, theme::muted());
-    cursor += theme::ICON_PICKER + theme::GAP_TIGHT;
+    // Optional for the same reason the option rows' mark is: the footer's pickers show a value
+    // rather than a place, and not all of them want a symbol beside it.
+    if let Some(icon) = icon {
+        icons::paint(ui, egui::pos2(cursor + theme::ICON_PICKER / 2.0, middle), icon, theme::ICON_PICKER, theme::muted());
+        cursor += theme::ICON_PICKER + theme::GAP_TIGHT;
+    }
     // The label is clipped rather than allowed to push the tools off the bar; egui has no
     // ellipsis on a painter, so the truncation happens through the layout width above.
     ui.painter().text(
@@ -384,7 +397,7 @@ fn picker_button(ui: &mut egui::Ui, kind: Kind, icon: Icon, label: &str, marked:
 }
 
 /// The title line of a popover: what the list is, and how much of it there is.
-fn popover_head(ui: &mut egui::Ui, title: &str, detail: &str) {
+pub(super) fn popover_head(ui: &mut egui::Ui, title: &str, detail: &str) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(title).size(theme::TEXT_SMALL).color(theme::text()));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -401,31 +414,35 @@ fn popover_hint(ui: &mut egui::Ui, text: &str) {
 }
 
 /// One line of nothing much, for a list that is still empty.
-fn popover_note(ui: &mut egui::Ui, text: &str) {
+pub(super) fn popover_note(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).size(theme::TEXT_SMALL).color(theme::muted()));
 }
 
 /// The line between the list and the hint.
-fn separator(ui: &mut egui::Ui) {
+pub(super) fn separator(ui: &mut egui::Ui) {
     ui.add_space(4.0);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), theme::BORDER), egui::Sense::hover());
     ui.painter().rect_filled(rect, egui::CornerRadius::ZERO, theme::line());
     ui.add_space(4.0);
 }
 
-/// One choosable row: an icon, a name, a second line, and a pin.
+/// One choosable row: an optional mark, a name, a second line, and an optional pin.
+///
+/// Shared with the footer's pickers (`ui/footer.rs`), which is why the mark is optional: a workspace
+/// and a conversation are told apart by an icon, while a model name and a permission name are not —
+/// and a picker whose rows carry a mark they do not need is a picker that looks busier than it is.
 ///
 /// @param ui - where to draw.
-/// @param icon - the leading mark.
+/// @param icon - the leading mark, when the row has one.
 /// @param name - the row's main text.
 /// @param detail - the second line, when there is one.
 /// @param chosen - whether this is the one in effect, which draws a tick.
 /// @param pinned - whether this one is pinned, which fills the pin.
 /// @param pinnable - whether this row offers a pin at all.
 /// @returns what the row reported, if anything.
-fn option_row(
+pub(super) fn option_row(
     ui: &mut egui::Ui,
-    icon: Icon,
+    icon: Option<Icon>,
     name: &str,
     detail: Option<&str>,
     chosen: bool,
@@ -446,8 +463,10 @@ fn option_row(
         }
         let mut cursor = rect.left() + 9.0;
         let middle = rect.center().y;
-        icons::paint(ui, egui::pos2(cursor + theme::ICON_PICKER / 2.0, middle), icon, theme::ICON_PICKER, theme::muted());
-        cursor += theme::ICON_PICKER + theme::GAP_TIGHT;
+        if let Some(icon) = icon {
+            icons::paint(ui, egui::pos2(cursor + theme::ICON_PICKER / 2.0, middle), icon, theme::ICON_PICKER, theme::muted());
+            cursor += theme::ICON_PICKER + theme::GAP_TIGHT;
+        }
         ui.painter().text(
             egui::pos2(cursor, middle - 8.0),
             egui::Align2::LEFT_CENTER,

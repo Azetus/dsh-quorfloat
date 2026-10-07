@@ -27,6 +27,7 @@ import {
   createHarnessFromContext,
   HarnessError,
   probeServices,
+  type ModelChoiceView,
   type ProbeResult,
   type QuorfloatHarness,
 } from './harness/adapter.js'
@@ -242,6 +243,10 @@ export function createPlugin(overrides: PluginOverrides = {}) {
             createSession: async workspaceId => await sessionLayer.createSession(workspaceId),
             attachSession: async sessionId => await sessionLayer.attach(sessionId),
             readHistory: async (sessionId, beforeSeq) => await sessionLayer.readHistory(sessionId, beforeSeq),
+            readOptions: async sessionId => await sessionLayer.readOptions(sessionId),
+            selectModel: async (sessionId, selection) =>
+              await sessionLayer.selectModel(sessionId, selection as ModelChoiceView),
+            setPermission: async (sessionId, value) => await sessionLayer.setPermission(sessionId, value),
             prompt: async (sessionId, requestId, text) => await sessionLayer.prompt(sessionId, requestId, text),
             cancel: async sessionId => await sessionLayer.cancel(sessionId),
             answerInteraction: async (interactionId, answer) => interactions.answer(interactionId, answer),

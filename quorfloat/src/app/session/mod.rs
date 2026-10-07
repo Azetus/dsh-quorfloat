@@ -296,9 +296,102 @@ pub struct Session {
     dump: Dump,
     /// The id and send time of the outstanding follow request, if any.
     follow_request: Option<(i64, i64)>,
+    /// Requests the *user* caused, by their id: options, model changes, permission changes.
+    ///
+    /// Deliberately not the `follow_request` slot: that one belongs to the polling loop, where one
+    /// request outstanding at a time is the discipline. These are a person clicking, and a click
+    /// while the loop happens to be mid-poll must not be lost or answer for the wrong request.
+    setting_requests: BTreeMap<i64, SettingRequest>,
+    /// What the host last said may be chosen, and what is chosen now.
+    options: Option<SessionOptions>,
+    /// The last failure of a setting change, for the panel to show.
+    setting_failure: Option<String>,
+    /// The conversation's statistics, as the host last reported them.
+    stats: Option<Stats>,
     next_request_id: i64,
     handshake_sent: bool,
     handshake_done: bool,
+}
+
+/// What the user asked the host to change about a session.
+///
+/// Kept per request so an answer can be matched to the question: a response is a bare JSON value,
+/// and "a model was selected" and "a permission was selected" have different shapes and different
+/// consequences for what the panel shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SettingRequest {
+    /// `session/options`: the catalogs.
+    Options,
+    /// `session/select`: model and reasoning effort.
+    SelectModel,
+    /// `session/permission`: the permission preset.
+    SetPermission(String),
+}
+
+/// One model the host offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelOption {
+    /// Provider route, sent back with a choice.
+    pub provider: String,
+    /// The provider's own model id.
+    pub id: String,
+    /// The label a person reads.
+    pub name: String,
+    /// The efforts this model accepts, in the host's order.
+    pub efforts: Vec<EffortOption>,
+    /// The effort the host defaults to, when it names one.
+    pub default_effort: Option<String>,
+}
+
+/// One reasoning effort a model accepts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffortOption {
+    /// Stable value sent back.
+    pub id: String,
+    /// The label a person reads.
+    pub name: String,
+}
+
+/// One permission preset the host offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionOption {
+    /// Stable value sent back.
+    pub value: String,
+    /// The label a person reads.
+    pub name: String,
+}
+
+/// What the host says may be chosen for the attached conversation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionOptions {
+    /// Every model, in the host's order. Flattened: the panel shows one list, and the provider is
+    /// carried on each entry rather than being a heading to navigate.
+    pub models: Vec<ModelOption>,
+    /// The model in effect, as `(provider, id)`.
+    pub current_model: Option<(String, String)>,
+    /// The reasoning effort in effect, when one is.
+    pub current_effort: Option<String>,
+    /// The permission presets offered.
+    pub permissions: Vec<PermissionOption>,
+    /// The permission preset in effect.
+    pub current_permission: Option<String>,
+}
+
+/// A conversation's statistics, as the host reports them.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Stats {
+    /// Turns with at least one closed step.
+    pub turns: u64,
+    /// Closed steps.
+    pub steps: u64,
+    /// Output tokens per second, when it can be computed.
+    pub tokens_per_second: Option<f64>,
+    /// Cache-read share of the prompt, as a percentage.
+    pub cache_hit_percent: Option<u32>,
+    /// Prompt tokens of the most recent request.
+    pub context_tokens: Option<u64>,
+    /// The model's context capacity.
+    pub context_limit: Option<u64>,
 }
 
 impl Session {
@@ -324,6 +417,10 @@ impl Session {
             prompts_issued: 0,
             dump: Dump::default(),
             follow_request: None,
+            setting_requests: BTreeMap::new(),
+            options: None,
+            setting_failure: None,
+            stats: None,
             next_request_id: 1,
             handshake_sent: false,
             handshake_done: false,
@@ -477,6 +574,10 @@ impl Session {
                 self.absorb_config(params.as_ref().and_then(|value| value.get("config")));
                 sink.log("host sent the effective configuration");
             }
+            "session/stats" => match params.as_ref() {
+                Some(params) => self.note_stats(params, sink),
+                None => sink.log("session/stats carried no params"),
+            },
             "interaction/open" => self.admit_interaction(params.as_ref(), sink),
             "window/visibility" => match WindowCommand::parse(params.as_ref()) {
                 Some(command) => self.commands.push(command),
@@ -563,6 +664,12 @@ impl Session {
             return;
         }
         let request_id = id.as_i64();
+        // The user's own requests, before the polling loop's: they are answered once and a person is
+        // waiting on them, while the loop simply asks again.
+        if let Some(request) = request_id.and_then(|value| self.setting_requests.remove(&value)) {
+            self.resolve_setting(request, outcome, sink);
+            return;
+        }
         if let Some((pending, _)) = self.follow_request {
             if request_id == Some(pending) {
                 self.follow_request = None;
@@ -594,6 +701,10 @@ impl Session {
                     self.host.host_version.as_deref().unwrap_or("unknown"),
                     self.host.session_id.as_deref().unwrap_or("unknown"),
                 ));
+                // And the pickers' contents, before anything is attached: the catalogs are
+                // process-wide, so asking now means the model and permission menus are filled by the
+                // time a user opens one rather than showing an empty list that fills in later.
+                self.request_options(sink);
             }
             Err(error) => {
                 // A version mismatch is not a bug to retry through: the host will
@@ -762,6 +873,9 @@ impl Session {
     ///
     /// @param session_id - the pinned conversation, if one was remembered.
     pub fn adopt_pinned(&mut self, session_id: Option<String>) {
+        // The pinned conversation is a different one from whatever was attached before, so the
+        // previous one's effort and permission must not be shown as this one's.
+        self.forget_settings_for_another_conversation();
         self.follow.adopt_pinned(session_id);
     }
 
@@ -771,6 +885,7 @@ impl Session {
     /// @param sink - where the request goes.
     /// @returns whether the request was written.
     pub fn choose_conversation(&mut self, session_id: &str, sink: &mut dyn FrameSink) -> bool {
+        self.forget_settings_for_another_conversation();
         let now = rpc::now_millis();
         let outgoing = self.follow.choose(session_id, now);
         self.send_request(outgoing, now, sink)
@@ -888,6 +1003,198 @@ impl Session {
             self.follow.abandon(now);
             sink.log(&format!("could not ask about conversations: {error}"));
         }
+    }
+
+    /// Ask the host what may be chosen for this conversation.
+    ///
+    /// Safe before a conversation is attached: the catalogs are process-wide, so the pickers can be
+    /// ready rather than appearing empty and filling in later. That is also why the request carries
+    /// no session id when there is none — the host treats it as optional for this method alone.
+    ///
+    /// @param sink - where the request goes.
+    pub fn request_options(&mut self, sink: &mut dyn FrameSink) {
+        let id = self.take_request_id();
+        let params = match self.follow.session_id() {
+            Some(session_id) => json!({ "sessionId": session_id }),
+            None => json!({}),
+        };
+        self.setting_requests.insert(id, SettingRequest::Options);
+        if let Err(error) = sink.send(&rpc::request(id, "session/options", params)) {
+            self.setting_requests.remove(&id);
+            self.setting_failure = Some(format!("无法读取可选项：{error}"));
+        }
+    }
+
+    /// Switch the attached conversation's model and reasoning effort.
+    ///
+    /// **Both together**, because the host holds them in one selection: a model change resets the
+    /// effort to that model's default, so sending an effort separately would briefly register one the
+    /// model may not have.
+    ///
+    /// @param provider - the provider route of the chosen model.
+    /// @param model - the chosen model's id.
+    /// @param effort - the effort to pair with it, or `None` for the host's default.
+    /// @param sink - where the request goes.
+    pub fn select_model(
+        &mut self,
+        provider: &str,
+        model: &str,
+        effort: Option<&str>,
+        sink: &mut dyn FrameSink,
+    ) {
+        let Some(session_id) = self.follow.session_id().map(str::to_owned) else {
+            self.setting_failure = Some("尚未跟随任何会话".to_owned());
+            return;
+        };
+        let id = self.take_request_id();
+        let mut params = json!({ "sessionId": session_id, "provider": provider, "model": model });
+        if let Some(effort) = effort {
+            params["reasoningEffort"] = json!(effort);
+        }
+        self.setting_requests.insert(id, SettingRequest::SelectModel);
+        if let Err(error) = sink.send(&rpc::request(id, "session/select", params)) {
+            self.setting_requests.remove(&id);
+            self.setting_failure = Some(format!("无法切换模型：{error}"));
+        }
+    }
+
+    /// Apply one permission preset to the attached conversation.
+    ///
+    /// @param value - the preset's stable value, as the catalog spelled it.
+    /// @param sink - where the request goes.
+    pub fn set_permission(&mut self, value: &str, sink: &mut dyn FrameSink) {
+        let Some(session_id) = self.follow.session_id().map(str::to_owned) else {
+            self.setting_failure = Some("尚未跟随任何会话".to_owned());
+            return;
+        };
+        let id = self.take_request_id();
+        self.setting_requests
+            .insert(id, SettingRequest::SetPermission(value.to_owned()));
+        let frame = rpc::request(
+            id,
+            "session/permission",
+            json!({ "sessionId": session_id, "value": value }),
+        );
+        if let Err(error) = sink.send(&frame) {
+            self.setting_requests.remove(&id);
+            self.setting_failure = Some(format!("无法切换权限：{error}"));
+        }
+    }
+
+    /// Record the outcome of one setting request.
+    ///
+    /// @param request - which question was answered.
+    /// @param outcome - the host's answer.
+    /// @param sink - for the record.
+    fn resolve_setting(
+        &mut self,
+        request: SettingRequest,
+        outcome: Result<Value, RpcError>,
+        sink: &mut dyn FrameSink,
+    ) {
+        match outcome {
+            Ok(result) => {
+                self.setting_failure = None;
+                match request {
+                    SettingRequest::Options => {
+                        self.options = Some(parse_options(&result));
+                        // On the record as a mark: "the model list is empty" is a question about
+                        // this line, and the panel cannot show what it was never given.
+                        let options = self.options.as_ref();
+                        sink.mark(&format!(
+                            "options {} models, {} permissions, model={} permission={}",
+                            options.map_or(0, |options| options.models.len()),
+                            options.map_or(0, |options| options.permissions.len()),
+                            options
+                                .and_then(|options| options.current_model.as_ref())
+                                .map_or("?", |(_, model)| model.as_str()),
+                            options
+                                .and_then(|options| options.current_permission.as_deref())
+                                .unwrap_or("?"),
+                        ));
+                    }
+                    SettingRequest::SelectModel => {
+                        // The authoritative value comes back in the projection, not here: this
+                        // answer only says the host accepted the switch. The panel therefore
+                        // re-reads, rather than drawing what it asked for.
+                        sink.mark("model selected");
+                        self.request_options(sink);
+                    }
+                    SettingRequest::SetPermission(value) => {
+                        sink.mark(&format!("permission {value} selected"));
+                        self.request_options(sink);
+                    }
+                }
+            }
+            Err(error) => {
+                // Kept, not logged and dropped: a permission or model that did not change is
+                // invisible otherwise — the panel would go on showing the old value as if the click
+                // had never happened.
+                let why = format!("[{}] {}", error.code, error.message);
+                self.setting_failure = Some(why.clone());
+                sink.mark(&format!("setting refused: {why}"));
+            }
+        }
+    }
+
+    /// Drop the values that belonged to another conversation.
+    ///
+    /// The catalogs are process-wide and survive; the *current* model, effort and permission are per
+    /// session, so carrying them across a switch would show one conversation's permissions beside
+    /// another's contents — which is the one thing this control exists to make visible.
+    fn forget_settings_for_another_conversation(&mut self) {
+        if let Some(options) = &mut self.options {
+            options.current_model = None;
+            options.current_effort = None;
+            options.current_permission = None;
+        }
+        self.stats = None;
+        self.setting_failure = None;
+    }
+
+    /// What the host last said may be chosen, if it has said.
+    #[must_use]
+    pub fn options(&self) -> Option<&SessionOptions> {
+        self.options.as_ref()
+    }
+
+    /// The last failure of a setting change, for the panel to show.
+    #[must_use]
+    pub fn setting_failure(&self) -> Option<&str> {
+        self.setting_failure.as_deref()
+    }
+
+    /// The conversation's statistics, if the host has reported any.
+    #[must_use]
+    pub fn stats(&self) -> Option<Stats> {
+        self.stats
+    }
+
+    /// Record the statistics the host pushed.
+    ///
+    /// @param params - the notification's params: `{sessionId, stats}`.
+    fn note_stats(&mut self, params: &Value, sink: &mut dyn FrameSink) {
+        // Only the conversation being shown: a notification for another one would put its token
+        // counts under this conversation's answer.
+        let session_id = params.get("sessionId").and_then(Value::as_str);
+        if session_id != self.follow.session_id() {
+            return;
+        }
+        let Some(stats) = params.get("stats") else {
+            sink.log("session/stats carried no statistics");
+            return;
+        };
+        self.stats = Some(Stats {
+            turns: stats.get("turns").and_then(Value::as_u64).unwrap_or(0),
+            steps: stats.get("steps").and_then(Value::as_u64).unwrap_or(0),
+            tokens_per_second: stats.get("tokensPerSecond").and_then(Value::as_f64),
+            cache_hit_percent: stats
+                .get("cacheHitPercent")
+                .and_then(Value::as_u64)
+                .map(|percent| percent as u32),
+            context_tokens: stats.get("contextTokens").and_then(Value::as_u64),
+            context_limit: stats.get("contextLimit").and_then(Value::as_u64),
+        });
     }
 
     /// Ask the host for a fresh subscription to the conversation being followed.
@@ -1373,6 +1680,104 @@ impl Session {
 }
 
 
+/// Read the choices a `session/options` answer described.
+///
+/// Every level is checked rather than trusted, and an entry that cannot be selected is dropped:
+/// a model with no id cannot be sent back, so offering it would be offering a dead row. The shapes
+/// here are the ones the host builds (`readModelGroups` / the permission catalog in
+/// `src/harness/adapter.ts`), and an unrecognised shape yields an empty list rather than a guess.
+///
+/// @param result - the answer's result object.
+/// @returns what may be chosen, with whatever could be read.
+#[must_use]
+pub fn parse_options(result: &Value) -> SessionOptions {
+    let mut options = SessionOptions::default();
+    if let Some(current) = result.get("current") {
+        let provider = current.get("provider").and_then(Value::as_str);
+        let model = current.get("model").and_then(Value::as_str);
+        if let (Some(provider), Some(model)) = (provider, model) {
+            options.current_model = Some((provider.to_owned(), model.to_owned()));
+        }
+        options.current_effort = current
+            .get("reasoningEffort")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+    }
+    if let Some(groups) = result.get("groups").and_then(Value::as_array) {
+        for group in groups {
+            // `provider`, not `id`: the host projects the upstream group's `id` into a `provider`
+            // field, because that is what it is — the provider route a choice must name. Reading `id`
+            // here worked against a hand-written fixture and silently produced an empty model list
+            // against the real host, which is exactly what a fixture written from the same assumption
+            // cannot catch.
+            let provider = group
+                .get("provider")
+                .or_else(|| group.get("id"))
+                .and_then(Value::as_str);
+            let Some(provider) = provider else {
+                continue;
+            };
+            let Some(models) = group.get("models").and_then(Value::as_array) else {
+                continue;
+            };
+            for model in models {
+                let Some(id) = model.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let efforts = model
+                    .get("efforts")
+                    .and_then(Value::as_array)
+                    .map(|efforts| {
+                        efforts
+                            .iter()
+                            .filter_map(|effort| {
+                                let id = effort.get("id").and_then(Value::as_str)?;
+                                let name = effort
+                                    .get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or(id);
+                                Some(EffortOption { id: id.to_owned(), name: name.to_owned() })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                options.models.push(ModelOption {
+                    provider: provider.to_owned(),
+                    id: id.to_owned(),
+                    name: model
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or(id)
+                        .to_owned(),
+                    efforts,
+                    default_effort: model
+                        .get("defaultEffort")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                });
+            }
+        }
+    }
+    if let Some(permissions) = result.get("permissions").and_then(Value::as_array) {
+        options.permissions = permissions
+            .iter()
+            .filter_map(|permission| {
+                let value = permission.get("value").and_then(Value::as_str)?;
+                let name = permission
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(value);
+                Some(PermissionOption { value: value.to_owned(), name: name.to_owned() })
+            })
+            .collect();
+    }
+    options.current_permission = result
+        .get("permission")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    options
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1829,6 +2234,245 @@ mod tests {
     }
 
     #[test]
+    fn the_handshake_asks_what_may_be_chosen() {
+        // Before anything is attached, on purpose: the catalogs are process-wide, so the pickers can
+        // be filled by the time a user opens one. A panel that waited for a conversation would show
+        // an empty model menu for as long as it took them to notice.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        session.on_frame(hello_ok(), &mut sink);
+        let options = sink
+            .frames
+            .iter()
+            .find(|frame| frame["method"] == "session/options")
+            .expect("the handshake asks for the options");
+        assert!(
+            options["params"].get("sessionId").is_none(),
+            "and asks without a session id, which this one method allows: {}",
+            options["params"],
+        );
+    }
+
+    #[test]
+    fn the_options_answer_fills_the_pickers_and_is_on_the_record() {
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        session.on_frame(hello_ok(), &mut sink);
+        let id = sink.frames.last().expect("an options request")["id"].clone();
+        session.on_frame(
+            Inbound::Response {
+                id,
+                outcome: Ok(json!({
+                    "groups": [
+                        {"id": "deepseek", "name": "DeepSeek", "models": [
+                            {"id": "v41-flash", "name": "V4.1 Flash", "efforts": [
+                                {"id": "low", "name": "低"}, {"id": "high", "name": "高"},
+                            ], "defaultEffort": "low"},
+                            {"id": "v41", "name": "V4.1"},
+                        ]},
+                    ],
+                    "current": {"provider": "deepseek", "model": "v41-flash", "reasoningEffort": "high"},
+                    "permissions": [
+                        {"value": "read-only", "name": "只读"},
+                        {"value": "workspace-write", "name": "工作区"},
+                    ],
+                    "permission": "read-only",
+                })),
+            },
+            &mut sink,
+        );
+
+        let options = session.options().expect("the answer was kept");
+        assert_eq!(options.models.len(), 2, "both models, flattened across providers");
+        assert_eq!(options.models[0].provider, "deepseek", "each carries its own provider");
+        assert_eq!(options.models[0].efforts.len(), 2);
+        assert_eq!(options.models[1].efforts.len(), 0, "a model without effort control is fine");
+        assert_eq!(options.current_model, Some(("deepseek".to_owned(), "v41-flash".to_owned())));
+        assert_eq!(options.current_effort.as_deref(), Some("high"));
+        assert_eq!(options.current_permission.as_deref(), Some("read-only"));
+        assert_eq!(session.setting_failure(), None);
+        // The marker is how "the menu is empty" is answered afterwards: the panel cannot show what
+        // it was never given, and this line says whether it was given anything.
+        assert!(
+            sink.marks.iter().any(|mark| mark == "options 2 models, 2 permissions, model=v41-flash permission=read-only"),
+            "the read is on the record: {:?}",
+            sink.marks,
+        );
+    }
+
+    #[test]
+    fn choosing_a_model_sends_the_effort_with_it() {
+        // The host holds the model and the effort in one selection, and a model change resets the
+        // effort to that model's default. Sending the effort separately would therefore register one
+        // the new model may not accept — for a moment, which is a moment the next step can run in.
+        let (mut session, mut sink) = followed();
+        session.select_model("deepseek", "v41-flash", Some("high"), &mut sink);
+        let frame = last_request(&sink);
+        assert_eq!(frame["method"], "session/select");
+        assert_eq!(frame["params"]["sessionId"], "session-1");
+        assert_eq!(frame["params"]["provider"], "deepseek");
+        assert_eq!(frame["params"]["model"], "v41-flash");
+        assert_eq!(frame["params"]["reasoningEffort"], "high");
+
+        // And without an effort, the field is absent rather than null: "the host decides" is not a
+        // value, and sending `null` would be this process inventing one.
+        session.select_model("deepseek", "v41", None, &mut sink);
+        assert!(last_request(&sink)["params"].get("reasoningEffort").is_none());
+    }
+
+    #[test]
+    fn the_options_parser_reads_the_provider_field_the_host_actually_sends() {
+        // The shape here is copied from a **real** answer captured off the running host
+        // (`console.error` of `modelCatalog()`), not written from the same assumption as the parser:
+        // the host projects the upstream group's `id` into `provider`, and a fixture that called it
+        // `id` passed while the panel showed an empty model menu.
+        let payload = json!({
+            "groups": [{
+                "provider": "deepseek-official",
+                "name": "DeepSeek",
+                "models": [{
+                    "id": "deepseek-flash",
+                    "name": "DeepSeek-V41-Flash",
+                    "efforts": [{"id": "off", "name": "Off"}, {"id": "high", "name": "High"}],
+                    "defaultEffort": "high",
+                }],
+            }],
+            "current": {"provider": "deepseek-official", "model": "deepseek-flash", "reasoningEffort": "high"},
+            "permissions": [{"value": "read-only", "name": "只读"}],
+            "permission": "read-only",
+        });
+        let options = parse_options(&payload);
+        assert_eq!(options.models.len(), 1, "the real answer yields a model");
+        let model = &options.models[0];
+        assert_eq!(model.provider, "deepseek-official", "and the provider is the route to send back");
+        assert_eq!(model.id, "deepseek-flash");
+        assert_eq!(model.efforts.len(), 2);
+        assert_eq!(model.default_effort.as_deref(), Some("high"));
+        assert_eq!(options.current_model, Some(("deepseek-official".to_owned(), "deepseek-flash".to_owned())));
+        assert_eq!(options.permissions.len(), 1);
+        assert_eq!(options.current_permission.as_deref(), Some("read-only"));
+    }
+
+    #[test]
+    fn a_permission_switch_names_the_preset_not_a_sandbox_mode() {
+        // A preset decides the sandbox mode *and* the approval policy and records its own durable
+        // event. Sending a bare mode would leave the two halves disagreeing.
+        let (mut session, mut sink) = followed();
+        session.set_permission("danger-full-access", &mut sink);
+        let frame = last_request(&sink);
+        assert_eq!(frame["method"], "session/permission");
+        assert_eq!(frame["params"]["sessionId"], "session-1");
+        assert_eq!(frame["params"]["value"], "danger-full-access");
+    }
+
+    #[test]
+    fn a_refused_setting_change_is_kept_rather_than_swallowed() {
+        // A model or permission that did not change is invisible otherwise: the panel goes on showing
+        // the old value and the click looks like it did nothing at all.
+        let (mut session, mut sink) = followed();
+        session.set_permission("read-only", &mut sink);
+        let id = last_request(&sink)["id"].clone();
+        session.on_frame(
+            Inbound::Response {
+                id,
+                outcome: Err(crate::ipc::rpc::RpcError {
+                    code: -32000,
+                    message: "this session is not loaded".to_owned(),
+                    data: None,
+                }),
+            },
+            &mut sink,
+        );
+        let failure = session.setting_failure().expect("the refusal is kept");
+        assert!(failure.contains("this session is not loaded"), "{failure}");
+        assert!(failure.contains("-32000"), "and it names the code: {failure}");
+        assert!(
+            sink.marks.iter().any(|mark| mark.starts_with("setting refused:")),
+            "and it is on the record: {:?}",
+            sink.marks,
+        );
+    }
+
+    #[test]
+    fn statistics_for_another_conversation_are_ignored() {
+        // The notification carries its own session id, and a panel showing one conversation must not
+        // put another one's token counts under its answer.
+        let (mut session, mut sink) = followed();
+        session.on_frame(
+            Inbound::Notification {
+                method: "session/stats".to_owned(),
+                params: Some(json!({
+                    "sessionId": "somebody-else",
+                    "stats": {"turns": 99, "steps": 99},
+                })),
+            },
+            &mut sink,
+        );
+        assert_eq!(session.stats(), None, "another conversation's figures are not this one's");
+
+        session.on_frame(
+            Inbound::Notification {
+                method: "session/stats".to_owned(),
+                params: Some(json!({
+                    "sessionId": "session-1",
+                    "stats": {
+                        "turns": 3, "steps": 7, "tokensPerSecond": 200.5,
+                        "cacheHitPercent": 75, "contextTokens": 4000, "contextLimit": 128000,
+                    },
+                })),
+            },
+            &mut sink,
+        );
+        let stats = session.stats().expect("the attached conversation's figures are kept");
+        assert_eq!(stats.turns, 3);
+        assert_eq!(stats.steps, 7);
+        assert_eq!(stats.tokens_per_second, Some(200.5));
+        assert_eq!(stats.cache_hit_percent, Some(75));
+        assert_eq!(stats.context_tokens, Some(4000));
+        assert_eq!(stats.context_limit, Some(128000));
+    }
+
+    #[test]
+    fn switching_conversation_drops_the_other_ones_settings() {
+        // The catalogs are process-wide and stay; the *current* model, effort and permission are per
+        // session. Carrying them across a switch would show one conversation's permissions beside
+        // another's contents, which is the one thing this control exists to make visible.
+        let (mut session, mut sink) = followed();
+        // Both halves of the state, so the reset has something to reset: the catalogs (process-wide,
+        // which stay) and the values in effect (per session, which must not).
+        session.request_options(&mut sink);
+        let id = last_request(&sink)["id"].clone();
+        session.on_frame(
+            Inbound::Response {
+                id,
+                outcome: Ok(json!({
+                    "groups": [{"id": "deepseek", "name": "DeepSeek", "models": [{"id": "v41", "name": "V4.1"}]}],
+                    "current": {"provider": "deepseek", "model": "v41"},
+                    "permissions": [{"value": "read-only", "name": "只读"}],
+                    "permission": "read-only",
+                })),
+            },
+            &mut sink,
+        );
+        session.on_frame(
+            Inbound::Notification {
+                method: "session/stats".to_owned(),
+                params: Some(json!({"sessionId": "session-1", "stats": {"turns": 3, "steps": 7}})),
+            },
+            &mut sink,
+        );
+        assert!(session.stats().is_some());
+        assert!(session.options().is_some_and(|options| options.current_model.is_some()));
+
+        session.choose_conversation("older", &mut sink);
+        assert_eq!(session.stats(), None, "the other conversation's counts are gone");
+        let options = session.options().expect("the catalogs are still there");
+        assert_eq!(options.models.len(), 1, "the process-wide model list survives the switch");
+        assert!(options.current_model.is_none(), "and no model is claimed for the new one");
+        assert!(options.current_permission.is_none());
+    }
+
+    #[test]
     fn a_prompt_carries_a_fresh_idempotency_key() {
         // The host admits a given key once; two prompts sharing one are one prompt, and
         // the second thing the user typed would vanish.
@@ -2007,3 +2651,4 @@ mod tests {
     }
 
 }
+
