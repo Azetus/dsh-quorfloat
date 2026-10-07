@@ -94,9 +94,6 @@ impl WindowSettings {
         if let Some(hide) = window.get("hideOnBlur").and_then(serde_json::Value::as_bool) {
             self.hide_on_blur = hide;
         }
-        if let Some(hide) = window.get("hideOnBlur").and_then(serde_json::Value::as_bool) {
-            self.hide_on_blur = hide;
-        }
         if let Some(theme) = window.get("theme").and_then(serde_json::Value::as_str) {
             self.theme = crate::ui::theme::Preference::from_name(Some(theme));
         }
@@ -106,6 +103,33 @@ impl WindowSettings {
         if let Some(reduce) = window.get("reduceMotion").and_then(serde_json::Value::as_bool) {
             self.reduce_motion = reduce;
         }
+    }
+
+    /// Put what the user chose in the panel's own settings on top of the configuration.
+    ///
+    /// The host's configuration is the baseline and a local choice is an override — never the
+    /// other way round, or the settings view would appear to do nothing. Only the fields the user
+    /// actually set are touched, so the host stays in charge of everything else (including the
+    /// theme, until someone picks one).
+    ///
+    /// **The two spellings meet here, once.** The design labels the switch by what it gives the
+    /// user — "失焦时保持展开" — while the configuration names the behaviour the process implements,
+    /// `hideOnBlur`. Converting between them in the settings view would spread the inversion across
+    /// every place that reads either; doing it at the boundary keeps one meaning per name.
+    ///
+    /// @param self - the settings to overlay onto.
+    /// @param preferences - what the user chose here, if anything.
+    /// @returns the effective settings.
+    #[must_use]
+    pub fn with_preferences(&self, preferences: &crate::app::preferences::Preferences) -> Self {
+        let mut effective = self.clone();
+        if let Some(theme) = preferences.theme {
+            effective.theme = theme;
+        }
+        if let Some(keep_open) = preferences.keep_open {
+            effective.hide_on_blur = !keep_open;
+        }
+        effective
     }
 }
 

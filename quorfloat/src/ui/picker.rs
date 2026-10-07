@@ -16,7 +16,7 @@
 //!   switch permanent.
 //! - **The row for a conversation shows its title only when we have one.** The session list
 //!   carries no titles, so anything but the attached conversation is identified by its
-//!   workspace and its age — see `docs/prototype.md` §29.
+//!   workspace and its age — see `docs/progress.md` §29.
 
 use eframe::egui;
 
@@ -319,7 +319,7 @@ pub fn short_time(updated_at: i64, now: i64) -> String {
         // "Yesterday" rather than "1 天前", because that is how the design words the same
         // band — and it is computed from elapsed time rather than from a calendar, because
         // this process has no timezone to compare days in. `今天 14:32` would need one; see
-        // `docs/prototype.md` §34 for why that is a decision rather than an oversight.
+        // `docs/progress.md` §34 for why that is a decision rather than an oversight.
         86_400..=172_799 => "昨天".to_owned(),
         _ => format!("{} 天前", seconds / 86_400),
     }

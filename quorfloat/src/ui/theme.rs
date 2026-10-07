@@ -569,6 +569,109 @@ pub fn card_frame() -> egui::Frame {
         .inner_margin(PAD_CARD)
 }
 
+/// The settings view's own margins, the design's `.q-settings { margin:18px 22px 20px }`.
+///
+/// The left and right values are the composer's, so a setting's label starts on the same
+/// vertical line as the text the user types — the settings view replaces the conversation, and
+/// it should look like the same panel rather than a page from somewhere else.
+pub const PAD_SETTINGS: egui::Margin = egui::Margin {
+    left: 22,
+    right: 22,
+    top: 18,
+    bottom: 20,
+};
+
+/// Between the settings heading and the first row (`.q-settings-title { margin-bottom:8px }`).
+pub const GAP_SETTINGS_HEAD: f32 = 8.0;
+
+/// Inside one settings row (`.q-setting { padding:12px 0 }`).
+pub const PAD_SETTING: egui::Margin = egui::Margin {
+    left: 0,
+    right: 0,
+    top: 12,
+    bottom: 12,
+};
+
+/// Between a setting's label and the control opposite it (`gap:14px`).
+pub const GAP_SETTING: f32 = 14.0;
+
+/// How far the heading's "back" button is inset (`padding:5px 8px`).
+pub const PAD_SETTINGS_BACK: egui::Margin = egui::Margin {
+    left: 8,
+    right: 8,
+    top: 5,
+    bottom: 5,
+};
+
+/// The hotkey chip's box (`.q-shortcut { width:102px; padding:5px 8px }`).
+pub const SETTING_CHIP_WIDTH: f32 = 102.0;
+
+/// Inside the hotkey chip.
+pub const PAD_SETTING_CHIP: egui::Margin = egui::Margin {
+    left: 8,
+    right: 8,
+    top: 5,
+    bottom: 5,
+};
+
+/// The toggle switch's track (`.q-setting input[type="checkbox"] { width:29px; height:17px }`).
+///
+/// A switch rather than a tick box, because that is what the design draws and because it is the
+/// right control for a preference: the question is which of two states the panel is in, and a
+/// switch shows the state it is in rather than the state a click would produce.
+pub const SWITCH_SIZE: [f32; 2] = [29.0, 17.0];
+
+/// The switch's knob (`width:13px; height:13px; top:2px; left:2px`).
+pub const SWITCH_KNOB: f32 = 13.0;
+
+/// The gap between a setting's label and its explanation (`small { font-size:11px }`).
+pub const GAP_SETTING_NOTE: f32 = 2.0;
+
+/// The "back to the conversation" control in the settings heading.
+///
+/// Text rather than an icon, which is what the design draws: the heading already says where the
+/// user is, and the way out of a page is a word, not a glyph.
+///
+/// @param ctx - for the panel's own font.
+/// @param label - what the button says.
+/// @returns the button, ready to add to a layout.
+#[must_use]
+pub fn settings_back_button(ctx: &egui::Context, label: &str) -> egui::Button<'static> {
+    egui::Button::new(
+        egui::RichText::new(label)
+            .font(font(ctx, Weight::Regular, TEXT_META))
+            .color(muted()),
+    )
+    .fill(egui::Color32::TRANSPARENT)
+    .stroke(egui::Stroke::NONE)
+    .corner_radius(egui::CornerRadius::same(RADIUS_PICKER))
+}
+
+/// The design's chip: a soft surface with no outline, for a control that shows a state.
+///
+/// This is its `.q-picker` — the workspace and conversation triggers in the top bar — and the
+/// settings choices borrow it deliberately: "which theme" and "which conversation" are the same kind
+/// of question, and the one that is *in effect* is filled while the others stay soft. An outlined
+/// button would say "click me", which is the wrong thing to say about two of the three.
+///
+/// @param ctx - for the panel's own font.
+/// @param label - what the chip says.
+/// @param on - whether this is the choice in effect.
+/// @returns the button, ready to add to a layout.
+#[must_use]
+pub fn chip_button(ctx: &egui::Context, label: &str, on: bool) -> egui::Button<'static> {
+    let (fill, colour) = if on { (button(), on_button()) } else { (soft(), text()) };
+    egui::Button::new(
+        egui::RichText::new(label.to_owned())
+            .font(font(ctx, Weight::Regular, TEXT_META))
+            .color(colour),
+    )
+    .fill(fill)
+    .stroke(egui::Stroke::NONE)
+    .corner_radius(egui::CornerRadius::same(RADIUS_PICKER))
+    .min_size(egui::vec2(0.0, 26.0))
+}
+
 /// A card's title.
 ///
 /// @param ctx - for the panel's own font.

@@ -9,7 +9,7 @@
 //!
 //! - an **approval**, which a click can settle;
 //! - a **question**, which needs option widgets this build does not have yet, so it is
-//!   reported and handed back to the Harness window (`docs/protocol.md` §6).
+//!   reported and handed back to the Harness window (`docs/dsh-quorfloat.md` §6).
 //!
 //! The kind therefore travels on the wire instead of being inferred, and
 //! [`InteractionKind::Approval`] is the one this build names in

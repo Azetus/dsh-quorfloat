@@ -32,6 +32,16 @@ pub enum Hotkey {
         /// The accelerator that was attempted.
         spec: String,
     },
+    /// Registered, without a manager. See [`Hotkey::active_for_test`].
+    ///
+    /// Always compiled, because a variant cannot be conditionally absent from an enum that other
+    /// code matches on exhaustively. Nothing in this crate constructs it outside tests, and the
+    /// methods below treat it exactly as [`Hotkey::Active`].
+    #[doc(hidden)]
+    Held {
+        /// The accelerator reported as held.
+        spec: String,
+    },
 }
 
 impl Hotkey {
@@ -66,14 +76,14 @@ impl Hotkey {
     /// Whether registration succeeded. This is what `hello` reports.
     #[must_use]
     pub fn is_active(&self) -> bool {
-        matches!(self, Self::Active { .. })
+        matches!(self, Self::Active { .. } | Self::Held { .. })
     }
 
     /// Why registration failed, if it did.
     #[must_use]
     pub fn reason(&self) -> Option<&str> {
         match self {
-            Self::Active { .. } => None,
+            Self::Active { .. } | Self::Held { .. } => None,
             Self::Unavailable { reason, .. } => Some(reason),
         }
     }
@@ -82,10 +92,29 @@ impl Hotkey {
     #[must_use]
     pub fn spec(&self) -> &str {
         match self {
-            Self::Active { spec, .. } | Self::Unavailable { spec, .. } => spec,
+            Self::Active { spec, .. } | Self::Unavailable { spec, .. } | Self::Held { spec } => spec,
         }
     }
 
+    /// A *registered* hotkey, for tests, without touching the operating system.
+    ///
+    /// The success shape is the one worth testing and the one a unit test cannot otherwise reach:
+    /// [`Hotkey::register`] needs a real global-hotkey manager, and the machine a test runs on is
+    /// exactly the case this has to survive — an accelerator some other application already holds.
+    /// So the arm is spelled out here with the same fields as [`Hotkey::Active`] and no manager at
+    /// all, which is safe because nothing reads the manager except the drop that releases the grab.
+    ///
+    /// **Deliberately a third variant rather than a sneaky `Unavailable`**: the failure tests assert
+    /// that an unregistered hotkey never shows the accelerator it was *asked* for, and a constructor
+    /// that lied about the variant would make them pass for the wrong reason.
+    ///
+    /// @param spec - the accelerator to report as registered.
+    /// @returns a hotkey that reports it holds `spec`.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn active_for_test(spec: &str) -> Self {
+        Self::Held { spec: spec.to_owned() }
+    }
 }
 
 /// Watch the global hotkey on its own thread.

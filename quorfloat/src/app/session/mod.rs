@@ -7,7 +7,7 @@
 //! liveness traffic are the parts most likely to be wrong, and they must be
 //! verifiable without a host, a model, or a spawned process.
 //!
-//! Two rules from `docs/protocol.md` shape everything here:
+//! Two rules from `docs/dsh-quorfloat.md` shape everything here:
 //!
 //! - **stdout carries protocol frames and nothing else.** Log lines go to the
 //!   sink's `log`, which is stderr. A stray `println!` would corrupt the stream
@@ -1722,6 +1722,7 @@ mod tests {
         assert_eq!(sink.frames.last().expect("a list request")["method"], "sessions/list");
     }
 
+    #[test]
     fn a_chosen_conversation_is_attached_with_a_fresh_request_id() {
         // This is the step that decides whether an approval can reach the panel at all: with
         // nothing attached, every interaction is deferred before the panel ever hears about it.
@@ -1876,6 +1877,7 @@ mod tests {
         assert!(!sink.frames.iter().any(|frame| frame["method"] == "session/create"));
     }
 
+    #[test]
     fn a_prompt_with_no_conversation_creates_one_and_then_sends_it() {
         // The design's rule: the conversation is created *when the user submits*, not when the
         // panel opens. A panel that created one on every summon would fill the harness's list

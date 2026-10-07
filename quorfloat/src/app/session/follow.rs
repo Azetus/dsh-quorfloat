@@ -1,7 +1,7 @@
 //! Following a conversation.
 //!
 //! The panel answers approvals for the conversation it is *showing*, and the host
-//! decides that by `session/attach` (see `docs/protocol.md` §6): an interaction is
+//! decides that by `session/attach` (see `docs/dsh-quorfloat.md` §6): an interaction is
 //! claimed only for an attached session. With nothing attached the panel owns
 //! nothing, so every approval is answered by the Harness window — and from the
 //! outside that is indistinguishable from a panel that is broken.
@@ -1044,6 +1044,7 @@ mod tests {
         assert_eq!(follow.sessions()[0].session_id, "newest", "and it is ordered by `updatedAt`");
     }
 
+    #[test]
     fn an_attach_is_recorded_with_its_generation_and_a_breadcrumb() {
         let mut follow = started();
         let mut sink = Recorded::default();
@@ -1057,9 +1058,16 @@ mod tests {
         assert_eq!(follow.label(), Some("project"));
         assert!(sink.joined().contains("following conversation session-1"));
         // The one fact that decides whether an approval can reach the panel must survive the run.
-        assert_eq!(sink.marks, vec!["follow session-1 generation=4".to_owned()]);
+        // The list's own mark comes first and belongs here: "which conversations did the host
+        // offer" has to stay answerable afterwards, because the decision to attach was made against
+        // exactly that list.
+        assert_eq!(
+            sink.marks,
+            vec!["sessions 1 named 0".to_owned(), "follow session-1 generation=4".to_owned()],
+        );
     }
 
+    #[test]
     fn an_empty_list_is_not_an_error_and_is_retried_later() {
         // A fresh environment has no conversations at all. That is normal, must not be logged
         // every few seconds, and must not stop discovery.
@@ -1076,6 +1084,7 @@ mod tests {
         assert_eq!(sink.joined().matches("no conversations yet").count(), 1);
     }
 
+    #[test]
     fn the_same_conversation_is_not_re_attached() {
         // The steady state runs every few seconds; re-attaching would churn the subscription
         // and log a line each time.
@@ -1151,7 +1160,6 @@ mod tests {
         assert_eq!(follow.next(2_000 + POLL_INTERVAL_MS), Some(Outgoing::ListSessions));
     }
 
-    #[test]
     /// The titles the picker draws: the host carries them in the list.
     #[test]
     fn a_listed_conversation_carries_the_name_the_host_gave_it() {
@@ -1180,6 +1188,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn entries_without_a_usable_id_are_skipped() {
         let mut follow = started();
         let mut sink = Recorded::default();

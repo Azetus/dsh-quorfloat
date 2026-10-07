@@ -2,7 +2,7 @@
 //!
 //! Every value here is a contract with the TypeScript host plugin, and each one
 //! is asserted against the host's own validator in `tests/`. Nothing in this
-//! module may be changed without changing `docs/protocol.md` first: a mismatch
+//! module may be changed without changing `docs/dsh-quorfloat.md` first: a mismatch
 //! shows up as a failed handshake, which is exactly the failure this layer
 //! exists to make impossible.
 

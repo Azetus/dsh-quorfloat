@@ -12,7 +12,7 @@
 //! - **`arguments` is a JSON string, not an object**, because that is what the model
 //!   produced and the harness forwards verbatim.
 //!
-//! See `docs/protocol.md` §5 for the captured shapes.
+//! See `docs/dsh-quorfloat.md` §5 for the captured shapes.
 
 use serde_json::Value;
 

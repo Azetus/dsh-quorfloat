@@ -964,6 +964,7 @@ mod tests {
         assert!(transcript.injected_kinds().is_empty());
     }
 
+    #[test]
     fn the_buffer_keeps_the_newest_and_says_how_many_it_dropped() {
         let mut transcript = Transcript::new();
         let records = (0..(MAX_ENTRIES as i64 + 25))

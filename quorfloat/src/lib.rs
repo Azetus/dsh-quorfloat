@@ -21,7 +21,7 @@
 //! Cross-cutting: [`runtime`] holds what belongs to neither the wire nor the panel —
 //! [`runtime::hotkey`], the one input the operating system owns, and [`runtime::diag`],
 //! the optional marker and raw-frame dump, off unless the environment asks for them
-//! (`docs/prototype.md` §21.3, §23.2).
+//! (`docs/progress.md` §21.3, §23.2).
 //!
 //! The window layer sits *above* the handshake: no viewport is created until the host
 //! has answered, because the host's startup budget starts when this process does.

@@ -572,6 +572,9 @@ const WINDOW_STATE_PATH = join(DEV_HOME, 'window.json')
 /** And where it remembers pinned conversations and workspaces, for the same reason. */
 const PINNED_PATH = join(DEV_HOME, 'pinned.json')
 
+/** And the settings chosen in the panel, so a dev run cannot change the real user's theme. */
+const PREFERENCES_PATH = join(DEV_HOME, 'preferences.json')
+
 /** Start dsh, and shut it down cleanly on an interrupt. */
 function start(options, home, sidecar, staged) {
   const args = ['--profile', options.profile, '--port', options.port]
@@ -596,6 +599,9 @@ function start(options, home, sidecar, staged) {
     // `~/.dsh-quorfloat/`, and a pinned conversation from a throwaway session would follow
     // them into every later run.
     DSH_QUORFLOAT_PINNED: PINNED_PATH,
+    // Same reasoning again: the theme and the keep-open switch are the user's, and a dev run
+    // that turned the panel dark would leave it dark in every later real run.
+    DSH_QUORFLOAT_PREFERENCES: PREFERENCES_PATH,
     // A deprecation warning from a dependency pollutes every line otherwise.
     NODE_NO_WARNINGS: '1',
   }

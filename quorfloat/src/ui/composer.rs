@@ -13,7 +13,7 @@
 //! that looks like a bug in the model. macOS usually swallows that key before egui sees
 //! it, but "usually" is not a guarantee, so a frame carrying a preedit is a frame that
 //! cannot submit — and that guard is verified on a real IME rather than assumed
-//! (`docs/prototype.md` §26).
+//! (`docs/progress.md` §26).
 
 use eframe::egui;
 

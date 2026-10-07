@@ -5,7 +5,7 @@
  * user is looking at, and that fact lives only here. The Electron shell knows it
  * (`window.isVisible()`) but does not expose it to plugins, and the host process
  * has no window concept. Measured behaviour that shaped this file
- * (`docs/prototype.md` §18):
+ * (`docs/progress.md` §18):
  *
  * - `document.visibilityState` alone is not the answer. A window fully occluded
  *   by another application reports `hidden` on macOS but `visible` on Windows,
@@ -61,7 +61,7 @@ const ENDPOINT = 'quorfloat/reportPresence'
  * stdio, and this half is not on that channel, so exposing it means either
  * baking a default in at build time or adding a settings fetch to the gateway.
  * Both are more moving parts than one timing constant justifies; see the config
- * candidates in `docs/prototype.md` §21.
+ * candidates in `docs/progress.md` §21.
  */
 const HINT_DEBOUNCE_MS = 50
 

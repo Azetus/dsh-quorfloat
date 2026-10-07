@@ -1,7 +1,7 @@
 //! JSON-RPC 2.0 message shapes and the router.
 //!
 //! Standard JSON-RPC, with the project's own narrowing: ids are integers only,
-//! and the method set is fixed by `docs/protocol.md`. The host's router is the
+//! and the method set is fixed by `docs/dsh-quorfloat.md`. The host's router is the
 //! reference implementation — a method it does not know is answered
 //! `METHOD_NOT_FOUND`, and so is one this side does not know, because both ends
 //! are expected to tolerate a peer newer than themselves.

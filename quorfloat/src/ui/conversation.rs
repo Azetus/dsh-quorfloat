@@ -41,7 +41,7 @@ pub(super) fn conversation(
         // `auto_shrink([false, false])` the area *fills* whatever it is offered, so a short
         // conversation drew 57px of empty space where the layout had counted 17 — and the
         // panel came out 40px taller than its window, with the footer clipped off the bottom
-        // (see `docs/prototype.md` §30).
+        // (see `docs/progress.md` §30).
         .auto_shrink([false, true])
         .stick_to_bottom(true)
         .max_height(height)
@@ -235,7 +235,7 @@ pub(crate) fn soft_wrap_for_display(text: &str) -> String {
 /// **restarts with every call** (`ui.id().with("_table").with(curr_table)`, `pulldown.rs`), so two
 /// answers sharing a `Ui` id collide on their first table — which egui reports on screen as
 /// "Second use of Grid ID …". An id keyed by the answer's own text gives each one its own
-/// namespace, however many answers the frame happens to draw (see `docs/prototype.md` §39).
+/// namespace, however many answers the frame happens to draw (see `docs/progress.md` §39).
 ///
 /// @param text - the answer's Markdown source.
 /// @returns the egui id to scope it with.
@@ -302,7 +302,7 @@ pub(super) fn entry_ui(
             // the model is doing, and a panel that shows only conclusions makes a slow answer
             // look stuck — but it is not what the user came to read, so it is one click away
             // instead of always on screen. The design has no opinion here; the request for it
-            // came from using the panel (see `docs/prototype.md` §35).
+            // came from using the panel (see `docs/progress.md` §35).
             let reasoning = reasoning_text(blocks);
             if !reasoning.is_empty() {
                 let id = reasoning_id(&reasoning);
@@ -354,7 +354,7 @@ pub(super) fn entry_ui(
                             // tables with an auto-id `Grid`. Two of them in one frame collide, and
                             // egui says so on screen — "Second use of Grid ID 2A87 … Sometimes the
                             // solution is to use ui.push_id", which is exactly this (see
-                            // `docs/prototype.md` §39).
+                            // `docs/progress.md` §39).
                             ui.push_id(answer_id(text), |ui| {
                                 let style = theme::markdown_style(ui.style());
                                 ui.style_mut().clone_from(&style);

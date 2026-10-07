@@ -27,7 +27,7 @@
  * Simplified and Traditional Chinese, Japanese, Greek and Cyrillic, and — being
  * variable — supplies every weight from one file. The copyright notice and the version
  * this pins are recorded in `assets/fonts/OFL.txt`. What it does *not* cover (Korean,
- * Arabic, Hebrew, Thai, Devanagari, emoji) is recorded in `docs/prototype.md`, because
+ * Arabic, Hebrew, Thai, Devanagari, emoji) is recorded in `docs/progress.md`, because
  * a panel that silently shows boxes for a language is worse than one that says so.
  *
  * Usage:

@@ -20,6 +20,7 @@ mod composer;
 mod conversation;
 mod geometry;
 mod picker;
+mod settings;
 mod table;
 
 /// The one thing the app needs from the picker: the id of the workspace menu, so a send that
@@ -104,6 +105,14 @@ pub enum Action {
         /// Which one, or `None` to unpin.
         workspace_id: Option<String>,
     },
+    /// Show the settings view, replacing the conversation.
+    OpenSettings,
+    /// Leave the settings view and go back to the conversation.
+    CloseSettings,
+    /// Draw the panel in one of the design's two palettes, or follow the platform.
+    SetTheme(theme::Preference),
+    /// Keep the panel open when the user moves to another window, or let it put itself away.
+    KeepOpenOnBlur(bool),
 }
 
 /// What the drawing layer learned about the panel's own size.
@@ -170,22 +179,49 @@ pub(crate) fn draw(
                 .show(ui, |ui| {
                     let panel_top = ui.min_rect().top();
                     top_bar(ui, state, action);
-                    composer(ui, state, draft, action);
-                    if let Some(handoff) = &state.handoff {
-                        handoff_banner(ui, handoff, action);
+                    // The settings page **replaces** the conversation rather than covering it, which
+                    // is what the design does and the only arrangement that fits a panel this size:
+                    // a dialog would have to be smaller than the thing it hides. The top bar stays,
+                    // so the user can still see which conversation they are about to go back to.
+                    let settings_view = state.settings_open;
+                    if settings_view {
+                        let (outcome, back) = settings::settings(ui, state);
+                        if back {
+                            *action = Some(Action::CloseSettings);
+                        }
+                        if let Some(chosen) = outcome.action() {
+                            *action = Some(chosen);
+                        }
+                    } else {
+                        composer(ui, state, draft, action);
+                        if let Some(handoff) = &state.handoff {
+                            handoff_banner(ui, handoff, action);
+                        }
+                        cards(ui, state, action);
                     }
-                    cards(ui, state, action);
                     // Everything above the conversation, measured rather than predicted:
                     // this is the distance from the panel's top edge to where the thread
                     // starts, and it is what makes "how tall does the panel want to be" a
-                    // question with an answer instead of an estimate.
+                    // question with an answer instead of an estimate. In the settings view there is
+                    // no thread, so the same measurement is what the page itself occupies.
                     let chrome_above = ui.cursor().min.y - panel_top;
+                    let footer = footer_height(ui);
+                    if settings_view {
+                        footer_bar(ui, state);
+                        return PanelLayout {
+                            desired_height: (chrome_above + footer)
+                                .clamp(MIN_PANEL_HEIGHT, state.max_height),
+                            chrome_above,
+                            thread_padding: 0.0,
+                            thread_content: 0.0,
+                            footer,
+                        };
+                    }
                     // The composer claimed its share by being drawn first; the footer is
                     // below the conversation and has to be predicted, or a long
                     // conversation pushes the panel's own hints off the bottom. The thread's
                     // own padding is part of that arithmetic — forgetting it is how the
                     // first version drew prose against the panel's border.
-                    let footer = footer_height(ui);
                     // The rule above the thread is drawn inside this frame too, so its one pixel
                     // is part of the height being counted.
                     let thread_padding = f32::from(theme::PAD_THREAD.top + theme::PAD_THREAD.bottom)
@@ -240,6 +276,23 @@ fn open_picker_from_env(ctx: &egui::Context) {
     }
 }
 
+/// Whether the environment asks for the settings view to come up open.
+///
+/// The same kind of development aid as `open_picker_from_env`, and for the same reason: a
+/// screenshot cannot click a button, and the settings page is the one view a run without a session
+/// cannot otherwise reach. `DSH_QUORFLOAT_OPEN_SETTINGS=1` asks for it.
+///
+/// @returns whether the panel should start on the settings page.
+#[must_use]
+pub fn settings_requested() -> bool {
+    std::env::var("DSH_QUORFLOAT_OPEN_SETTINGS")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !value.is_empty() && value != "0" && value != "false"
+        })
+        .unwrap_or(false)
+}
+
 /// The shortest the panel is allowed to be.
 ///
 /// The top bar, the composer and the footer, with room to see that the conversation is
@@ -290,11 +343,43 @@ fn top_bar(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
                     occupied.push(conversations.button);
                     // The tools, pushed to the far end.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let hint = format!("收起面板（{}）", state.hotkey);
-                        let close = icon_button(ui, icons::Icon::Close, &hint);
+                        // The panel's own top-right corner: the two buttons are placed against it
+                        // rather than against the cursor, so they stay put when the pickers to
+                        // their left change width.
+                        let corner = egui::pos2(ui.max_rect().right(), ui.max_rect().top());
+                        let hint = match &state.hotkey {
+                            Some(spec) => format!("收起面板（{spec}）"),
+                            None => "收起面板".to_owned(),
+                        };
+                        let close = corner_icon_button(
+                            ui,
+                            icons::Icon::Close,
+                            &hint,
+                            false,
+                            corner,
+                        );
                         occupied.push(close.rect);
                         if close.clicked() || ui.input(|input| input.key_pressed(egui::Key::Escape)) {
                             *action = Some(Action::Hide);
+                        }
+                        // The settings, next to the way out: both are about the panel rather than
+                        // about the conversation, and the design puts them together at this end.
+                        // It stays lit while the page is open, which is how the user can tell that
+                        // they are on it — the design's `aria-pressed`.
+                        let gear = corner_icon_button(
+                            ui,
+                            icons::Icon::GearSix,
+                            "悬浮窗设置",
+                            state.settings_open,
+                            corner,
+                        );
+                        occupied.push(gear.rect);
+                        if gear.clicked() {
+                            *action = Some(if state.settings_open {
+                                Action::CloseSettings
+                            } else {
+                                Action::OpenSettings
+                            });
                         }
                     });
                     occupied
@@ -377,14 +462,74 @@ pub(super) fn icon_button(
 ) -> egui::Response {
     let size = egui::vec2(theme::ICON_BUTTON, theme::ICON_BUTTON);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    let visuals = ui.style().interact(&response);
-    if response.hovered() {
-        ui.painter().rect_filled(rect, egui::CornerRadius::same(theme::RADIUS_ICON_BUTTON), theme::soft());
+    paint_icon_button(ui, rect, icon, tooltip, false, &response)
+}
+
+/// The same button, placed against a known corner and able to stay lit.
+///
+/// The top bar's two controls sit at the panel's own top-right corner, and the design's rectangle
+/// for them is that corner inset by the bar's padding. Measuring from the corner rather than from
+/// wherever the layout cursor happens to be is what makes the button's position a fact a test can
+/// compute — and what keeps it in place when the pickers to its left change width, which is the
+/// reason the row is laid out right-to-left at all.
+///
+/// @param ui - where to draw.
+/// @param icon - which picture.
+/// @param tooltip - what it does, shown on hover.
+/// @param lit - whether to report "this control's view is open" by staying highlighted.
+/// @param corner - the panel's own top-right corner.
+/// @returns the response, so the caller can act on a click.
+pub(super) fn corner_icon_button(
+    ui: &mut egui::Ui,
+    icon: icons::Icon,
+    tooltip: &str,
+    lit: bool,
+    corner: egui::Pos2,
+) -> egui::Response {
+    let size = egui::vec2(theme::ICON_BUTTON, theme::ICON_BUTTON);
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(
+            corner.x - f32::from(theme::PAD_TOP.right) - size.x,
+            corner.y + f32::from(theme::PAD_TOP.top),
+        ),
+        size,
+    );
+    let response =
+        ui.interact(rect, ui.id().with((icon.name(), "top-bar")), egui::Sense::click());
+    paint_icon_button(ui, rect, icon, tooltip, lit, &response)
+}
+
+/// What both of the above draw: the surface, the glyph, and the hint.
+///
+/// @param ui - where to draw.
+/// @param rect - the button's rectangle.
+/// @param icon - which picture.
+/// @param tooltip - what it does, shown on hover.
+/// @param lit - whether the control's view is open.
+/// @param response - the interaction already registered for `rect`.
+/// @returns the response, for the caller to read `clicked` from.
+fn paint_icon_button(
+    ui: &mut egui::Ui,
+    rect: egui::Rect,
+    icon: icons::Icon,
+    tooltip: &str,
+    lit: bool,
+    response: &egui::Response,
+) -> egui::Response {
+    // A button whose view is open keeps its surface, which is the design's `aria-pressed`: the top
+    // bar should never leave the user guessing which control put them where they are.
+    if lit || response.hovered() {
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(theme::RADIUS_ICON_BUTTON),
+            theme::soft(),
+        );
     }
+    let colour = if lit { theme::accent() } else { ui.style().interact(response).fg_stroke.color };
     // The icon family, not the text one: a private-use codepoint laid out in a text font is
     // a tofu box, which is exactly what the first look at this panel showed.
-    icons::paint(ui, rect.center(), icon, theme::ICON, visuals.fg_stroke.color);
-    response.on_hover_text(tooltip)
+    icons::paint(ui, rect.center(), icon, theme::ICON, colour);
+    response.clone().on_hover_text(tooltip)
 }
 
 /// Whatever needs an answer, between the composer and the conversation.

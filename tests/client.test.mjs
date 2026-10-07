@@ -11,7 +11,7 @@
  * The DOM is stubbed because the values that matter here are the two the browser
  * provides (`document.visibilityState`, `document.hasFocus()`) and the events
  * that report their change. What the real values are on each platform was
- * measured separately (`docs/prototype.md` §18).
+ * measured separately (`docs/progress.md` §18).
  */
 
 import assert from 'node:assert/strict'

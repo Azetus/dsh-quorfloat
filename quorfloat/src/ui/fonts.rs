@@ -7,7 +7,7 @@
 //! ## Why a bundled font instead of the system's
 //!
 //! Reading a system font is cheaper to *write* and worse to *ship*, and this was
-//! measured on a real machine rather than argued (`docs/prototype.md` §22):
+//! measured on a real machine rather than argued (`docs/progress.md` §22):
 //!
 //! | approach | resident memory | coverage |
 //! |---|---|---|

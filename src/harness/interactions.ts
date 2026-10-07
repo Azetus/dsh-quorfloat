@@ -92,7 +92,7 @@ export interface InteractionsDeps {
    *
    * A session being owned is necessary but not sufficient: the request must also
    * belong to the surface the user is looking at. See `presence.ts` for the rules
-   * and `docs/prototype.md` §18 for the measurements behind them.
+   * and `docs/progress.md` §18 for the measurements behind them.
    */
   authority(): AuthorityVerdict
   /**

@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use eframe::egui;
 
 pub mod pinned;
+pub mod preferences;
 pub mod session;
 pub mod workspace;
 pub mod sink;
@@ -122,6 +123,18 @@ pub struct App {
     /// Whether the glyph check has run. It cannot run until a pass has happened,
     /// because a font set does not exist before then.
     fonts_checked: bool,
+    /// What the user chose in the settings view, and where that is remembered.
+    ///
+    /// Layered on top of the host's configuration rather than replacing it, so the host stays in
+    /// charge of everything the user has not decided here (see [`WindowSettings::with_preferences`]).
+    preferences: crate::app::preferences::Preferences,
+    /// Where the preferences are remembered, or nowhere when there is no home to write to.
+    preferences_path: Option<std::path::PathBuf>,
+    /// Whether the settings view is showing in place of the conversation.
+    ///
+    /// State rather than drawing, because it outlives a frame — and because the panel starts on the
+    /// settings page when the environment asks it to, which is a decision made before any drawing.
+    settings_open: bool,
 }
 
 impl App {
@@ -143,11 +156,19 @@ impl App {
         hotkey_active: bool,
         window_state: crate::ui::WindowState,
     ) -> Self {
+        let preferences_path = crate::app::preferences::path_from_env();
+        let preferences = crate::app::preferences::Preferences::load(
+            preferences_path.as_deref().unwrap_or(std::path::Path::new("")),
+        );
         Self {
             session,
             sink,
             hotkey,
-            settings,
+            // The user's own choices sit on top of what the host sent, here as well as on every
+            // later config update: the host starts the process with the configured theme, and a
+            // preference the user set in the panel has to win from the very first frame — otherwise
+            // the panel would come up in the wrong palette and correct itself once.
+            settings: settings.with_preferences(&preferences),
             wake,
             // Starts hidden to match the viewport, which is built hidden so a
             // launch (or an automatic restart) cannot flash a panel on screen.
@@ -176,6 +197,9 @@ impl App {
             draft: String::new(),
             fonts_warning: None,
             fonts_checked: false,
+            preferences,
+            preferences_path,
+            settings_open: crate::ui::settings_requested(),
         }
     }
 
@@ -586,6 +610,10 @@ impl App {
             session.host_config().window.clone()
         };
         self.settings.apply_host(window.as_ref());
+        // And then the user's own choices again, because `apply_host` has just overwritten the
+        // fields it knows about: a config that arrives after a preference was set would otherwise
+        // quietly undo it, which is how a setting appears to forget itself.
+        self.settings = self.settings.with_preferences(&self.preferences);
     }
 
     /// The window settings currently in effect.
@@ -620,7 +648,11 @@ impl App {
         let attached = follow.session_id().map(str::to_owned);
         let current_workspace = current_workspace(&session);
         PanelState {
-            hotkey: self.hotkey_status(),
+            hotkey: self.hotkey_spec(),
+            hotkey_reason: self.hotkey_reason(),
+            keep_open: !self.settings.hide_on_blur,
+            settings_open: self.settings_open,
+            theme: self.settings.theme,
             prompt_line: session.prompt_delivery().describe(),
             prompt_sending: session.prompt_delivery().is_sending(),
             turn_active: transcript.is_turn_active(),
@@ -664,6 +696,20 @@ impl App {
             // this rather than a close.
             self.set_visible(false);
             return;
+        }
+        // The settings page is about the panel, not about the conversation, so it is decided
+        // before the lock is taken for the same reason hiding is: it needs `self` mutably, and
+        // nothing in it may wait on the session.
+        match action {
+            crate::ui::Action::OpenSettings => {
+                self.set_settings_open(true);
+                return;
+            }
+            crate::ui::Action::CloseSettings => {
+                self.set_settings_open(false);
+                return;
+            }
+            _ => {}
         }
 
         use crate::ui::Action;
@@ -746,6 +792,52 @@ impl App {
                     self.pinned.save(path);
                 }
             }
+            Action::OpenSettings | Action::CloseSettings => {
+                // Handled above, before the lock; this arm exists so that the match stays
+                // exhaustive without pretending the lock is not held here.
+            }
+            Action::SetTheme(preference) => {
+                self.preferences.theme = Some(preference);
+                self.settings.theme = preference;
+                // Written before the next frame draws, so what the user sees and what the next run
+                // reads are the same thing. The theme itself needs no more than the assignment
+                // above: `draw_panel` resolves the palette from the settings once per frame, so the
+                // change lands on the very next one.
+                self.save_preferences();
+            }
+            Action::KeepOpenOnBlur(keep_open) => {
+                self.preferences.keep_open = Some(keep_open);
+                self.settings.hide_on_blur = !keep_open;
+                self.save_preferences();
+            }
+        }
+    }
+
+    /// Show the settings page, or go back to the conversation.
+    ///
+    /// Separate from the action match because it needs no session: the page replaces the
+    /// conversation on screen and touches nothing about it, which is why leaving it can put the user
+    /// back exactly where they were. It is also the whole of what the gear does.
+    ///
+    /// @param open - whether the page should be showing.
+    fn set_settings_open(&mut self, open: bool) {
+        if self.settings_open == open {
+            return;
+        }
+        self.settings_open = open;
+        // On the record, and as a mark rather than a log line: the host swallows this process's
+        // stderr, so the marker is the only place a later question about "was the settings page ever
+        // open" can be answered.
+        self.sink.mark(&format!("settings {}", if open { "open" } else { "closed" }));
+    }
+
+    /// Remember what the user chose in the settings view.
+    ///
+    /// Failure is ignored, like every other preference file this process writes: not being able to
+    /// remember a choice is a smaller problem than refusing to run because of it.
+    fn save_preferences(&self) {
+        if let Some(path) = &self.preferences_path {
+            self.preferences.save(path);
         }
     }
 }
@@ -754,8 +846,6 @@ impl App {
 /// Everything the window renders, read under one short lock.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PanelState {
-    /// The hotkey line: which key hides the panel, or why none does.
-    pub(crate) hotkey: String,
     /// One line about the last prompt, when there is something to say.
     pub(crate) prompt_line: Option<String>,
     /// Whether a prompt is awaiting the host's verdict.
@@ -806,6 +896,23 @@ pub(crate) struct PanelState {
     /// layer is what decides how much of the conversation fits — and it must decide it
     /// without reaching for the window.
     pub(crate) max_height: f32,
+    /// The accelerator the panel registered, if it registered one.
+    ///
+    /// The bare spec rather than a sentence: the settings view puts it in a chip beside the words
+    /// "呼出快捷键", and the sentence that used to live here read "Alt+Space 隐藏" — which is a status
+    /// line, not a value. The sentence form was only ever shown in the top bar's tooltip.
+    pub(crate) hotkey: Option<String>,
+    /// Why there is no hotkey, when there is none. A sentence, shown on hover.
+    pub(crate) hotkey_reason: Option<String>,
+    /// Whether the panel stays open when the user moves to another window.
+    pub(crate) keep_open: bool,
+    /// Whether the settings view is showing in place of the conversation.
+    pub(crate) settings_open: bool,
+    /// The theme preference in effect, which the settings view shows as the chosen one.
+    ///
+    /// The *preference* rather than the resolved palette: a user who has chosen "follow the system"
+    /// needs to see that choice reported as theirs, even on a machine that is currently dark.
+    pub(crate) theme: crate::ui::theme::Preference,
 }
 
 /// What the status line needs to know about the followed conversation.
@@ -831,17 +938,27 @@ impl FollowView {
 }
 
 impl App {
-    /// The hotkey line the panel shows.
+    /// The accelerator the panel registered, if it registered one.
     ///
-    /// Built here rather than in the renderer because it is a fact about this process,
-    /// not about the view: a failed grab has a reason, and the reason is worth a line.
+    /// The bare spec, because that is what the settings view shows in its chip: the host writes
+    /// accelerators the way a user reads them, and that is the value. A failed grab is not a value,
+    /// so it comes back as `None` and the reason is reported separately — one field cannot be both
+    /// a shortcut and a sentence about why there is no shortcut.
     #[must_use]
-    fn hotkey_status(&self) -> String {
+    fn hotkey_spec(&self) -> Option<String> {
+        self.hotkey.is_active().then(|| self.hotkey.spec().to_owned())
+    }
+
+    /// Why there is no hotkey, when there is none.
+    ///
+    /// Built here rather than in the renderer because it is a fact about this process: a failed grab
+    /// has a reason, and the reason is worth a line.
+    #[must_use]
+    fn hotkey_reason(&self) -> Option<String> {
         if self.hotkey.is_active() {
-            format!("{} 隐藏", self.hotkey.spec())
-        } else {
-            format!("热键未注册：{}", self.hotkey.reason().unwrap_or("unknown"))
+            return None;
         }
+        Some(self.hotkey.reason().unwrap_or("unknown").to_owned())
     }
 
     /// Draw the panel's contents.
@@ -1173,6 +1290,309 @@ mod tests {
         }
     }
 
+    /// Point this process's preference file at a scratch path, once.
+    ///
+    /// `App::new` reads the path from the environment, which is process-global state, so this is done
+    /// once and the tests that change a setting share the file rather than racing for the variable.
+    /// Without it they would write `~/.dsh-quorfloat/preferences.json` — the real user's own choice
+    /// of theme — which is the same reason `app_and_session` passes a default window state.
+    ///
+    /// @returns where the preferences are being kept.
+    fn scratch_preferences_path() -> std::path::PathBuf {
+        use std::sync::OnceLock;
+        static PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
+        PATH.get_or_init(|| {
+            let path = std::env::temp_dir().join(format!(
+                "quorfloat-app-preferences-{}.json",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            // Safe in the way that matters here: the variable is set exactly once, before any test
+            // that could read it runs, and nothing in this process mutates the environment after.
+            unsafe { std::env::set_var("DSH_QUORFLOAT_PREFERENCES", &path) };
+            path
+        })
+        .clone()
+    }
+
+    /// The user's own settings, end to end: set one, and it is still set after a restart.
+    ///
+    /// One test rather than several, deliberately. `App::new` reads the path from a process-global
+    /// environment variable, so tests that each want their own file would race for it; these steps
+    /// share one file and run in the order written. What is being checked is the whole chain — the
+    /// action, the live state, the file, and the next launch — because a preference that takes
+    /// effect but is never written, or is written but never read back, is the same bug to a user.
+    #[test]
+    fn a_setting_takes_effect_now_and_is_still_set_after_a_restart() {
+        let path = scratch_preferences_path();
+        let (mut app, recorded, _session, _wake) = app_and_session();
+        assert_eq!(app.state().theme, crate::ui::theme::Preference::System, "the host decides first");
+        assert!(!path.exists(), "and nothing has been written yet");
+
+        app.apply_card_action(crate::ui::Action::SetTheme(crate::ui::theme::Preference::Dark));
+        assert_eq!(
+            app.state().theme,
+            crate::ui::theme::Preference::Dark,
+            "the choice is in effect on the next frame's state",
+        );
+        let written = std::fs::read_to_string(&path).expect("the choice reaches the disk");
+        assert!(written.contains("dark"), "and it is the value that was chosen: {written}");
+
+        // The host publishes its own configuration afterwards, which is the moment a local choice is
+        // most likely to be lost: `apply_host` writes over every field it knows about.
+        {
+            let mut session = app.session.lock().expect("session");
+            session.on_frame(
+                crate::ipc::rpc::Inbound::Notification {
+                    method: "ready".to_owned(),
+                    params: Some(serde_json::json!({
+                        "config": {"window": {"theme": "light", "hideOnBlur": true}},
+                    })),
+                },
+                &mut RecordingSink(recorded.clone()),
+            );
+        }
+        app.adopt_host_config();
+        assert_eq!(
+            app.state().theme,
+            crate::ui::theme::Preference::Dark,
+            "a configuration arriving later does not undo what the user chose",
+        );
+
+        // The switch, which is the design's `keepOpen` and the inverse of the config's `hideOnBlur`.
+        assert!(!app.state().keep_open, "the host's `hideOnBlur: true` means: do not keep open");
+        app.apply_card_action(crate::ui::Action::KeepOpenOnBlur(true));
+        assert!(app.state().keep_open, "and turning the switch on keeps the panel open");
+        assert!(!app.settings().hide_on_blur, "which is the same fact, spelled the config's way");
+
+        // Now the restart: a fresh app over the same file, as the next launch would build it.
+        let (restarted, _recorded, _session, _wake) = app_and_session();
+        assert_eq!(
+            restarted.state().theme,
+            crate::ui::theme::Preference::Dark,
+            "the theme is remembered across a restart",
+        );
+        assert!(restarted.state().keep_open, "and so is the switch");
+
+        // Clearing one writes it back to absent rather than to `false`, so that "the user has not
+        // decided" stays distinguishable from "the user decided no".
+        app.apply_card_action(crate::ui::Action::SetTheme(crate::ui::theme::Preference::System));
+        let cleared = std::fs::read_to_string(&path).expect("still a file, for the switch");
+        assert!(cleared.contains("system") || cleared.contains("null"), "{cleared}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pressing_the_gear_opens_the_settings_page() {
+        // The command path the tests below skip: they call the action directly, so none of them
+        // would notice a gear that is drawn but never wired, or one drawn where the design's padding
+        // says but at a rectangle the pointer cannot reach. The gear's position is the design's own
+        // arithmetic — the panel's top-right corner, inset by the top bar's padding, less two button
+        // widths and the gap between them — and `corner_icon_button` lays it out the same way, so
+        // this test and that function agree about where the button is by construction.
+        let (mut app, _recorded, _session, _wake) = app_and_session();
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let size = egui::vec2(708.0, 620.0);
+        let button = f32::from(crate::ui::theme::ICON_BUTTON);
+        let gear = egui::pos2(
+            size.x - f32::from(crate::ui::theme::SHADOW_ROOM_SIDE)
+                - f32::from(crate::ui::theme::PAD_TOP.right)
+                - button * 1.5,
+            f32::from(crate::ui::theme::SHADOW_ROOM_TOP + crate::ui::theme::PAD_TOP.top) + button / 2.0,
+        );
+        // Three passes, for the reason the picker's test spells out: egui hit-tests a press against
+        // the rectangles the *previous* pass registered, so a press in the first pass reaches nothing
+        // at all — which is how the first version of that test failed for the wrong reason.
+        let plan: Vec<Vec<egui::Event>> = vec![
+            vec![egui::Event::PointerMoved(gear)],
+            vec![egui::Event::PointerButton {
+                pos: gear,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            vec![egui::Event::PointerButton {
+                pos: gear,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        ];
+        for events in plan {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    focused: true,
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            output.textures_delta.clear();
+        }
+        assert!(app.state().settings_open, "the gear opened the page");
+    }
+
+    #[test]
+    fn the_settings_page_replaces_the_conversation_rather_than_covering_it() {
+        // The design's `setSettings` hides `q-main` and shows `q-settings`. That is the whole
+        // structural claim of this view, and it is a claim about two things at once: the page's own
+        // text is on screen, and the conversation's is gone. A dialog would satisfy the first and
+        // fail the second, which is why both halves are asserted.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        deliver(&session, &recorded, conversation_frame());
+        let size = egui::vec2(708.0, 620.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let opening = drawn_text(&mut app, size);
+        assert!(
+            visible(&opening, "帮我看看", screen),
+            "the conversation is on screen to begin with",
+        );
+
+        let action = crate::ui::Action::OpenSettings;
+        app.apply_card_action(action);
+        let page = drawn_text(&mut app, size);
+        assert!(visible(&page, "悬浮窗设置", screen), "the page says what it is");
+        assert!(visible(&page, "返回对话", screen), "and offers the way back");
+        assert!(visible(&page, "呼出快捷键", screen), "the hotkey is reported here");
+        assert!(visible(&page, "外观", screen), "and the theme is chosen here");
+        // Clipped to the panel, not merely absent from the shape tree. The first version of this
+        // test asked whether the text was drawn at all, and passed even with both views drawn —
+        // because the conversation was being painted *below the bottom edge*, where the settings
+        // page had taken all the room. `drawn_text` reads shapes, and a shape outside the screen is
+        // still a shape; what the user can read is the question, and clipping is what decides it.
+        assert!(
+            !visible(&page, "帮我看看", screen),
+            "the conversation is not behind it: {:?}",
+            on_screen(&page, screen),
+        );
+        assert!(
+            recorded.marks().iter().any(|mark| mark == "settings open"),
+            "the marker records it: {:?}",
+            recorded.marks(),
+        );
+    }
+
+    #[test]
+    fn the_page_reports_the_hotkey_the_panel_actually_registered() {
+        // The chip is a report, not a control, and what it reports is the accelerator this process
+        // really holds. A panel with no hotkey must say so rather than show an empty box — and the
+        // reason it has none is a sentence, so it goes on hover where sentences fit.
+        let (mut app, _recorded, _session, _wake) = app_and_session();
+        let size = egui::vec2(708.0, 620.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        app.apply_card_action(crate::ui::Action::OpenSettings);
+        let failed = drawn_text(&mut app, size);
+        assert!(
+            visible(&failed, "未注册", screen),
+            "no hotkey is reported as such: {:?}",
+            on_screen(&failed, screen),
+        );
+        assert!(
+            !visible(&failed, "Alt+Space", screen),
+            "and the accelerator that was *asked* for is not shown as if it were held",
+        );
+
+        // Now one that registered: the spec the host asked for is the value.
+        app.hotkey = Hotkey::active_for_test("Alt+Space");
+        let held = drawn_text(&mut app, size);
+        assert!(visible(&held, "Alt+Space", screen), "the registered accelerator is the value");
+        assert!(!visible(&held, "未注册", screen), "and the failure line is gone");
+    }
+
+    #[test]
+    fn the_settings_rows_do_not_overlap_each_other() {
+        // The settings page shipped its first look with every row's text printed on top of the row
+        // below it. The cause is worth naming, because the obvious way to write this page has it:
+        // measuring a line with `painter.layout` and then drawing it with `painter.galley` paints
+        // the text without reserving any *height* for it, so each row claimed its padding and
+        // nothing else. The test that catches that cannot be about strings — every string was
+        // drawn — so it is about the rectangles: lines of text in different rows must not share
+        // vertical space.
+        //
+        // Same vertical band means same row, and the page's three labels are one line each, so they
+        // must occupy three distinct bands in the order they are written. Notes are excluded on
+        // purpose: a note may wrap, and two lines of one row legitimately share a band with their
+        // own label.
+        let (mut app, _recorded, _session, _wake) = app_and_session();
+        app.apply_card_action(crate::ui::Action::OpenSettings);
+        let size = egui::vec2(708.0, 620.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let drawn = drawn_text(&mut app, size);
+
+        let band = |needle: &str| -> (f32, f32) {
+            let rect = drawn
+                .iter()
+                .find(|(text, rect)| text.contains(needle) && screen.contains_rect(*rect))
+                .unwrap_or_else(|| {
+                    panic!("{needle} is on the page: {:?}", on_screen(&drawn, screen))
+                })
+                .1;
+            (rect.top(), rect.bottom())
+        };
+        // Each row's label and its note are one band, and the next row's label is the next one: the
+        // full page order, so a note that escaped into the row below is caught as well as a label.
+        let rows = ["外观", "失焦时保持展开", "呼出快捷键"];
+        let notes = ["面板的明暗主题", "切换应用后仍保留悬浮窗", "在任意应用中呼出或收起悬浮窗"];
+        let bands: Vec<(f32, f32)> = rows.iter().map(|label| band(label)).collect();
+        for (index, note) in notes.iter().enumerate() {
+            let (note_top, note_bottom) = band(note);
+            let label_bottom = bands[index].1;
+            assert!(
+                note_top >= label_bottom - 1.0,
+                "row {index}'s note starts at {note_top}, above its own label's bottom {label_bottom}",
+            );
+            if let Some((next_top, _)) = bands.get(index + 1) {
+                assert!(
+                    note_bottom <= *next_top,
+                    "row {index}'s note ends at {note_bottom}, past the next row's label at {next_top}",
+                );
+            }
+        }
+        for (index, pair) in bands.windows(2).enumerate() {
+            let (above_top, above_bottom) = pair[0];
+            let (below_top, _) = pair[1];
+            assert!(
+                below_top >= above_bottom,
+                "row {:?} starts at {below_top} but the row above it ends at {above_bottom}: the \
+                 rows overlap, which is what happens when text is painted without being laid out",
+                rows[index + 1],
+            );
+            assert!(above_bottom > above_top, "and row {:?} has a height at all", rows[index]);
+        }
+        // And the order on the page is the order in the source, so the bands above are three
+        // different rows rather than three measurements of one.
+        assert!(bands[0].0 < bands[1].0 && bands[1].0 < bands[2].0, "{bands:?}");
+    }
+
+    #[test]
+    fn going_back_returns_to_the_conversation_it_left() {
+        // Back must be a return and not a reset: the page never touched the conversation, and the
+        // test that says so is that the same text is still there afterwards.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        deliver(&session, &recorded, conversation_frame());
+        let size = egui::vec2(708.0, 620.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        app.apply_card_action(crate::ui::Action::OpenSettings);
+        let page = drawn_text(&mut app, size);
+        assert!(visible(&page, "悬浮窗设置", screen));
+
+        app.apply_card_action(crate::ui::Action::CloseSettings);
+        let back = drawn_text(&mut app, size);
+        assert!(
+            visible(&back, "帮我看看", screen),
+            "the conversation is back: {:?}",
+            on_screen(&back, screen),
+        );
+        assert!(!visible(&back, "返回对话", screen), "and the page is not");
+        assert!(
+            recorded.marks().iter().any(|mark| mark == "settings closed"),
+            "both transitions are on the record: {:?}",
+            recorded.marks(),
+        );
+    }
+
     #[test]
     fn the_window_state_carries_the_conversation() {
         // The window reads this every frame; if the plumbing dropped it, the panel would
@@ -1240,9 +1660,37 @@ mod tests {
         texts
     }
 
+    /// Whether the user could read this text: drawn, and inside the panel.
+    ///
+    /// Containment rather than equality, because the panel draws a line at a time and a sentence may
+    /// be one galley or several. And **clipped text does not count**: `drawn_text` reads shapes, and
+    /// a shape below the bottom edge is still a shape. That distinction is not academic — it is the
+    /// one that let a test for "the settings page replaces the conversation" pass while both were
+    /// being painted, one of them off the end of the window.
+    ///
+    /// @param drawn - what [`drawn_text`] collected.
+    /// @param needle - the text to look for.
+    /// @param screen - the panel's own rectangle.
+    /// @returns whether it is on screen where a user could see it.
+    fn visible(drawn: &[(String, egui::Rect)], needle: &str, screen: egui::Rect) -> bool {
+        drawn.iter().any(|(text, rect)| text.contains(needle) && screen.contains_rect(*rect))
+    }
+
+    /// What the user could actually read, for a failure message that says what was there instead.
+    ///
+    /// @param drawn - what [`drawn_text`] collected.
+    /// @param screen - the panel's own rectangle.
+    /// @returns the visible strings, in drawing order.
+    fn on_screen(drawn: &[(String, egui::Rect)], screen: egui::Rect) -> Vec<&str> {
+        drawn
+            .iter()
+            .filter(|(_, rect)| screen.contains_rect(*rect))
+            .map(|(text, _)| text.as_str())
+            .collect()
+    }
+
     /// Walk a shape tree, collecting every piece of text and the rectangle it occupies.
-    fn collect_text(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
-        match shape {
+    fn collect_text(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {        match shape {
             egui::Shape::Text(text) => {
                 out.push((text.galley.text().to_owned(), text.visual_bounding_rect()));
             }
@@ -1335,27 +1783,72 @@ mod tests {
         );
     }
 
+    #[test]
     fn a_send_with_no_conversation_starts_one() {
-        // The panel used to refuse this, and the refusal was correct for the old design and
-        // wrong for this one: with nothing pinned the panel is *meant* to start a conversation,
-        // and the text waits in the session until the creation has finished.
+        // The panel used to refuse this, and the refusal was correct for the old design and wrong
+        // for this one: with nothing pinned the panel is *meant* to start a conversation, and the
+        // text waits in the session until the creation has finished.
+        //
+        // The whole three-step sequence — create, attach, then prompt — is proved at the session
+        // layer, where the answers can be fed back in order. What this test is for is the wiring
+        // above it: that a click in the panel reaches that path at all, that the ladder's workspace
+        // goes out with the request, and that the user's text is taken out of the box because the
+        // session is now holding it. The first version of this test sent its `hello` as a
+        // notification and so never completed the handshake; it asserted against a panel that was
+        // still waiting to say hello, and passed for that reason alone.
         let (mut app, recorded, session, _wake) = app_and_session();
         {
             let mut sink = RecordingSink(recorded.clone());
             session.lock().expect("session").start(&mut sink);
         }
-        answer(&session, &recorded, "hello", serde_json::json!({"sessionId": "host-1", "hostVersion": "test"}));
+        answer(
+            &session,
+            &recorded,
+            "hello",
+            serde_json::json!({"sessionId": "host-1", "hostVersion": "test"}),
+        );
+        app.logic();
+        // The host's answer to the list the handshake asked for. It names one *old* conversation in
+        // the workspace, which is what the ladder's last rung looks at: with nothing pinned and no
+        // turn in flight, "the workspace with the newest conversation in it" is the only evidence of
+        // where a new conversation should go.
+        answer(
+            &session,
+            &recorded,
+            "sessions/list",
+            serde_json::json!({"items": [
+                {"sessionId": "older", "updatedAt": 10, "cwd": "/work/project"},
+            ]}),
+        );
+        // One more frame: the answer above released the one-request-at-a-time slot, and this is what
+        // lets the panel's own loop ask for the workspace list it needs to climb that rung.
+        {
+            let mut sink = RecordingSink(recorded.clone());
+            session.lock().expect("session").request_workspaces(&mut sink);
+        }
+        answer(
+            &session,
+            &recorded,
+            "workspaces/list",
+            serde_json::json!({"items": [{"workspaceId": "ws-1", "title": "project", "path": "/work/project"}]}),
+        );
+
         app.draft = "你好".to_owned();
         apply(&mut app, crate::ui::Action::Send { text: "你好".to_owned() });
 
         let frames = recorded.frames.lock().expect("frames").clone();
-        assert!(
-            frames.iter().any(|frame| frame["method"] == "session/create"),
-            "a conversation is created on submit: {frames:?}",
+        let create = frames
+            .iter()
+            .rev()
+            .find(|frame| frame["method"] == "session/create")
+            .unwrap_or_else(|| panic!("a conversation is created on submit: {frames:?}"));
+        assert_eq!(
+            create["params"]["workspaceId"], "ws-1",
+            "in the workspace the ladder chose, and never an empty id",
         );
         assert!(
             !frames.iter().any(|frame| frame["method"] == "session/prompt"),
-            "and the prompt waits for it",
+            "and the prompt waits for it: {frames:?}",
         );
         assert_eq!(app.draft, "", "the box is free again: the text is in the session's hands");
     }
@@ -2023,7 +2516,7 @@ mod tests {
         // The two actions are one shape because the same pair of helpers builds both, and they
         // are the only buttons a card constructs. `egui::Button`'s fields are private, so the
         // shape itself is verified by looking at the panel — which is what a real approval was
-        // for (see `docs/prototype.md` §38).
+        // for (see `docs/progress.md` §38).
     }
 
     /// The host's `interaction/open` for one approval.
