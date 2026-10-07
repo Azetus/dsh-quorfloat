@@ -79,7 +79,15 @@ pub(super) fn composer(
             // rule this whole file exists for, and a rule that can only be tested by driving
             // a keyboard is a rule that will not be tested.
             let (enter, shift) = ui.input(|input| (input.key_pressed(egui::Key::Enter), input.modifiers.shift));
-            if submits(editor.has_focus(), enter, shift, composing(ui), sending, draft.trim().is_empty()) {
+            if submits(
+                editor.has_focus(),
+                enter,
+                shift,
+                composing(ui),
+                sending,
+                state.recording,
+                draft.trim().is_empty(),
+            ) {
                 *action = Some(Action::Send { text: draft.clone() });
             }
 
@@ -177,8 +185,19 @@ const EDITOR_PADDING: f32 = 8.0;
 ///
 /// @returns whether to send.
 #[must_use]
-fn submits(has_focus: bool, enter: bool, shift: bool, composing: bool, sending: bool, blank: bool) -> bool {
-    has_focus && enter && !shift && !composing && !sending && !blank
+fn submits(
+    has_focus: bool,
+    enter: bool,
+    shift: bool,
+    composing: bool,
+    sending: bool,
+    recording: bool,
+    blank: bool,
+) -> bool {
+    // `recording` is the settings row listening for a chord. `Enter` is a perfectly good shortcut to
+    // want to bind, and a composer that sent a message instead would make the recorder unusable for
+    // it — so while the row is listening, the composer does not act on keys at all.
+    has_focus && enter && !shift && !composing && !sending && !recording && !blank
 }
 
 /// Whether an input method is mid-composition.
@@ -203,14 +222,14 @@ mod tests {
 
     #[test]
     fn enter_in_a_focused_composer_sends() {
-        assert!(submits(true, true, false, false, false, false));
+        assert!(submits(true, true, false, false, false, false, false));
     }
 
     #[test]
     fn shift_enter_is_a_line_break_rather_than_a_send() {
         // The widget inserts the newline for this combination; sending as well would post
         // half a sentence and leave the rest in the box.
-        assert!(!submits(true, true, true, false, false, false));
+        assert!(!submits(true, true, true, false, false, false, false));
     }
 
     #[test]
@@ -218,22 +237,32 @@ mod tests {
         // The failure this prevents is the one that looks like a model bug: a
         // half-composed Chinese sentence, sent, because the user pressed Enter to pick a
         // candidate. macOS usually swallows that key; "usually" is not a guarantee.
-        assert!(!submits(true, true, false, true, false, false));
+        assert!(!submits(true, true, false, true, false, false, false));
     }
 
     #[test]
     fn a_second_enter_while_sending_does_not_send_again() {
-        assert!(!submits(true, true, false, false, true, false));
+        assert!(!submits(true, true, false, false, true, false, false));
+    }
+
+    #[test]
+    fn a_chord_being_recorded_is_not_a_message_being_sent() {
+        // The settings row listening for a shortcut and the composer waiting for a message are both
+        // interested in `Enter`. While the row is listening it wins: `Enter` is a legitimate shortcut
+        // to bind, and sending a message instead would make the recorder unusable for it.
+        assert!(!submits(true, true, false, false, false, true, false));
+        // And with nothing being recorded, the rule is unchanged.
+        assert!(submits(true, true, false, false, false, false, false));
     }
 
     #[test]
     fn an_empty_composer_has_nothing_to_send() {
-        assert!(!submits(true, true, false, false, false, true));
+        assert!(!submits(true, true, false, false, false, false, true));
     }
 
     #[test]
     fn enter_without_focus_belongs_to_something_else() {
-        assert!(!submits(false, true, false, false, false, false));
+        assert!(!submits(false, true, false, false, false, false, false));
     }
 
     #[test]

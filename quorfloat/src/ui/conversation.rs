@@ -356,7 +356,7 @@ pub(super) fn entry_ui(
                             // solution is to use ui.push_id", which is exactly this (see
                             // `docs/progress.md` §39).
                             ui.push_id(answer_id(text), |ui| {
-                                let style = theme::markdown_style(ui.style());
+                                let style = theme::markdown_style(ui.style(), theme::palette());
                                 ui.style_mut().clone_from(&style);
                                 let available = ui.available_width().max(1.0);
                                 ui.set_max_width(available);

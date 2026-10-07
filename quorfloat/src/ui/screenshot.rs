@@ -25,6 +25,63 @@ use std::path::Path;
 /// edge does, and never mistaken for part of the panel.
 pub const BACKDROP: u8 = 0x80;
 
+/// How long the file is allowed to be stale, while a dump is being kept up to date.
+///
+/// A second: fast enough that a person editing the panel sees their change by the time they look at the
+/// file, slow enough that this stays a development aid rather than a per-frame encoding job.
+pub const REFRESH: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether it is time to ask for another picture.
+///
+/// Pure, and separate from the asking, because this is the rule that was wrong: the first version asked
+/// once and stopped, so the picture on disk was the first frame — of a window whose height is a result of
+/// drawing, which means "the bottom of the panel was still missing" rather than "the change did not
+/// apply". A rule with that failure mode should be checkable without a window.
+///
+/// @param visible - whether the panel is on screen; a hidden window has no framebuffer to hand over.
+/// @param outstanding - whether a request is already in flight, which must not be repeated.
+/// @param last - when the last picture was written, if any.
+/// @returns whether to ask for one now.
+#[must_use]
+pub fn due(
+    visible: bool,
+    outstanding: bool,
+    last: Option<std::time::Instant>,
+) -> bool {
+    if !visible || outstanding {
+        return false;
+    }
+    match last {
+        None => true,
+        Some(last) => last.elapsed() >= REFRESH,
+    }
+}
+
+/// How often a refresh is worth a line in the marker.
+///
+/// The marker is the only thing that can answer "was the dump still updating, or did it stop" after a
+/// run, and one line at startup answers it wrongly. Every ten seconds is often enough to see the
+/// difference and rare enough that the file stays readable.
+pub const RECORD_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whether this refresh is worth recording.
+///
+/// Pure, like [`due`], so the rule can be checked without a window.
+///
+/// @param last - when the last one was recorded, if any.
+/// @param now - the current time.
+/// @returns whether to write a line.
+#[must_use]
+pub fn worth_recording(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    match last {
+        None => true,
+        Some(last) => now.duration_since(last) >= RECORD_EVERY,
+    }
+}
+
 /// Write the panel as a binary PPM, composited over [`BACKDROP`].
 ///
 /// @param path - where to write.
@@ -71,6 +128,34 @@ pub fn over_backdrop(pixel: eframe::egui::Color32) -> [u8; 3] {
 mod tests {
     use super::*;
     use eframe::egui::Color32;
+
+    #[test]
+    fn the_picture_is_kept_up_to_date_rather_than_taken_once() {
+        // The bug this exists for: the dump wrote the first frame and stopped. The window's height
+        // follows its content, so that frame showed a panel still growing, and anything below the fold
+        // was missing — which reads as "my change did not apply" and sent this project chasing a layout
+        // problem that was not there. A second later, another picture.
+        let now = std::time::Instant::now();
+        assert!(due(true, false, None), "the first one is taken immediately");
+        assert!(!due(true, true, None), "and not asked for twice while one is in flight");
+        assert!(!due(false, false, None), "a hidden window has nothing to hand over");
+        assert!(due(true, false, Some(now - REFRESH)), "once the file is a second old, again");
+        assert!(due(true, false, Some(now - REFRESH * 2)), "and again");
+        assert!(!due(true, false, Some(now)), "but not before it is stale");
+    }
+
+    #[test]
+    fn the_record_of_the_dump_is_periodic_rather_than_one_shot() {
+        // "The dump stopped updating" and "the dump is fine" have to be distinguishable from the marker
+        // alone, and a single line written at startup makes them look identical.
+        let now = std::time::Instant::now();
+        assert!(worth_recording(None, now), "the first write is recorded");
+        assert!(!worth_recording(Some(now), now), "and not every refresh after it");
+        assert!(
+            worth_recording(Some(now - RECORD_EVERY), now),
+            "but a later one is, so the marker keeps saying the dump is alive",
+        );
+    }
 
     #[test]
     fn an_opaque_pixel_is_written_as_it_is() {

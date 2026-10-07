@@ -56,7 +56,7 @@ fn run() -> Result<SessionExit, String> {
     // Registered before the window exists: a taken accelerator is a normal outcome
     // and must be known before `hello` reports it, so the host shows the real state
     // rather than a key that silently does nothing.
-    let hotkey = Hotkey::register(&configured_hotkey());
+    let hotkey = Hotkey::register(&hotkey_to_attempt());
     let hotkey_active = hotkey.is_active();
 
     let marker = Marker::from_env();
@@ -75,7 +75,9 @@ fn run() -> Result<SessionExit, String> {
         platform: dsh_quorfloat::ipc::platform::host_platform().to_owned(),
         arch: dsh_quorfloat::ipc::platform::host_arch().to_owned(),
         hotkey: HotkeyReport {
-            requested: hotkey.spec().to_owned(),
+            // Empty when the host asked for no hotkey at all, which is the documented escape hatch
+            // for a development profile that must not fight the desktop one for the accelerator.
+            requested: hotkey.spec().unwrap_or_default().to_owned(),
             registered: hotkey.is_active(),
         },
     })));
@@ -189,6 +191,7 @@ fn run() -> Result<SessionExit, String> {
                 app_outcome,
                 hotkey_active,
                 window_state,
+                dsh_quorfloat::app::preferences::path_from_env(),
             );
             // Reaching this point *is* the measurement: eframe calls the creator
             // only after the viewport exists, so `window` stops being a claim here.
@@ -277,6 +280,22 @@ fn configured_hotkey() -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "Alt+Space".to_owned())
+}
+
+/// The accelerator this run should try to hold.
+///
+/// The rule lives in the library (`app::preferences::hotkey_to_attempt`) so it can be tested as a
+/// pure function; this only supplies the two facts it needs. Reading it here rather than inside
+/// `App::new` is deliberate: the grab has to be taken before the window exists, so that `hello` can
+/// report what is really held instead of what was hoped for.
+///
+/// @returns the accelerator to attempt.
+fn hotkey_to_attempt() -> String {
+    let remembered = dsh_quorfloat::app::preferences::path_from_env();
+    let preferences = dsh_quorfloat::app::preferences::Preferences::load(
+        remembered.as_deref().unwrap_or(std::path::Path::new("")),
+    );
+    dsh_quorfloat::app::preferences::hotkey_to_attempt(&preferences, &configured_hotkey())
 }
 
 /// Lock a mutex, recovering from poisoning.

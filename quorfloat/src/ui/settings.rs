@@ -27,20 +27,44 @@ use crate::ui::Action;
 /// A change is `Some`, not a boolean: "the user set the theme to dark" is a fact worth carrying, and
 /// a flag would have the caller re-derive it from the state it was drawn with — which is the state
 /// *before* the click.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Outcome {
     /// The theme the user chose, if they chose one.
     pub(super) theme: Option<Preference>,
     /// Whether the panel should stay open when the user leaves, if they changed that.
     pub(super) keep_open: Option<bool>,
+    /// The accelerator the user asked for — captured or typed, whichever the row offered.
+    pub(super) hotkey_submitted: Option<String>,
+    /// Whether the row should start listening for a chord.
+    pub(super) start_recording: bool,
+    /// Whether it should stop.
+    pub(super) stop_recording: bool,
+    /// Why the chord just pressed was not accepted, if it was not.
+    pub(super) reject: Option<String>,
 }
 
 impl Outcome {
-    /// The action this frame amounts to, if the user changed anything.
+    /// The action this frame amounts to.
+    ///
+    /// One action per frame, and the order is precedence rather than page order: giving up outranks a
+    /// capture (they cannot both happen in one frame, but if they did, doing nothing is the safer
+    /// reading), and a capture outranks a click on something else in the same frame.
     ///
     /// @returns the action, or `None` when nothing was touched.
     #[must_use]
     pub(super) fn action(self) -> Option<Action> {
+        if let Some(hint) = self.reject {
+            return Some(Action::RejectHotkey { hint });
+        }
+        if self.stop_recording {
+            return Some(Action::StopHotkeyRecording);
+        }
+        if let Some(spec) = self.hotkey_submitted {
+            return Some(Action::SetHotkey(spec));
+        }
+        if self.start_recording {
+            return Some(Action::StartHotkeyRecording);
+        }
         if let Some(theme) = self.theme {
             return Some(Action::SetTheme(theme));
         }
@@ -72,7 +96,7 @@ pub(super) fn settings(ui: &mut egui::Ui, state: &PanelState) -> (Outcome, bool)
                     // is the fact they came here to check.
                     theme_row(ui, state, &mut outcome);
                     keep_open_row(ui, state, &mut outcome);
-                    hotkey_row(ui, state);
+                    hotkey_row(ui, state, &mut outcome);
                 });
         });
     (outcome, back)
@@ -151,50 +175,218 @@ fn keep_open_row(ui: &mut egui::Ui, state: &PanelState, outcome: &mut Outcome) {
     }
 }
 
-/// The hotkey: the accelerator the panel actually registered.
+/// The hotkey: the accelerator this panel holds, and the way to change it.
 ///
-/// **Read-only, and it says so by being read-only.** The design draws it as a read-only input whose
-/// value never changes either — it is a report, not a control. Changing the hotkey would mean
-/// unregistering it, having the host persist a new one and re-registering it on the right thread,
-/// and a control that cannot yet do that must not look like one that can. That is the same rule that
-/// kept the gear out of the top bar until this page existed behind it.
+/// **The design's chip, made into the control.** The mockup draws the accelerator in a bordered box —
+/// a read-only *report* of what the panel holds. It is that, and it is also the button: clicking it
+/// starts listening, and the same box then asks for a chord. One element and two states, which is what
+/// the design's shape wants and what keeps the row from growing a toolbar beside it.
+///
+/// **A recorder, because egui can support one.** It ships no shortcut-entry widget, but it has
+/// everything needed to build one: `Event::Key { key, pressed, modifiers }` is in `InputState::events`,
+/// and `Key` covers F1–F24 alongside the letters, digits and punctuation. So "press the combination you
+/// want" costs nothing from the platform layer.
+///
+/// Two decisions worth stating:
+///
+/// - **`Escape` cancels rather than being recorded.** It is the only key that must mean "stop", or the
+///   row would be impossible to leave with the keyboard.
+/// - **A modifier on its own is not the answer.** `Ctrl+Shift` is a legal global hotkey, but nobody
+///   presses it *meaning* to bind it; they are on the way to a chord.
+///
+/// @param ui - where to draw.
+/// @param state - for the accelerator, any refusal, and whether the row is listening.
+/// @param outcome - where a captured chord or a request to listen is reported.
+fn hotkey_row(ui: &mut egui::Ui, state: &PanelState, outcome: &mut Outcome) {
+    setting_row(ui, "呼出快捷键", HOTKEY_NOTE, |ui| match state.recording {
+        true => hotkey_recording(ui, state, outcome),
+        false => hotkey_chip(ui, state, outcome),
+    });
+}
+
+/// What the row explains.
+const HOTKEY_NOTE: &str = "在任意应用中呼出或收起悬浮窗";
+
+/// The chip: what the panel holds, or that it holds nothing. Clicking it starts a recording.
 ///
 /// @param ui - where to draw.
 /// @param state - for the accelerator, or the reason there is none.
-fn hotkey_row(ui: &mut egui::Ui, state: &PanelState) {
-    setting_row(ui, "呼出快捷键", "在任意应用中呼出或收起悬浮窗", |ui| {
-        let (text, colour) = match &state.hotkey {
-            Some(spec) => (spec.clone(), theme::text()),
-            None => ("未注册".to_owned(), theme::warn_text()),
-        };
-        let frame = egui::Frame::NONE
-            .fill(theme::soft())
-            .stroke(egui::Stroke::new(theme::BORDER, theme::line()))
-            .corner_radius(egui::CornerRadius::same(theme::RADIUS_PICKER))
-            .inner_margin(theme::PAD_SETTING_CHIP);
-        let inner = theme::SETTING_CHIP_WIDTH
-            - f32::from(theme::PAD_SETTING_CHIP.left + theme::PAD_SETTING_CHIP.right);
-        let response = frame
-            .show(ui, |ui| {
-                ui.set_width(inner);
-                ui.vertical_centered(|ui| {
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(text)
-                                .font(theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_META))
-                                .color(colour),
-                        )
-                        .truncate(),
-                    );
-                });
-            })
-            .response;
-        // Why there is no hotkey is a sentence, and a sentence does not fit in a chip. It goes where
-        // every other long explanation in this panel goes: on hover.
-        if let Some(reason) = &state.hotkey_reason {
-            response.on_hover_text(reason);
-        }
+/// @param outcome - set when the user asks to change it.
+fn hotkey_chip(ui: &mut egui::Ui, state: &PanelState, outcome: &mut Outcome) {
+    // **A refused accelerator is still shown, in the warning colour.** The box is the only place this
+    // row can speak, so replacing the name with "未注册" would throw away the one fact the user needs —
+    // *which* shortcut did not take. The warning colour carries "it did not work" and the name carries
+    // "this is what did not work"; the full reason is on hover.
+    let (text, colour) = match (&state.hotkey, &state.hotkey_reason) {
+        (Some(spec), None) => (spec.clone(), theme::text()),
+        (Some(spec), Some(_)) => (spec.clone(), theme::warn_text()),
+        (None, Some(_)) => ("未注册".to_owned(), theme::warn_text()),
+        (None, None) => ("已关闭".to_owned(), theme::muted()),
+    };
+    let response = hotkey_box(ui, &text, colour, false);
+    // Why there is no hotkey is a sentence, and a sentence does not fit in a chip. It goes where every
+    // other long explanation in this panel goes: on hover — together with the hint that the box is
+    // clickable, which a bordered value does not say by itself.
+    let hint = match &state.hotkey_reason {
+        Some(reason) => format!("{reason}\n点击后按下新的组合键"),
+        None => "点击后按下新的组合键".to_owned(),
+    };
+    if response.on_hover_text(hint).clicked() {
+        outcome.start_recording = true;
+    }
+}
+
+/// The same box while it is listening for a chord.
+///
+/// **Not a button**, because there is nothing to click: the user is expected to press a key, and a
+/// control that looked clickable would invite a click that does nothing.
+///
+/// @param ui - where to draw.
+/// @param outcome - set when a chord is captured or the user gives up.
+fn hotkey_recording(ui: &mut egui::Ui, state: &PanelState, outcome: &mut Outcome) {
+    let state_recording_hint = state.recording_hint.clone();
+    // The raw events rather than `key_pressed`: the modifiers held at the moment of the press are what
+    // the accelerator is made of, and they are on the event itself.
+    let captured = ui.input_mut(|input| {
+        let mut found = None;
+        input.events.retain(|event| {
+            let egui::Event::Key { key, pressed: true, modifiers, .. } = event else {
+                return true;
+            };
+            // A modifier arrives as a press of that key; it is never the answer on its own.
+            if is_modifier(*key) {
+                return false;
+            }
+            found = Some((*key, *modifiers));
+            false
+        });
+        found
     });
+    if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        outcome.stop_recording = true;
+    } else if let Some((key, modifiers)) = captured {
+        // **A bare letter is refused, and the row says why.** A global hotkey is grabbed from the whole
+        // desktop: binding `M` alone means the letter M stops reaching every other application, and the
+        // user who pressed it meant "M", not "make this my shortcut". This is not hypothetical — it is
+        // what the first version of this recorder did, and it was found by *looking at the panel*, not
+        // by a test. Function keys are exempt: `F13` on its own is a good shortcut and nothing types it
+        // by accident.
+        match crate::runtime::hotkey::accelerator_from_press(key, modifiers) {
+            Some(accelerator) if bare_letter(&accelerator) => {
+                outcome.reject = Some(format!("{accelerator} 会占用这个按键，请按住修饰键"));
+            }
+            Some(accelerator) => outcome.hotkey_submitted = Some(accelerator),
+            None => outcome.reject = Some("这个键不能作为全局快捷键".to_owned()),
+        }
+    }
+    let boxed = hotkey_box(ui, "按下组合键…", theme::accent(), true);
+    match &state_recording_hint {
+        // Said in the row, not only on hover: a key press that produced nothing has to produce
+        // something, or the honest reading is that the recorder is broken.
+        Some(hint) => {
+            boxed.on_hover_text(hint);
+            ui.label(
+                egui::RichText::new(hint)
+                    .font(theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_SMALL))
+                    .color(theme::bad_text()),
+            );
+        }
+        None => {
+            boxed.on_hover_text("Esc 取消");
+        }
+    }
+}
+
+/// The box the design draws, in both of the states this row has.
+///
+/// One shape for the two faces on purpose: the value and the request for a new value occupy the same
+/// place, so the row does not reflow when it starts listening — the text changes and the border picks
+/// up the accent, and nothing moves.
+///
+/// @param ui - where to draw.
+/// @param text - what the box says.
+/// @param colour - the text's colour.
+/// @param listening - whether this is the recording state, which is outlined in the accent.
+/// @returns the response, for the caller to read a click from.
+fn hotkey_box(
+    ui: &mut egui::Ui,
+    text: &str,
+    colour: egui::Color32,
+    listening: bool,
+) -> egui::Response {
+    let width = theme::SETTING_CHIP_WIDTH;
+    let stroke = match listening {
+        true => egui::Stroke::new(theme::BORDER, theme::accent()),
+        false => egui::Stroke::new(theme::BORDER, theme::line()),
+    };
+    // **A rectangle of its own, then the button centred inside it.** The obvious version wraps the
+    // button in a `vertical` that sets its width, and that wrapper *swallows the right-to-left
+    // placement*: a nested layout positions its contents by its own alignment, so the box ended up
+    // beside the label no matter what the row asked for. Reserving the space here and centring inside
+    // it keeps both properties — the box is at the row's right edge, and its text is centred in the box.
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(width, theme::SETTING_CHIP_HEIGHT), egui::Sense::hover());
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::centered_and_justified(egui::Direction::LeftToRight)),
+        |ui| {
+            ui.add(
+                egui::Button::new(
+                    egui::RichText::new(text)
+                        .font(theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_META))
+                        .color(colour),
+                )
+                .fill(theme::soft())
+                .stroke(stroke)
+                .corner_radius(egui::CornerRadius::same(theme::RADIUS_PICKER)),
+            )
+        },
+    )
+    .inner
+}
+
+/// Whether an accelerator is a single unmodified key that would swallow ordinary typing.
+///
+/// A global hotkey is grabbed from the entire desktop, so `M` means the letter M no longer reaches any
+/// other application. A keyboard's function keys are the exception, and the design's own shortcut is a
+/// modifier chord — so the rule is: one part, and that part is not `F<number>`.
+///
+/// @param accelerator - the accelerator, as this panel spells it.
+/// @returns whether it needs a modifier to be a reasonable choice.
+#[must_use]
+fn bare_letter(accelerator: &str) -> bool {
+    if accelerator.contains('+') {
+        return false;
+    }
+    // `F1`–`F24`: a function key on its own is a shortcut nobody types by accident.
+    !accelerator
+        .strip_prefix('F')
+        .is_some_and(|number| !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Whether a key is a physical modifier, which a chord is built *from* rather than out of.
+///
+/// egui keeps the two sides of each modifier apart and emits them **only as physical presses** (its own
+/// comment says so), while the collapsed form lives in `Modifiers`. That is exactly what a recorder
+/// needs: these eight are the keys a user holds *while* pressing the one that matters, so they are
+/// dropped and the chord is made from the `Modifiers` on the final press.
+///
+/// @param key - the key egui reported.
+/// @returns whether it is a modifier key.
+fn is_modifier(key: egui::Key) -> bool {
+    use egui::Key as K;
+    matches!(
+        key,
+        K::ShiftLeft
+            | K::ShiftRight
+            | K::ControlLeft
+            | K::ControlRight
+            | K::AltLeft
+            | K::AltRight
+            | K::SuperLeft
+            | K::SuperRight
+    )
 }
 
 /// One setting: a label on the left, a control on the right, a hairline above.
@@ -237,9 +429,6 @@ fn setting_row(ui: &mut egui::Ui, label: &str, note: &str, control: impl FnOnce(
         // The label and its note.
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = theme::GAP_SETTING_NOTE;
-            // A block rather than an inline pair, so the control that follows starts after both
-            // lines: the alignment is `TOP`, so it lines up with the label rather than floating in
-            // the middle of the note.
             ui.label(
                 egui::RichText::new(label)
                     .font(theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_META))
@@ -251,10 +440,23 @@ fn setting_row(ui: &mut egui::Ui, label: &str, note: &str, control: impl FnOnce(
                     .color(theme::muted()),
             );
         });
-        // Whatever is left, with the control at its far end.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-            control(ui);
-        });
+        // The control, against the row's **right edge**.
+        //
+        // **Placed in a rectangle rather than laid out beside the label.** Three attempts went into
+        // this: `right_to_left` alone puts the control's left edge after the label, because a
+        // right-to-left cursor starts at the right edge of the space it is *given*; and asking for the
+        // remaining width first does not help either, because `horizontal_top` gives its children a
+        // *dynamic* size (`allocate_ui_with_layout_dyn`), so "what is left over" measures what was put
+        // there rather than what is available. The control is therefore *placed*: one rectangle,
+        // computed from the row's own width, which is what "right-aligned" actually means.
+        let control_width = ui.available_width();
+        if control_width > 0.0 {
+            ui.allocate_ui_with_layout(
+                egui::vec2(control_width, ui.available_height()),
+                egui::Layout::right_to_left(egui::Align::Center),
+                control,
+            );
+        }
     });
     // The room the row actually took, plus the padding under it. `min_rect` covers everything drawn
     // inside, which is the number this used to get wrong.
@@ -311,6 +513,27 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_letter_needs_a_modifier_and_a_function_key_does_not() {
+        // Found by looking at the panel, not by a test: the first recorder accepted `M` on its own, and
+        // a global hotkey is grabbed from the *whole desktop* — so the letter M would have stopped
+        // reaching every other application. Function keys are the exception, which is why the rule is
+        // about typing rather than about modifiers in general.
+        assert!(bare_letter("M"), "a bare letter would swallow ordinary typing");
+        assert!(bare_letter("5"));
+        assert!(bare_letter("`"));
+
+        assert!(!bare_letter("Cmd+M"), "a chord is what the row is asking for");
+        assert!(!bare_letter("Alt+Space"));
+        assert!(!bare_letter("Shift+5"));
+
+        assert!(!bare_letter("F13"), "a function key on its own is a good shortcut");
+        assert!(!bare_letter("F1"));
+        // But `F` alone is a letter, and `F0` is not a function key anyone has.
+        assert!(bare_letter("F"));
+        assert!(!bare_letter("F0"), "`F0` is still spelled like a function key");
+    }
+
+    #[test]
     fn the_knob_travels_inside_the_track() {
         // The design translates the knob by 12px inside a 29-pixel track with a 13-pixel knob. A
         // knob that travelled the full width would hang half outside the track it belongs to.
@@ -324,11 +547,11 @@ mod tests {
         // The caller is handed what the user picked, because it draws from the state *before* the
         // click: a flag would leave it re-deriving the new value from the old one.
         assert_eq!(
-            Outcome { theme: Some(Preference::Dark), keep_open: None }.action(),
+            Outcome { theme: Some(Preference::Dark), ..Outcome::default() }.action(),
             Some(Action::SetTheme(Preference::Dark)),
         );
         assert_eq!(
-            Outcome { theme: None, keep_open: Some(false) }.action(),
+            Outcome { keep_open: Some(false), ..Outcome::default() }.action(),
             Some(Action::KeepOpenOnBlur(false)),
         );
         assert_eq!(Outcome::default().action(), None, "an untouched page asks for nothing");

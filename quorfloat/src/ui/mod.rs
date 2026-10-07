@@ -113,6 +113,20 @@ pub enum Action {
     SetTheme(theme::Preference),
     /// Keep the panel open when the user moves to another window, or let it put itself away.
     KeepOpenOnBlur(bool),
+    /// Listen for a chord and use it as the accelerator.
+    StartHotkeyRecording,
+    /// Stop listening, leaving the registration alone.
+    StopHotkeyRecording,
+    /// Refuse the chord that was just pressed, and say why in the row.
+    RejectHotkey {
+        /// What is wrong with it, phrased for the user.
+        hint: String,
+    },
+    /// Hold a different global accelerator.
+    ///
+    /// The accelerator in the host's spelling — the same string the host writes in its own config and
+    /// the same one `hello` reports — because that spelling is the value the settings page shows.
+    SetHotkey(String),
 }
 
 /// What the drawing layer learned about the panel's own size.
@@ -293,6 +307,23 @@ pub fn settings_requested() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the environment asks for the hotkey row to come up listening.
+///
+/// The same kind of development aid as [`settings_requested`], for the same reason: the recording state
+/// draws differently from the chip, and a screenshot cannot click the box that enters it.
+/// `DSH_QUORFLOAT_RECORD_HOTKEY=1` asks for it.
+///
+/// @returns whether the row should start recording.
+#[must_use]
+pub fn hotkey_recording_requested() -> bool {
+    std::env::var("DSH_QUORFLOAT_RECORD_HOTKEY")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !value.is_empty() && value != "0" && value != "false"
+        })
+        .unwrap_or(false)
+}
+
 /// The shortest the panel is allowed to be.
 ///
 /// The top bar, the composer and the footer, with room to see that the conversation is
@@ -359,7 +390,12 @@ fn top_bar(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
                             corner,
                         );
                         occupied.push(close.rect);
-                        if close.clicked() || ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                        // `Esc` closes the panel — unless the settings row is listening for a chord,
+                        // in which case the row's own handler is what should see it. Otherwise
+                        // recording a shortcut that begins with Escape would put the panel away.
+                        let escape = !state.recording
+                            && ui.input(|input| input.key_pressed(egui::Key::Escape));
+                        if close.clicked() || escape {
                             *action = Some(Action::Hide);
                         }
                         // The settings, next to the way out: both are about the panel rather than

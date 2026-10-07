@@ -414,15 +414,22 @@ pub fn family(weight: Weight, weighted: bool) -> egui::FontFamily {
 /// different code background — and the same answer would look like two different things
 /// depending on whether it happened to contain Markdown.
 ///
+/// **The palette is a parameter, not a global read.** The mode is process state that any other part
+/// of the program — and, in the test binary, any other *test* — can change between two lines, so a
+/// function that both resolves the palette and compares against it is a function whose answer depends
+/// on who else is running. Taking it as an argument makes this call pure, and makes "the theme test
+/// fails only when run beside the rest of the suite" impossible rather than unlikely.
+///
 /// @param base - the style in force, whose non-text choices are kept.
-/// @returns a style whose text matches the panel's own.
+/// @param palette - the colours to draw in.
+/// @returns a style whose text and code match the panel's own.
 #[must_use]
-pub fn markdown_style(base: &egui::Style) -> egui::Style {
+pub fn markdown_style(base: &egui::Style, palette: Palette) -> egui::Style {
     let mut style = base.clone();
-    style.visuals.override_text_color = Some(text());
+    style.visuals.override_text_color = Some(palette.text);
     // Code draws on `extreme_bg_color`; without it, inline code is indistinguishable from the
     // words around it.
-    style.visuals.extreme_bg_color = soft();
+    style.visuals.extreme_bg_color = palette.soft;
     // Inline code draws on `code_bg_color`, which is `soft()` for the same reason — **and which has
     // to be set explicitly.** egui's default for that field is a fixed grey chosen by *egui's* theme
     // (230 light, 64 dark), and `markdown_style` is built from a base style: "the panel is dark"
@@ -432,8 +439,8 @@ pub fn markdown_style(base: &egui::Style) -> egui::Style {
     // dark surface is a light-theme value showing through a dark-theme panel. It is the same failure
     // as a hard-coded colour anywhere else: the panel's colours must come from the palette, never
     // from a default that was chosen for a palette nobody is looking at.
-    style.visuals.code_bg_color = soft();
-    style.visuals.hyperlink_color = accent();
+    style.visuals.code_bg_color = palette.soft;
+    style.visuals.hyperlink_color = palette.accent;
     style.spacing.item_spacing = egui::vec2(0.0, 6.0);
     let body = egui::FontId::new(TEXT_BODY, egui::FontFamily::Proportional);
     let heading = egui::FontId::new(TEXT_HEADING, egui::FontFamily::Proportional);
@@ -615,6 +622,12 @@ pub const PAD_SETTINGS_BACK: egui::Margin = egui::Margin {
 
 /// The hotkey chip's box (`.q-shortcut { width:102px; padding:5px 8px }`).
 pub const SETTING_CHIP_WIDTH: f32 = 102.0;
+
+/// The hotkey box's height.
+///
+/// Fixed, and the same in both of the box's states, so the row does not reflow when it starts
+/// listening: the value and the request for a new value occupy the same rectangle.
+pub const SETTING_CHIP_HEIGHT: f32 = 26.0;
 
 /// Inside the hotkey chip.
 pub const PAD_SETTING_CHIP: egui::Margin = egui::Margin {
@@ -876,29 +889,32 @@ mod tests {
                 true => egui::Style { visuals: egui::Visuals::light(), ..Default::default() },
                 false => egui::Style { visuals: egui::Visuals::dark(), ..Default::default() },
             };
-            // The style is a function of the *current* mode, which is process state: set it, or the
-            // palette under test is not the one being resolved.
-            set_mode(if palette.bg.r() > 0x80 { Mode::Light } else { Mode::Dark });
-            let style = markdown_style(&base);
+            // No global state is consulted or set: the palette is passed in, which is the whole
+            // reason this test can run beside the rest of the suite. Reading the process-global mode
+            // here failed intermittently — another test's `set_mode` would land between this test's
+            // write and its read, which is the classic way a shared global makes a suite flaky.
+            let style = markdown_style(&base, palette);
+            let (inline_bg, block_bg) =
+                (style.visuals.code_bg_color, style.visuals.extreme_bg_color);
 
             assert_eq!(
-                style.visuals.code_bg_color,
-                palette.soft,
+                inline_bg, palette.soft,
                 "inline code uses the panel's own surface, not egui's default",
             );
-            assert_eq!(style.visuals.extreme_bg_color, palette.soft, "and so do fenced blocks");
+            assert_eq!(block_bg, palette.soft, "and so do fenced blocks");
             assert_eq!(style.visuals.override_text_color, Some(palette.text));
+            assert_eq!(style.visuals.hyperlink_color, palette.accent, "and links the accent");
 
             // And the two are far enough apart to read. This is the assertion the user's screenshot
             // would have failed: the default grey gives 1.07 against the dark palette's text.
-            let inline = contrast(palette.text, style.visuals.code_bg_color);
+            let inline = contrast(palette.text, inline_bg);
             assert!(
                 inline >= 4.0,
                 "inline code is readable in this palette: text {:?} on {:?} is {inline:.2}:1",
                 palette.text,
-                style.visuals.code_bg_color,
+                inline_bg,
             );
-            let block = contrast(palette.text, style.visuals.extreme_bg_color);
+            let block = contrast(palette.text, block_bg);
             assert!(block >= 4.0, "and so is a fenced block: {block:.2}:1");
 
             // What egui would have chosen, to show the fix is load-bearing rather than incidental.

@@ -98,8 +98,19 @@ pub struct App {
     screenshot: Option<std::path::PathBuf>,
     /// Whether that picture has been asked for yet this run.
     screenshot_asked: bool,
-    /// Whether it has been written, so it is written once and not once a frame.
-    screenshot_written: bool,
+    /// When the last picture was successfully written.
+    ///
+    /// A timestamp rather than a flag, because one picture is not enough: the window's height is a
+    /// *result* of drawing, so the first frames show a panel that is still growing and anything below
+    /// the fold is missing from them. See [`crate::ui::screenshot`]. The timestamp is what rate-limits
+    /// the repeat so this stays a development aid rather than a per-frame cost.
+    screenshot_taken_at: Option<std::time::Instant>,
+    /// When the last write was recorded in the marker.
+    ///
+    /// Its own timestamp so the record is periodic rather than one-shot: "the dump has stopped updating"
+    /// and "the dump is working" have to be distinguishable after the fact, and the first version's
+    /// single line made them look the same.
+    screenshot_marked_at: Option<std::time::Instant>,
     /// Where the window is, and where that is remembered.
     ///
     /// Owned here rather than by the window layer: the window reports where it is, and the
@@ -135,6 +146,20 @@ pub struct App {
     /// State rather than drawing, because it outlives a frame — and because the panel starts on the
     /// settings page when the environment asks it to, which is a decision made before any drawing.
     settings_open: bool,
+    /// Why the chord just pressed was refused, while the row is listening.
+    ///
+    /// The second half of "the recorder is listening": a key press that produces nothing has to produce
+    /// *something*, or the only honest reading is that the recorder is broken.
+    hotkey_hint: Option<String>,
+    /// Whether the settings row is listening for a chord.
+    ///
+    /// State here rather than only in the drawing layer, because **the panel's own key handlers have
+    /// to stand down while it is true**: `Esc` closes the panel, `Enter` sends, and both are keys a
+    /// user may be trying to record. A recorder that swallowed chords but let the panel act on them
+    /// would close itself mid-recording.
+    hotkey_recording: bool,
+    /// Once, so the binding is on the record exactly when it changes.
+    hotkey_seen: Option<String>,
 }
 
 impl App {
@@ -145,6 +170,7 @@ impl App {
     /// @param hotkey - the registration outcome, success or failure.
     /// @param settings - window geometry and appearance.
     /// @param wake - receives work from the reader thread.
+    /// @param preferences_path - where the user's own settings are remembered, or `None` for nowhere.
     #[must_use]
     pub fn new(
         session: Arc<Mutex<Session>>,
@@ -155,8 +181,8 @@ impl App {
         outcome: Arc<Mutex<Option<SessionExit>>>,
         hotkey_active: bool,
         window_state: crate::ui::WindowState,
+        preferences_path: Option<std::path::PathBuf>,
     ) -> Self {
-        let preferences_path = crate::app::preferences::path_from_env();
         let preferences = crate::app::preferences::Preferences::load(
             preferences_path.as_deref().unwrap_or(std::path::Path::new("")),
         );
@@ -192,7 +218,8 @@ impl App {
                 .map(std::path::PathBuf::from)
                 .filter(|path| !path.as_os_str().is_empty()),
             screenshot_asked: false,
-            screenshot_written: false,
+            screenshot_taken_at: None,
+            screenshot_marked_at: None,
             markdown: egui_commonmark::CommonMarkCache::default(),
             draft: String::new(),
             fonts_warning: None,
@@ -200,6 +227,9 @@ impl App {
             preferences,
             preferences_path,
             settings_open: crate::ui::settings_requested(),
+            hotkey_recording: crate::ui::hotkey_recording_requested(),
+            hotkey_hint: None,
+            hotkey_seen: None,
         }
     }
 
@@ -342,39 +372,50 @@ impl App {
         }
     }
 
-    /// Ask for one picture of the panel, and write it when egui hands it over.
+    /// Keep one picture of the panel on disk, refreshed while the panel is on screen.
     ///
-    /// The ask has to come from inside a pass, and the answer arrives as an event on a later
-    /// one — hence two pieces of state rather than a straight-line call.
+    /// The ask has to come from inside a pass and the answer arrives as an event on a later one — hence
+    /// state rather than a straight-line call.
+    ///
+    /// **Repeatedly, not once.** This used to write the first frame and stop, which made it lie: the
+    /// window's height follows its content, so the early frames show a panel still growing, and whatever
+    /// sits below that fold is simply absent from the picture. A settings row that had not been laid out
+    /// yet looked like a change that had not taken effect, and the honest reading of that is "the tool is
+    /// broken", not "the style did not apply". Now the file is overwritten every second for as long as
+    /// the panel is visible, so the picture on disk is always the current one.
     fn write_screenshot(&mut self) {
         let Some(path) = self.screenshot.clone() else { return };
         let Some(ctx) = &self.context else { return };
 
-        if self.screenshot_written {
-            return;
-        }
         if let Some(image) = ctx.input(|input| {
             input.events.iter().find_map(|event| match event {
                 egui::Event::Screenshot { image, .. } => Some(image.clone()),
                 _ => None,
             })
         }) {
+            let now = std::time::Instant::now();
             match crate::ui::screenshot::write_ppm(&path, &image) {
                 Ok(()) => {
-                    self.screenshot_written = true;
-                    self.sink.mark(&format!("screenshot written to {}", path.display()));
+                    // On the record every so often, not every second: the marker is how "is the dump
+                    // still updating" is answered afterwards, and one line at startup cannot answer it.
+                    if crate::ui::screenshot::worth_recording(self.screenshot_marked_at, now) {
+                        self.screenshot_marked_at = Some(now);
+                        self.sink.mark(&format!("screenshot refreshed at {}", path.display()));
+                    }
                 }
                 Err(error) => {
-                    self.screenshot_written = true;
                     self.sink.mark(&format!("screenshot failed: {error}"));
                 }
             }
+            self.screenshot_taken_at = Some(now);
+            // A request is no longer outstanding, whatever the outcome.
+            self.screenshot_asked = false;
             return;
         }
-        // Once the panel is actually on screen: a hidden window has no framebuffer to hand
-        // over, and asking then would capture nothing rather than the panel.
+        // Once the panel is actually on screen: a hidden window has no framebuffer to hand over, and
+        // asking then would capture nothing rather than the panel.
         let visible = ctx.input(|input| input.viewport().visible().unwrap_or(true));
-        if !self.screenshot_asked && visible {
+        if crate::ui::screenshot::due(visible, self.screenshot_asked, self.screenshot_taken_at) {
             self.screenshot_asked = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }
@@ -653,6 +694,8 @@ impl App {
             keep_open: !self.settings.hide_on_blur,
             settings_open: self.settings_open,
             theme: self.settings.theme,
+            recording: self.hotkey_recording,
+            recording_hint: self.hotkey_hint.clone(),
             prompt_line: session.prompt_delivery().describe(),
             prompt_sending: session.prompt_delivery().is_sending(),
             turn_active: transcript.is_turn_active(),
@@ -805,6 +848,51 @@ impl App {
                 // change lands on the very next one.
                 self.save_preferences();
             }
+            Action::StartHotkeyRecording => {
+                self.hotkey_recording = true;
+                self.hotkey_hint = None;
+            }
+            Action::StopHotkeyRecording => {
+                self.hotkey_recording = false;
+                self.hotkey_hint = None;
+            }
+            Action::RejectHotkey { hint } => {
+                // The row keeps listening: a chord that cannot be used is a mistake to correct, not a
+                // reason to end the recording and make the user click again.
+                self.hotkey_hint = Some(hint);
+            }
+            Action::SetHotkey(spec) => {
+                // Only a change is worth acting on: re-registering the same accelerator would drop
+                // and retake a grab the user already has, and a desktop where it was taken by
+                // somebody else in the meantime would turn "no change" into "lost my shortcut".
+                if self.hotkey.spec() == Some(spec.as_str()) && self.hotkey.is_active() {
+                    return;
+                }
+                // `rebind` consumes the registration and gives one back, which is what makes "the old
+                // grab is released before the new one is asked for" a property of the type rather
+                // than a convention: there is no moment here when two of them are alive.
+                self.hotkey = std::mem::replace(&mut self.hotkey, Hotkey::register("")).rebind(&spec);
+                // Remembered either way. A shortcut the user chose is their preference even when the
+                // desktop would not give it up: silently reverting to the host's key would mean the
+                // choice appears to work and then undoes itself on the next start.
+                self.preferences.hotkey = Some(spec.clone());
+                self.save_preferences();
+                // The row stops asking once it has an answer. Nothing else is needed: the chip reports
+                // the accelerator that was asked for, and `hotkey_reason` carries why it is not held —
+                // so a refused change is visible without a field to keep open.
+                self.hotkey_recording = false;
+                self.hotkey_hint = None;
+                // On the record, because this is the one setting whose effect is invisible: a
+                // shortcut either opens the panel or does nothing, and "nothing" has no other trace.
+                let outcome = match self.hotkey.is_active() {
+                    true => format!("hotkey {spec} registered"),
+                    false => format!(
+                        "hotkey {spec} refused: {}",
+                        self.hotkey.reason().unwrap_or("unknown"),
+                    ),
+                };
+                self.sink.mark(&outcome);
+            }
             Action::KeepOpenOnBlur(keep_open) => {
                 self.preferences.keep_open = Some(keep_open);
                 self.settings.hide_on_blur = !keep_open;
@@ -913,6 +1001,14 @@ pub(crate) struct PanelState {
     /// The *preference* rather than the resolved palette: a user who has chosen "follow the system"
     /// needs to see that choice reported as theirs, even on a machine that is currently dark.
     pub(crate) theme: crate::ui::theme::Preference,
+    /// Whether the hotkey row is listening for a chord.
+    ///
+    /// The composer and the top bar read this and do nothing while it is true: a recorder that let
+    /// `Enter` send a message, or `Esc` put the panel away, would be unusable for the keys most people
+    /// want to bind.
+    pub(crate) recording: bool,
+    /// Why the last chord was refused, while the row is listening.
+    pub(crate) recording_hint: Option<String>,
 }
 
 /// What the status line needs to know about the followed conversation.
@@ -946,7 +1042,11 @@ impl App {
     /// a shortcut and a sentence about why there is no shortcut.
     #[must_use]
     fn hotkey_spec(&self) -> Option<String> {
-        self.hotkey.is_active().then(|| self.hotkey.spec().to_owned())
+        // Straight from the registration, which already knows the difference: `spec` is what was
+        // asked for, `is_active` is whether it was had, and the chip shows the first while the
+        // tooltip carries the second's reason. Reporting `None` here for a *failed* registration
+        // would leave the settings page unable to say which shortcut is the one that did not work.
+        self.hotkey.spec().map(str::to_owned)
     }
 
     /// Why there is no hotkey, when there is none.
@@ -1055,6 +1155,19 @@ impl App {
                 crate::ui::theme::Mode::Dark => "dark",
             };
             self.sink.mark(&format!("theme {mode} (preference {preference})"));
+        }
+        // Which accelerator this run actually holds, once — and again if it changes, because the
+        // settings page can change it. A global hotkey is the one thing about this panel with no
+        // visible trace when it fails: the key either opens the panel or does nothing at all.
+        {
+            let current = self.hotkey.spec().unwrap_or("(none)").to_owned();
+            if self.hotkey_seen.as_deref() != Some(current.as_str()) {
+                self.hotkey_seen = Some(current.clone());
+                match self.hotkey.reason() {
+                    Some(reason) => self.sink.mark(&format!("hotkey {current} unavailable: {reason}")),
+                    None => self.sink.mark(&format!("hotkey {current} held")),
+                }
+            }
         }
         let state = self.state();
         let mut action: Option<crate::ui::Action> = None;
@@ -1296,23 +1409,23 @@ mod tests {
     /// once and the tests that change a setting share the file rather than racing for the variable.
     /// Without it they would write `~/.dsh-quorfloat/preferences.json` — the real user's own choice
     /// of theme — which is the same reason `app_and_session` passes a default window state.
+    /// This test's own preferences file.
     ///
-    /// @returns where the preferences are being kept.
-    fn scratch_preferences_path() -> std::path::PathBuf {
-        use std::sync::OnceLock;
-        static PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
-        PATH.get_or_init(|| {
-            let path = std::env::temp_dir().join(format!(
-                "quorfloat-app-preferences-{}.json",
-                std::process::id()
-            ));
-            let _ = std::fs::remove_file(&path);
-            // Safe in the way that matters here: the variable is set exactly once, before any test
-            // that could read it runs, and nothing in this process mutates the environment after.
-            unsafe { std::env::set_var("DSH_QUORFLOAT_PREFERENCES", &path) };
-            path
-        })
-        .clone()
+    /// **Its own, not the process's.** The path used to be read from `DSH_QUORFLOAT_PREFERENCES` inside
+    /// `App::new`, which made it process-global: every test that changed a setting wrote the same file,
+    /// so they overwrote and deleted each other's state and failed in ways that looked like bugs in the
+    /// code under test. The constructor takes the path now, and a test names its own — unique per name,
+    /// so two tests cannot collide however they are scheduled.
+    ///
+    /// @param name - what this test is about, for the file name.
+    /// @returns a path that does not exist yet.
+    fn preferences_for_test(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "quorfloat-app-preferences-{}-{name}.json",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        path
     }
 
     /// The user's own settings, end to end: set one, and it is still set after a restart.
@@ -1324,8 +1437,8 @@ mod tests {
     /// effect but is never written, or is written but never read back, is the same bug to a user.
     #[test]
     fn a_setting_takes_effect_now_and_is_still_set_after_a_restart() {
-        let path = scratch_preferences_path();
-        let (mut app, recorded, _session, _wake) = app_and_session();
+        let path = preferences_for_test("restart");
+        let (mut app, recorded, _session, _wake) = app_and_session_with(&path);
         assert_eq!(app.state().theme, crate::ui::theme::Preference::System, "the host decides first");
         assert!(!path.exists(), "and nothing has been written yet");
 
@@ -1366,7 +1479,7 @@ mod tests {
         assert!(!app.settings().hide_on_blur, "which is the same fact, spelled the config's way");
 
         // Now the restart: a fresh app over the same file, as the next launch would build it.
-        let (restarted, _recorded, _session, _wake) = app_and_session();
+        let (restarted, _recorded, _session, _wake) = app_and_session_with(&path);
         assert_eq!(
             restarted.state().theme,
             crate::ui::theme::Preference::Dark,
@@ -1379,7 +1492,6 @@ mod tests {
         app.apply_card_action(crate::ui::Action::SetTheme(crate::ui::theme::Preference::System));
         let cleared = std::fs::read_to_string(&path).expect("still a file, for the switch");
         assert!(cleared.contains("system") || cleared.contains("null"), "{cleared}");
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
@@ -1475,95 +1587,243 @@ mod tests {
     }
 
     #[test]
-    fn the_page_reports_the_hotkey_the_panel_actually_registered() {
-        // The chip is a report, not a control, and what it reports is the accelerator this process
-        // really holds. A panel with no hotkey must say so rather than show an empty box — and the
-        // reason it has none is a sentence, so it goes on hover where sentences fit.
-        let (mut app, _recorded, _session, _wake) = app_and_session();
+    fn recording_starts_on_a_click_and_a_chord_becomes_the_accelerator() {
+        // The whole flow the design's chip drives, from a real click to a real chord: the box *is* the
+        // control, so clicking it must start listening and a key press while it listens must become the
+        // accelerator. The key events go through egui's own input path rather than through a call to the
+        // action, because the interesting part is that `Event::Key` reaches this row at all.
+        let _serial = crate::runtime::hotkey::test_lock();
+        let path = preferences_for_test("recorded");
+        let (mut app, recorded, _session, _wake) = app_and_session_with(&path);
+        app.hotkey = Hotkey::active_for_test("Alt+Space");
+        app.apply_card_action(crate::ui::Action::OpenSettings);
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
         let size = egui::vec2(708.0, 620.0);
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
-        app.apply_card_action(crate::ui::Action::OpenSettings);
-        let failed = drawn_text(&mut app, size);
+        let run = |app: &mut App, events: Vec<egui::Event>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    focused: true,
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            output.textures_delta.clear();
+        };
+        let press = |key: egui::Key, modifiers: egui::Modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+
+        // Click the box, aimed at the accelerator it is drawing rather than at coordinates worked out
+        // from the layout: the box's own text says where the box is, so the test cannot pass by landing
+        // somewhere else that happens to be clickable.
+        let before = drawn_text(&mut app, size);
+        let chip = before
+            .iter()
+            .find(|(text, rect)| text.contains("Alt+Space") && screen.contains_rect(*rect))
+            .map(|(_, rect)| rect.center())
+            .unwrap_or_else(|| {
+                panic!("the accelerator is on the page: {:?}", on_screen(&before, screen))
+            });
+        let click = |pressed: bool| egui::Event::PointerButton {
+            pos: chip,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        run(&mut app, vec![egui::Event::PointerMoved(chip)]);
+        run(&mut app, vec![egui::Event::PointerMoved(chip), click(true)]);
+        run(&mut app, vec![click(false)]);
+        assert!(app.state().recording, "the click started a recording");
+        let listening = drawn_text(&mut app, size);
         assert!(
-            visible(&failed, "未注册", screen),
-            "no hotkey is reported as such: {:?}",
-            on_screen(&failed, screen),
-        );
-        assert!(
-            !visible(&failed, "Alt+Space", screen),
-            "and the accelerator that was *asked* for is not shown as if it were held",
+            visible(&listening, "按下组合键…", screen),
+            "and the box says what it wants: {:?}",
+            on_screen(&listening, screen),
         );
 
-        // Now one that registered: the spec the host asked for is the value.
-        app.hotkey = Hotkey::active_for_test("Alt+Space");
-        let held = drawn_text(&mut app, size);
-        assert!(visible(&held, "Alt+Space", screen), "the registered accelerator is the value");
-        assert!(!visible(&held, "未注册", screen), "and the failure line is gone");
+        // **A bare letter is refused, and the row says so.** This is the case that shipped wrong: the
+        // first recorder accepted `M`, and a global hotkey is grabbed from the whole desktop, so the
+        // letter M would have stopped reaching every other application. It was found by looking at the
+        // panel — the chip showed "M" — which is why this test exists.
+        run(&mut app, vec![press(egui::Key::M, egui::Modifiers::NONE)]);
+        assert!(app.state().recording, "the row keeps listening after a refusal");
+        assert!(
+            app.state().recording_hint.is_some(),
+            "and explains itself rather than swallowing the key press",
+        );
+        assert_eq!(app.hotkey.spec(), Some("Alt+Space"), "nothing was re-registered");
+        let refused = drawn_text(&mut app, size);
+        assert!(
+            visible(&refused, "请按住修饰键", screen),
+            "the reason is in the row: {:?}",
+            on_screen(&refused, screen),
+        );
+
+        // A bare function key is allowed: nothing types `F13` by accident.
+        run(&mut app, vec![press(egui::Key::F13, egui::Modifiers::NONE)]);
+        assert_eq!(app.hotkey.spec(), Some("F13"), "a function key on its own is a shortcut");
+        assert!(!app.state().recording, "and the row stopped listening");
+
+        // Now a chord. `Cmd` (or `Ctrl`) + `Shift` + `K`.
+        app.apply_card_action(crate::ui::Action::SetHotkey("Alt+Space".to_owned()));
+        app.apply_card_action(crate::ui::Action::StartHotkeyRecording);
+        let modifiers = egui::Modifiers {
+            ctrl: !cfg!(target_os = "macos"),
+            command: cfg!(target_os = "macos"),
+            shift: true,
+            ..egui::Modifiers::NONE
+        };
+        run(&mut app, vec![press(egui::Key::K, modifiers)]);
+        let expected = if cfg!(target_os = "macos") { "Cmd+Shift+K" } else { "Ctrl+Shift+K" };
+        assert_eq!(
+            app.hotkey.spec(),
+            Some(expected),
+            "the chord became the accelerator, and nothing was typed",
+        );
+        assert!(!app.state().recording, "and the row stopped listening");
+        assert!(
+            recorded.marks().iter().any(|mark| mark.contains(expected)),
+            "the attempt is on the record: {:?}",
+            recorded.marks(),
+        );
+        // Remembered, like every other setting: a shortcut the user pressed is a preference.
+        let written = std::fs::read_to_string(&path).expect("the choice reaches the disk");
+        assert!(written.contains(expected), "{written}");
     }
 
     #[test]
-    fn the_settings_rows_do_not_overlap_each_other() {
-        // The settings page shipped its first look with every row's text printed on top of the row
-        // below it. The cause is worth naming, because the obvious way to write this page has it:
-        // measuring a line with `painter.layout` and then drawing it with `painter.galley` paints
-        // the text without reserving any *height* for it, so each row claimed its padding and
-        // nothing else. The test that catches that cannot be about strings — every string was
-        // drawn — so it is about the rectangles: lines of text in different rows must not share
-        // vertical space.
-        //
-        // Same vertical band means same row, and the page's three labels are one line each, so they
-        // must occupy three distinct bands in the order they are written. Notes are excluded on
-        // purpose: a note may wrap, and two lines of one row legitimately share a band with their
-        // own label.
+    fn the_box_says_which_accelerator_did_not_work() {
+        // The report this row owes the user, and the reason its rule is what it is: the box is the only
+        // place the row can speak, so it shows **the accelerator that was asked for**, in the warning
+        // colour when it is not held. Replacing the name with "not registered" would throw away the one
+        // fact the user needs — *which* shortcut failed — which is exactly what happened when the text
+        // field was removed and nothing else carried the value.
         let (mut app, _recorded, _session, _wake) = app_and_session();
+        let size = egui::vec2(708.0, 620.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        // **Nothing was ever attempted**, which is the host's documented "no hotkey" escape hatch: no
+        // spec at all, rather than a spec that failed. The helper starts the app with a *failed*
+        // registration, so this has to be set up.
+        app.hotkey = Hotkey::register("");
+        app.apply_card_action(crate::ui::Action::OpenSettings);
+
+        let none = drawn_text(&mut app, size);
+        assert!(
+            visible(&none, "未注册", screen),
+            "no accelerator at all is reported as such: {:?}",
+            on_screen(&none, screen),
+        );
+
+        // An accelerator was attempted and refused: it is named, in the warning colour.
+        app.hotkey = Hotkey::unavailable_for_test("Alt+Space", "taken by another application");
+        let refused = drawn_text_coloured(&mut app, size);
+        assert!(
+            refused
+                .iter()
+                .any(|(text, rect, _)| text.contains("Alt+Space") && screen.contains_rect(*rect)),
+            "the refused accelerator is named: {:?}",
+            on_screen(&drawn_text(&mut app, size), screen),
+        );
+        let named = refused
+            .iter()
+            .find(|(text, _, _)| text.contains("Alt+Space"))
+            .expect("it is on the page");
+        assert_eq!(
+            named.2,
+            crate::ui::theme::Palette::DARK.warn_text,
+            "and drawn as a warning, not as a value that works",
+        );
+
+        // And a registered one is the plain value.
+        app.hotkey = Hotkey::active_for_test("Alt+Space");
+        let held = drawn_text_coloured(&mut app, size);
+        let value = held
+            .iter()
+            .find(|(text, rect, _)| text.contains("Alt+Space") && screen.contains_rect(*rect))
+            .expect("it is on the page");
+        assert_eq!(
+            value.2,
+            crate::ui::theme::Palette::DARK.text,
+            "a working accelerator is the panel's text colour",
+        );
+    }
+
+    #[test]
+    fn the_hotkey_row_has_two_faces_and_no_text_field() {
+        // The design's shape: one box that reports the accelerator, and the same box asking for a new
+        // one while it listens. Asserting that the box is the *only* control is the point — the two
+        // buttons that used to sit beside it (录制 / 手动输入) are gone, so a row that grew them back
+        // would be a row that stopped following the design.
+        let (mut app, _recorded, _session, _wake) = app_and_session();
+        app.hotkey = Hotkey::active_for_test("Alt+Space");
         app.apply_card_action(crate::ui::Action::OpenSettings);
         let size = egui::vec2(708.0, 620.0);
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
-        let drawn = drawn_text(&mut app, size);
 
-        let band = |needle: &str| -> (f32, f32) {
-            let rect = drawn
-                .iter()
-                .find(|(text, rect)| text.contains(needle) && screen.contains_rect(*rect))
-                .unwrap_or_else(|| {
-                    panic!("{needle} is on the page: {:?}", on_screen(&drawn, screen))
-                })
-                .1;
-            (rect.top(), rect.bottom())
-        };
-        // Each row's label and its note are one band, and the next row's label is the next one: the
-        // full page order, so a note that escaped into the row below is caught as well as a label.
-        let rows = ["外观", "失焦时保持展开", "呼出快捷键"];
-        let notes = ["面板的明暗主题", "切换应用后仍保留悬浮窗", "在任意应用中呼出或收起悬浮窗"];
-        let bands: Vec<(f32, f32)> = rows.iter().map(|label| band(label)).collect();
-        for (index, note) in notes.iter().enumerate() {
-            let (note_top, note_bottom) = band(note);
-            let label_bottom = bands[index].1;
+        let closed = drawn_text(&mut app, size);
+        assert!(visible(&closed, "呼出快捷键", screen), "the row is there");
+        assert!(visible(&closed, "Alt+Space", screen), "showing what is held");
+        for gone in ["录制", "手动输入", "更改"] {
             assert!(
-                note_top >= label_bottom - 1.0,
-                "row {index}'s note starts at {note_top}, above its own label's bottom {label_bottom}",
+                !visible(&closed, gone, screen),
+                "there is no {gone} button: the box is the control ({:?})",
+                on_screen(&closed, screen),
             );
-            if let Some((next_top, _)) = bands.get(index + 1) {
-                assert!(
-                    note_bottom <= *next_top,
-                    "row {index}'s note ends at {note_bottom}, past the next row's label at {next_top}",
-                );
-            }
         }
-        for (index, pair) in bands.windows(2).enumerate() {
-            let (above_top, above_bottom) = pair[0];
-            let (below_top, _) = pair[1];
-            assert!(
-                below_top >= above_bottom,
-                "row {:?} starts at {below_top} but the row above it ends at {above_bottom}: the \
-                 rows overlap, which is what happens when text is painted without being laid out",
-                rows[index + 1],
-            );
-            assert!(above_bottom > above_top, "and row {:?} has a height at all", rows[index]);
-        }
-        // And the order on the page is the order in the source, so the bands above are three
-        // different rows rather than three measurements of one.
-        assert!(bands[0].0 < bands[1].0 && bands[1].0 < bands[2].0, "{bands:?}");
+
+        // Listening, the same box changes what it says.
+        app.apply_card_action(crate::ui::Action::StartHotkeyRecording);
+        let recording = drawn_text(&mut app, size);
+        assert!(visible(&recording, "呼出快捷键", screen), "the row stays");
+        assert!(
+            visible(&recording, "按下组合键…", screen),
+            "and the box asks for the chord: {:?}",
+            on_screen(&recording, screen),
+        );
+        assert!(!visible(&recording, "Alt+Space", screen), "the old value gives way to the request");
+
+        // Esc gives up, and the value comes back untouched.
+        app.apply_card_action(crate::ui::Action::StopHotkeyRecording);
+        let after = drawn_text(&mut app, size);
+        assert!(visible(&after, "Alt+Space", screen), "the accelerator is shown again");
+        assert_eq!(
+            app.hotkey.spec(),
+            Some("Alt+Space"),
+            "and giving up costs nothing",
+        );
+    }
+
+    #[test]
+    fn the_hotkey_box_draws_its_text_in_the_panels_colour_not_a_dim_one() {
+        // The user's report: in dark mode the accelerator in the box was hard to read, because the
+        // text colour came from egui's theme rather than from the palette. Asserting on the *colour*
+        // is the point: the string was always drawn, so a test that only asked "is it there" passed
+        // both before and after the fix.
+        let (mut app, _recorded, _session, _wake) = app_and_session();
+        app.hotkey = Hotkey::active_for_test("Alt+Space");
+        app.settings.theme = crate::ui::theme::Preference::Dark;
+        app.apply_card_action(crate::ui::Action::OpenSettings);
+        let size = egui::vec2(708.0, 620.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+
+        let drawn = drawn_text_coloured(&mut app, size);
+        let palette = crate::ui::theme::Palette::DARK;
+        let accelerator = drawn
+            .iter()
+            .find(|(text, rect, _)| text.contains("Alt+Space") && screen.contains_rect(*rect))
+            .unwrap_or_else(|| panic!("the accelerator is on the page: {}", drawn.len()));
+        assert_eq!(
+            accelerator.2, palette.text,
+            "the box's accelerator is the panel's text colour, not a dim inactive grey",
+        );
     }
 
     #[test]
@@ -1689,8 +1949,72 @@ mod tests {
             .collect()
     }
 
+    /// The same drawing, with the colour each run of text was painted in.
+    ///
+    /// A separate collector rather than a fourth tuple field everywhere, because only the tests about
+    /// *how* something is drawn need it — and a report of the form "this text is the wrong colour in
+    /// dark mode" cannot be checked against what was drawn, only against how. A green light on strings
+    /// would pass whatever the palette said.
+    ///
+    /// @param app - the panel to draw.
+    /// @param size - the window to draw it in.
+    /// @returns one entry per drawn run of text, with its rectangle and colour.
+    fn drawn_text_coloured(
+        app: &mut App,
+        size: egui::Vec2,
+    ) -> Vec<(String, egui::Rect, egui::Color32)> {
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| app.draw(ui));
+        output.textures_delta.clear();
+        let mut texts = Vec::new();
+        for shape in output.shapes {
+            collect_text_coloured(&shape.shape, &mut texts);
+        }
+        texts
+    }
+
+    /// The recursive half of [`drawn_text_coloured`].
+    ///
+    /// @param shape - the shape to walk.
+    /// @param out - where entries are collected.
+    fn collect_text_coloured(
+        shape: &egui::Shape,
+        out: &mut Vec<(String, egui::Rect, egui::Color32)>,
+    ) {
+        match shape {
+            egui::Shape::Text(text) => {
+                // The colour a run of text is *really* painted in. `TextShape::fallback_color` is
+                // only used for sections whose own colour is transparent — a label with an explicit
+                // colour (which is most of this panel) carries it in the layout job instead. Reading
+                // only the fallback would report `TRANSPARENT`-resolved defaults for exactly the text
+                // whose colour is being questioned.
+                let colour = text
+                    .galley
+                    .job
+                    .sections
+                    .first()
+                    .map(|section| section.format.color)
+                    .filter(|colour| *colour != egui::Color32::TRANSPARENT)
+                    .unwrap_or(text.fallback_color);
+                out.push((text.galley.text().to_owned(), text.visual_bounding_rect(), colour));
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_text_coloured(shape, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Walk a shape tree, collecting every piece of text and the rectangle it occupies.
-    fn collect_text(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {        match shape {
+    fn collect_text(shape: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+        match shape {
             egui::Shape::Text(text) => {
                 out.push((text.galley.text().to_owned(), text.visual_bounding_rect()));
             }
@@ -1704,7 +2028,11 @@ mod tests {
     }
 
 
-    /// to get an index wrong.
+    /// Drawing a conversation with a frame this build cannot read must not panic.
+    ///
+    /// A panic inside the layout closure takes the panel down with no message the user can act on, and
+    /// the code that draws blocks, tool output and notices is the code with the most ways to get an
+    /// index wrong.
     #[test]
     fn drawing_a_conversation_does_not_panic() {
         let (mut app, recorded, session, _wake) = app_and_session();
@@ -2340,12 +2668,24 @@ mod tests {
     }
 
     /// The same app, plus the session, for tests that deliver host frames into it.
+    ///
+    /// Settings are remembered nowhere, so a test that is not about them leaves no trace.
     fn app_and_session() -> (App, Recorded, Arc<Mutex<Session>>, Sender<Wake>) {
+        app_and_session_with(std::path::Path::new(""))
+    }
+
+    /// The same, remembering settings in a named file.
+    ///
+    /// @param preferences - where to remember them, or an empty path for nowhere.
+    /// @returns the app, its frames, its session and its wake channel.
+    fn app_and_session_with(
+        preferences: &std::path::Path,
+    ) -> (App, Recorded, Arc<Mutex<Session>>, Sender<Wake>) {
         let session = Arc::new(Mutex::new(Session::new(identity())));
         let recorded = Recorded::default();
         let sink = Arc::new(SharedSink::new(Box::new(RecordingSink(recorded.clone()))));
         let (tx, rx) = channel();
-        let hotkey = Hotkey::Unavailable { reason: "test".to_owned(), spec: "Alt+Space".to_owned() };
+        let hotkey = Hotkey::unavailable_for_test("Alt+Space", "test");
         let outcome = Arc::new(Mutex::new(None));
         let app = App::new(
             Arc::clone(&session),
@@ -2357,6 +2697,8 @@ mod tests {
             false,
             // No path, so the tests cannot touch the real user's remembered position.
             crate::ui::WindowState::default(),
+            // Empty means nowhere to write.
+            (!preferences.as_os_str().is_empty()).then(|| preferences.to_path_buf()),
         );
         (app, recorded, session, tx)
     }

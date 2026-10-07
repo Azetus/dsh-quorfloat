@@ -37,13 +37,23 @@ pub struct Preferences {
     /// behaviour the process implements (`hideOnBlur`). Both spellings are correct for their side;
     /// the conversion happens once, in [`WindowSettings::with`](crate::ui::window::WindowSettings).
     pub keep_open: Option<bool>,
+    /// The accelerator the panel should register, when the user has changed it here.
+    ///
+    /// `None` means the host's configuration decides, which is what the hotkey the host started the
+    /// process with should do until someone says otherwise.
+    ///
+    /// **The spec rather than a key.** What gets remembered has to be the same string the host
+    /// writes and this process registers — `Alt+Space`, `Cmd+Shift+K` — because that value is what
+    /// the settings page shows and what `hello` reports. Remembering a parsed key instead would mean
+    /// two spellings of the same fact, and they would eventually disagree.
+    pub hotkey: Option<String>,
 }
 
 impl Preferences {
     /// Whether the user has set nothing at all here.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.theme.is_none() && self.keep_open.is_none()
+        self.theme.is_none() && self.keep_open.is_none() && self.hotkey.is_none()
     }
 
     /// Read the preferences file.
@@ -72,7 +82,17 @@ impl Preferences {
             })
             .map(|name| Preference::from_name(Some(name)));
         let keep_open = value.get("keepOpen").and_then(serde_json::Value::as_bool);
-        Self { theme, keep_open }
+        // An accelerator is only remembered if this build can parse it. A hand-edited file naming a
+        // key this build does not know must not become a registration attempt that fails on every
+        // start: unrecognised means absent, and the host's configuration stays in charge.
+        let hotkey = value
+            .get("hotkey")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|spec| !spec.is_empty())
+            .filter(|spec| crate::runtime::hotkey::parse_accelerator(spec).is_some())
+            .map(str::to_owned);
+        Self { theme, keep_open, hotkey }
     }
 
     /// Write the preferences. Failure is ignored: not being able to remember a preference is a
@@ -95,9 +115,36 @@ impl Preferences {
             Preference::Light => "light",
             Preference::Dark => "dark",
         });
-        let body = serde_json::json!({ "theme": theme, "keepOpen": self.keep_open });
+        let body = serde_json::json!({
+            "theme": theme,
+            "keepOpen": self.keep_open,
+            "hotkey": self.hotkey,
+        });
         let _ = std::fs::write(path, body.to_string());
     }
+}
+
+/// Which accelerator a run should try to hold.
+///
+/// **The user's own choice wins over the host's configuration**, which is the precedence the theme
+/// and the keep-open switch already follow: the host's value is the baseline, and a shortcut changed
+/// *in the panel* is an override. Without this rule the settings page would appear to work and then
+/// quietly forget itself, because the host starts every run with its own configured hotkey in the
+/// spawn environment.
+///
+/// A pure function of two values on purpose: this decision is the one thing about the hotkey that
+/// cannot be re-tested by hand once it is wrong, because the symptom is "the panel does not open".
+///
+/// @param preferences - what the user has chosen in the panel, if anything.
+/// @param configured - the accelerator the host asked for at spawn time.
+/// @returns the accelerator to attempt.
+#[must_use]
+pub fn hotkey_to_attempt(preferences: &Preferences, configured: &str) -> String {
+    preferences
+        .hotkey
+        .clone()
+        .filter(|spec| !spec.trim().is_empty())
+        .unwrap_or_else(|| configured.to_owned())
 }
 
 /// Where the preferences live when the environment does not name a place.
@@ -141,7 +188,11 @@ mod tests {
     #[test]
     fn a_preference_survives_a_round_trip() {
         let path = scratch("round");
-        let preferences = Preferences { theme: Some(Preference::Dark), keep_open: Some(true) };
+        let preferences = Preferences {
+            theme: Some(Preference::Dark),
+            keep_open: Some(true),
+            hotkey: Some("Cmd+Shift+K".to_owned()),
+        };
         preferences.save(&path);
         assert_eq!(Preferences::load(&path), preferences);
         let _ = std::fs::remove_file(&path);
@@ -150,7 +201,7 @@ mod tests {
     #[test]
     fn nothing_chosen_is_no_file_rather_than_an_empty_one() {
         let path = scratch("empty");
-        Preferences { theme: Some(Preference::Light), keep_open: None }.save(&path);
+        Preferences { theme: Some(Preference::Light), keep_open: None, hotkey: None }.save(&path);
         assert!(path.exists());
 
         Preferences::default().save(&path);
@@ -190,8 +241,45 @@ mod tests {
     }
 
     #[test]
+    fn the_users_own_shortcut_outranks_the_hosts_configuration() {
+        // The precedence rule, on its own. Its failure mode is the worst one this project has: the
+        // settings page changes the shortcut, the next launch quietly re-registers the host's, and
+        // the user's only symptom is a key that does not open the panel any more.
+        let configured = "Alt+Space";
+        let chosen = Preferences { hotkey: Some("Cmd+Shift+K".to_owned()), ..Preferences::default() };
+        assert_eq!(hotkey_to_attempt(&chosen, configured), "Cmd+Shift+K");
+
+        // With nothing chosen, the host decides — including the host's deliberate "no hotkey", which
+        // every development profile relies on so two profiles do not fight over one accelerator.
+        assert_eq!(hotkey_to_attempt(&Preferences::default(), configured), configured);
+        assert_eq!(hotkey_to_attempt(&Preferences::default(), ""), "");
+
+        // A blank choice is not a choice: it would mean "no shortcut", which is a different decision
+        // from the one an empty field appears to make.
+        let blank = Preferences { hotkey: Some("   ".to_owned()), ..Preferences::default() };
+        assert_eq!(hotkey_to_attempt(&blank, configured), configured);
+    }
+
+    #[test]
+    fn an_accelerator_this_build_cannot_read_is_not_remembered() {
+        // A hand-edited file naming a key this build does not know must not become a registration
+        // attempt that fails on every start: absent is the honest reading, and the host stays in
+        // charge. The same rule the theme follows for a name it does not recognise.
+        let path = scratch("bad-hotkey");
+        std::fs::write(&path, r#"{"hotkey": "Frobnicate+Nope"}"#).expect("write");
+        assert_eq!(Preferences::load(&path).hotkey, None);
+
+        std::fs::write(&path, r#"{"hotkey": "  "}"#).expect("write");
+        assert_eq!(Preferences::load(&path).hotkey, None, "blank is not an accelerator either");
+
+        std::fs::write(&path, r#"{"hotkey": "Cmd+Shift+K"}"#).expect("write");
+        assert_eq!(Preferences::load(&path).hotkey.as_deref(), Some("Cmd+Shift+K"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn an_unwritable_path_is_survivable() {
-        Preferences { theme: Some(Preference::Dark), keep_open: None }
+        Preferences { theme: Some(Preference::Dark), keep_open: None, hotkey: Some("Alt+Space".to_owned()) }
             .save(Path::new("/definitely/not/a/real/directory/preferences.json"));
     }
 }
