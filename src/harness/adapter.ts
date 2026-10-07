@@ -302,6 +302,14 @@ export interface SessionStatsView {
   readonly steps: number
   /** Output tokens per second over the steps that reported usage, or `undefined`. */
   readonly tokensPerSecond?: number
+  /**
+   * Every token the session has been billed for, or `undefined` when none was reported.
+   *
+   * The four usage buckets are disjoint, so the total is their sum: the three prompt-side
+   * buckets plus output. Reasoning tokens are already inside `outputTokens` and are *not*
+   * added again — counting them twice would inflate the one figure a person uses to judge cost.
+   */
+  readonly totalTokens?: number
   /** Cache-read share of the prompt, as a percentage, or `undefined`. */
   readonly cacheHitPercent?: number
   /** Prompt size of the most recent request, when the provider reported one. */
@@ -880,7 +888,15 @@ export function readStats(value: unknown): SessionStatsView | undefined {
 
   const turns = count(statsRecord['turns'])
   const steps = count(statsRecord['steps'])
-  if (turns === undefined && steps === undefined && Object.keys(usageRecord).length === 0) {
+  // The numerator prefers the projection's own view of the *next* request, which is what the meter
+  // is for; the raw sample is the fallback, as upstream has it.
+  const contextTokens = count(pressureRecord['projectedTokens']) ?? count(pressureRecord['pressureTokens'])
+  const contextLimit = count(pressureRecord['contextWindow'])
+  // Nothing at all to report: no counts, no usage, no occupancy. A session with only *some* of the
+  // three is a real state (a step can settle without billing, and a meter can report capacity alone),
+  // so the guard asks whether there is anything rather than whether all of it is there.
+  if (turns === undefined && steps === undefined
+    && Object.keys(usageRecord).length === 0 && contextTokens === undefined) {
     return undefined
   }
 
@@ -892,28 +908,59 @@ export function readStats(value: unknown): SessionStatsView | undefined {
     ? decodeTokens / (decodeMs / 1000)
     : undefined
 
-  // Cache-hit share: cache reads over the whole prompt, which is what a person means by
-  // "how much was cached" — reads alone would report 100% for a tiny prompt.
+  // Cache-hit share: cache reads over the whole *billed prompt*, which is what a person means
+  // by "how much was cached" — reads alone would report 100% for a tiny prompt.
   const cacheRead = count(usageRecord['cacheReadTokens'])
   const uncached = count(usageRecord['uncachedInputTokens'])
   const cacheWrite = count(usageRecord['cacheWriteTokens']) ?? 0
+  const output = count(usageRecord['outputTokens'])
   const prompt = (cacheRead ?? 0) + (uncached ?? 0) + cacheWrite
-  const cacheHitPercent = cacheRead !== undefined && prompt > 0
-    ? Math.round((cacheRead / prompt) * 100)
-    : undefined
+  const cacheHitPercent = readCacheHitPercent(cacheRead, prompt)
+
+  // Cumulative: the three prompt-side buckets plus output. The upstream UI shows this same
+  // sum, and it is the only figure that answers "what has this conversation cost me".
+  const anyUsage = cacheRead !== undefined || uncached !== undefined
+    || usageRecord['cacheWriteTokens'] !== undefined || output !== undefined
+  const totalTokens = anyUsage ? prompt + (output ?? 0) : undefined
 
   return {
     turns: turns ?? 0,
     steps: steps ?? 0,
     ...(tokensPerSecond === undefined || tokensPerSecond <= 0 ? {} : { tokensPerSecond }),
+    ...(totalTokens === undefined ? {} : { totalTokens }),
     ...(cacheHitPercent === undefined ? {} : { cacheHitPercent }),
-    ...(count(pressureRecord['pressureTokens']) === undefined
-      ? {}
-      : { contextTokens: count(pressureRecord['pressureTokens']) as number }),
-    ...(count(pressureRecord['capacityTokens']) === undefined
-      ? {}
-      : { contextLimit: count(pressureRecord['capacityTokens']) as number }),
+    // The occupancy: the *projected* figure when the meter has one, otherwise the sampled one, over
+    // the window the model reported. Both field names are the upstream's
+    // (`context-occupancy.ts`: `projectedTokens ?? pressureTokens`, `contextWindow`) — the sampled
+    // number alone ignores the surface the next request will add, and reading a field the projection
+    // does not have (`capacityTokens`) is what left this statistic invisible on the real host.
+    ...(contextTokens === undefined ? {} : { contextTokens }),
+    ...(contextLimit === undefined ? {} : { contextLimit }),
   }
+}
+
+/**
+ * The cache-hit share, without ever rounding a partial hit up to a full one.
+ *
+ * The upstream client's rule (`formatCacheHitPercent`, token-format.ts) exists for a reason
+ * worth keeping: a session at 99.6% would display "100%" under plain rounding, telling a person
+ * their prompt was entirely cached when it was not — and cache misses are exactly the expensive
+ * thing this figure is read to find. So a value that would round to 100 reports 99.9 instead.
+ *
+ * @param cacheRead - cache-read tokens, or `undefined` when unreported.
+ * @param prompt - the billed prompt total (the three prompt-side buckets).
+ * @returns whole-number percent, or `undefined` when there is no prompt to take a share of.
+ */
+export function readCacheHitPercent(cacheRead: number | undefined, prompt: number): number | undefined {
+  if (cacheRead === undefined || prompt <= 0) return undefined
+  const missed = prompt - cacheRead
+  if (missed === 0) return 100
+  const percent = (cacheRead / prompt) * 100
+  const rounded = Math.round(percent)
+  // One decimal is enough to tell "all but a sliver" from "all": the panel shows one decimal
+  // rather than the upstream's escalating 99.99…, because its footer has room for a word and
+  // not for an ever-longer number.
+  return rounded < 100 ? rounded : Math.round(percent * 10) / 10
 }
 
 /**

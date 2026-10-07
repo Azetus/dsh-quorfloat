@@ -169,20 +169,111 @@ fn back(ui: &mut egui::Ui, kind: Kind) {
     ui.add_space(theme::GAP_CLOSE);
 }
 
-/// Measured statistics, grouped like the design; no invented token total or absent speed.
+/// Measured statistics, in the design's three groups.
+///
+/// The grouping is the design's (`q-stat-rounds` / `q-stat-tokens` / `q-stat-context`), and each
+/// group is one icon plus one run of text — the separator lives *inside* the token group because
+/// the total and the cache share are two halves of one fact ("what this conversation cost"), the
+/// same way the design's own markup nests them.
+///
+/// **Nothing is invented**: a group whose figures were not reported is left out entirely rather
+/// than drawn with a placeholder, because a dash where a number belongs reads as "zero".
 fn stat_items(stats: Stats) -> Vec<(Icon, String)> {
+    // Rounds, steps, and the generation speed when it was measured.
     let mut counts = format!("{} 轮 {} 步", stats.turns, stats.steps);
-    if let Some(speed) = stats.tokens_per_second { counts += &format!(" · {speed:.0} tok/s"); }
+    if let Some(speed) = stats.tokens_per_second {
+        counts += &format!(" · {} tok/s", format_speed(speed));
+    }
     let mut items = vec![(Icon::Gauge, counts)];
-    if let Some(percent) = stats.cache_hit_percent { items.push((Icon::Database, format!("缓存命中 {percent}%"))); }
-    if let Some(tokens) = stats.context_tokens {
-        let text = match stats.context_limit.filter(|limit| *limit > 0) {
-            Some(limit) => format!("上下文 {}%", tokens.saturating_mul(100) / limit),
-            None => format!("上下文 {tokens}"),
-        };
-        items.push((Icon::ChartPie, text));
+
+    // Cumulative tokens and the cache-hit share, which belong together.
+    let mut tokens = Vec::new();
+    if let Some(total) = stats.total_tokens {
+        tokens.push(format!("{} tok", format_tokens(total)));
+    }
+    if let Some(percent) = stats.cache_hit_percent {
+        tokens.push(format!("缓存命中 {}", format_percent(percent)));
+    }
+    if !tokens.is_empty() {
+        items.push((Icon::Database, tokens.join(" · ")));
+    }
+
+    // Context occupancy, as a bare percentage: the icon already says what it measures, and the
+    // design's own element is `<span id="q-stat-context-value">0%</span>` with no words at all.
+    if let Some(percent) = context_percent(&stats) {
+        items.push((Icon::ChartPie, format_percent(percent)));
     }
     items
+}
+
+/// How much of the model's context window the current prompt occupies, as a percentage.
+///
+/// Capped at 100 and rounded, matching the upstream meter (`min(100, round(used / window * 100))`):
+/// a prompt larger than the window is a real (if unhappy) state, and "103%" is not a share.
+///
+/// @param stats - the reported statistics.
+/// @returns the percentage, or `None` when either half is missing.
+fn context_percent(stats: &Stats) -> Option<f64> {
+    let used = stats.context_tokens? as f64;
+    let limit = stats.context_limit.filter(|limit| *limit > 0)? as f64;
+    Some((used / limit * 100.0).round().min(100.0))
+}
+
+/// A token count the way the upstream client writes it: `517`, `12.2K`, `1.2M`.
+///
+/// @param value - a non-negative token count.
+/// @returns the compact form.
+fn format_tokens(value: u64) -> String {
+    let scaled = |candidate: f64| {
+        if candidate >= 100.0 {
+            format!("{:.0}", candidate.round())
+        } else {
+            // One decimal, trailing `.0` dropped: the upstream helper prints `12` rather than
+            // `12.0` for an exact thousands value.
+            let tenths = (candidate * 10.0).round() / 10.0;
+            if (tenths.fract()).abs() < f64::EPSILON {
+                format!("{tenths:.0}")
+            } else {
+                format!("{tenths:.1}")
+            }
+        }
+    };
+    if value < 1_000 {
+        return value.to_string();
+    }
+    if value < 1_000_000 {
+        // Plain `K`, not a locale string: the panel is Chinese-only and `number.thousand`
+        // resolves to `{value}K` in every locale the upstream ships.
+        return format!("{}K", scaled(value as f64 / 1_000.0));
+    }
+    format!("{}M", scaled(value as f64 / 1_000_000.0))
+}
+
+/// A percentage: whole numbers, except that a partial cache hit keeps one decimal.
+///
+/// @param percent - the share, already rounded by its producer.
+/// @returns the text, without the sign.
+fn format_percent(percent: f64) -> String {
+    if (percent.fract()).abs() < f64::EPSILON {
+        format!("{percent:.0}%")
+    } else {
+        format!("{percent:.1}%")
+    }
+}
+
+/// The output speed: whole numbers from ten up, one decimal below.
+///
+/// Matches the upstream `formatTokensPerSecond`, and the reason is legibility rather than
+/// precision: at 3.4 tok/s the decimal *is* the information, and at 292 it is noise.
+///
+/// @param speed - tokens per second.
+/// @returns the number, without the unit.
+fn format_speed(speed: f64) -> String {
+    if speed >= 10.0 {
+        format!("{speed:.0}")
+    } else {
+        format!("{speed:.1}")
+    }
 }
 
 /// A fixed right-aligned group: allocate first, then paint within its rectangle.

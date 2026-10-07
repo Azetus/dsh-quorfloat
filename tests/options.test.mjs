@@ -21,18 +21,78 @@ test('statistics come from the two projections that carry them', () => {
   const stats = readStats(projections({
     sessionStats: { turns: 3, steps: 7, llmMs: 1000, toolMs: 500, ttftMs: 400, ttftSteps: 2, decodeMs: 2000, decodeTokens: 400 },
     tokenUsage: { uncachedInputTokens: 1000, outputTokens: 400, cacheReadTokens: 3000, cacheWriteTokens: 0 },
-    contextPressure: { pressureTokens: 4000, capacityTokens: 128000 },
+    contextPressure: { pressureTokens: 4000, projectedTokens: 4200, contextWindow: 128000 },
   }))
   assert.deepEqual(stats, {
     turns: 3,
     steps: 7,
     // 400 output tokens over 2000ms of decode: 200/s.
     tokensPerSecond: 200,
+    // Every bucket summed: 1000 uncached + 3000 cache-read + 0 cache-write + 400 output. The four
+    // are disjoint, and reasoning tokens are already inside output, so nothing is counted twice.
+    totalTokens: 4400,
     // 3000 of 4000 prompt tokens were cache reads.
     cacheHitPercent: 75,
-    contextTokens: 4000,
+    // The projected figure wins over the sample: it is what the *next* request will occupy.
+    contextTokens: 4200,
     contextLimit: 128000,
   })
+})
+
+test('context occupancy reads the fields the projection actually has', () => {
+  // `capacityTokens` is not a field the projection has; reading it left the context statistic
+  // invisible on the real host while every hand-written fixture passed. These are the real names
+  // (`context-occupancy.ts`), and the sample is only the fallback.
+  const sampled = readStats(projections({ contextPressure: { pressureTokens: 10870, contextWindow: 1_000_000 } }))
+  assert.equal(sampled.contextTokens, 10870)
+  assert.equal(sampled.contextLimit, 1_000_000)
+
+  const projected = readStats(projections({ contextPressure: { pressureTokens: 100, projectedTokens: 250, contextWindow: 1000 } }))
+  assert.equal(projected.contextTokens, 250, 'the projection view outranks the sample')
+
+  // Either half missing means no occupancy at all, which is what upstream does too — a share of an
+  // unknown window is not a number anybody can act on.
+  assert.equal(readStats(projections({ contextPressure: { pressureTokens: 100 } })).contextTokens, 100)
+  assert.equal(readStats(projections({ contextPressure: { pressureTokens: 100 } })).contextLimit, undefined)
+})
+
+test('the cumulative token total sums the disjoint buckets', () => {
+  const stats = readStats(projections({
+    tokenUsage: { uncachedInputTokens: 11, cacheReadTokens: 22, cacheWriteTokens: 33, outputTokens: 44 },
+  }))
+  assert.equal(stats.totalTokens, 110, '11 + 22 + 33 + 44')
+
+  // A bucket the provider did not report is zero for the total, not a missing total: a session that
+  // has only ever read from cache still knows what it spent.
+  const partial = readStats(projections({ tokenUsage: { cacheReadTokens: 500 } }))
+  assert.equal(partial.totalTokens, 500)
+
+  // But a usage projection with nothing in it is not a total of zero — it is no figure at all, and
+  // the panel draws nothing rather than "0 tok".
+  const nothing = readStats(projections({ sessionStats: { turns: 1, steps: 1 }, tokenUsage: {} }))
+  assert.equal(nothing.totalTokens, undefined)
+})
+
+test('a partial cache hit is never rounded up to a full one', () => {
+  // The figure answers "how much did I pay full price for", so displaying "100%" for a session that
+  // missed is the one error it must not make. The upstream client enforces the same rule
+  // (`formatCacheHitPercent`), which is where this comes from.
+  const nearly = readStats(projections({
+    tokenUsage: { uncachedInputTokens: 1, cacheReadTokens: 999, cacheWriteTokens: 0 },
+  }))
+  assert.equal(nearly.cacheHitPercent, 99.9, '999/1000 keeps a decimal rather than reading 100')
+
+  // An exact full hit still says 100: the rule protects against overstating, not against the truth.
+  const full = readStats(projections({
+    tokenUsage: { uncachedInputTokens: 0, cacheReadTokens: 500, cacheWriteTokens: 0 },
+  }))
+  assert.equal(full.cacheHitPercent, 100)
+
+  // And ordinary shares stay whole numbers.
+  const half = readStats(projections({
+    tokenUsage: { uncachedInputTokens: 500, cacheReadTokens: 500, cacheWriteTokens: 0 },
+  }))
+  assert.equal(half.cacheHitPercent, 50)
 })
 
 test('a statistic that cannot be computed is absent, not zero', () => {

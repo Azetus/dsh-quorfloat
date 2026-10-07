@@ -568,6 +568,37 @@ mod tests {
     /// becomes "ready one pass later than this says", the guard is wrong and the panel
     /// panics on its first frame in any context. Either way this test is where that is
     /// noticed.
+    /// The footer's key chips are drawn as *text*, so their symbols must exist in the text fonts.
+    ///
+    /// This is the test that would have caught the design's own `↵`: it has no glyph in either the
+    /// bundled CJK font or egui's default Latin face, so drawing it would put a tofu box in the
+    /// footer — and it would look perfectly fine in the design file, which is where the character
+    /// came from. The fonts are the only authority on what can be drawn, so they are asked.
+    #[test]
+    fn the_footer_key_symbols_have_glyphs_in_the_text_fonts() {
+        let ctx = egui::Context::default();
+        ensure_icons(&ctx);
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/NotoSansSC-VF.otf");
+        let status = install_from(&ctx, &path);
+        assert!(matches!(status, FontStatus::Loaded { .. }), "the bundled font loaded: {status:?}");
+        // A pass, because a family asked for during one is applied at the end of it.
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_| {});
+        output.textures_delta.clear();
+
+        for ch in crate::ui::key_symbols().chars() {
+            assert!(
+                ctx.fonts_mut(|fonts| fonts.has_glyph(&egui::FontId::proportional(crate::ui::theme::TEXT_SMALL), ch)),
+                "the text fonts can draw {ch:?}, which the footer's key chips use",
+            );
+        }
+        // And the character that cannot be drawn is named, so nobody re-introduces it believing it
+        // came from the design and therefore works.
+        assert!(
+            !ctx.fonts_mut(|fonts| fonts.has_glyph(&egui::FontId::proportional(crate::ui::theme::TEXT_SMALL), '↵')),
+            "`↵` (U+21B5) still has no glyph \u{2014} if this ever fails, the design's Return symbol became usable",
+        );
+    }
+
     #[test]
     fn the_icon_family_is_usable_from_the_pass_after_it_was_asked_for() {
         let ctx = egui::Context::default();
@@ -627,3 +658,4 @@ mod tests {
         assert!(ctx.fonts_mut(|fonts| fonts.has_glyphs(&egui::FontId::proportional(14.0), "quorfloat")));
     }
 }
+

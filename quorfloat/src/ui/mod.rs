@@ -583,31 +583,46 @@ fn rule(ui: &mut egui::Ui) {
 /// @param ui - where to draw.
 /// @param keys - the glyphs to draw inside the chip, left to right.
 /// @param what - what the key does.
-fn kbd(ui: &mut egui::Ui, keys: &[icons::Icon], what: &str) {
+fn kbd(ui: &mut egui::Ui, key: &str, what: &str) {
+    // The key is **text, not an icon**, because that is what the design draws: its own markup is
+    // `<kbd>↵</kbd> 发送　<kbd>⇧ ↵</kbd> 换行　<kbd>esc</kbd> 关闭` — the symbols are the font's
+    // own characters inside a bordered box. Drawing an icon here instead is what made the chips
+    // disagree with the design.
+    //
+    // One character of the design's set could not be kept: **`↵` (U+21B5) has no glyph in the
+    // bundled fonts** and would render as a tofu box, so Return is `⏎` (U+23CE) — the same idea,
+    // and present. `⇧` is present as drawn. Both were checked by asking the font
+    // (`fonts::has_glyph`), because "it looks right in the design file" says nothing about our
+    // fonts; a test pins it.
     egui::Frame::NONE
         .fill(theme::soft())
         .stroke(egui::Stroke::new(theme::BORDER, theme::line()))
         .corner_radius(egui::CornerRadius::same(theme::RADIUS_KBD))
         .inner_margin(egui::Margin { left: 4, right: 4, top: 1, bottom: 1 })
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 1.0;
-                for key in keys {
-                    let (rect, _) = ui.allocate_exact_size(
-                        egui::vec2(theme::TEXT_SMALL, theme::TEXT_SMALL),
-                        egui::Sense::hover(),
-                    );
-                    icons::paint(ui, rect.center(), *key, theme::TEXT_SMALL, muted());
-                }
-                if keys.is_empty() {
-                    ui.label(
-                        egui::RichText::new("esc").size(theme::TEXT_SMALL).color(muted()),
-                    );
-                }
-            });
+            ui.label(egui::RichText::new(key).size(theme::TEXT_SMALL).color(muted()));
         });
     ui.label(egui::RichText::new(what).size(theme::TEXT_SMALL).color(muted()));
 }
+
+/// The footer's key hints: the chip's key, then what it does.
+///
+/// **The one place they are written.** The drawing reads this list and the glyph test reads this
+/// list, so a test can never be checking a copy that has drifted from what is on screen — which is
+/// exactly how a missing glyph (`↵`) gets shipped.
+pub(crate) const KEY_HINTS: &[(&str, &str)] = &[("⏎", "发送"), ("⇧ ⏎", "换行"), ("esc", "关闭")];
+
+/// Every character the footer's key chips contain, for the font to be asked about.
+///
+/// Test-only: the drawing reads [`KEY_HINTS`] directly, so this exists purely so the glyph test can
+/// ask about the same strings that are drawn rather than a copy of them.
+///
+/// @returns the symbols and letters that must have glyphs.
+#[cfg(test)]
+pub(crate) fn key_symbols() -> String {
+    KEY_HINTS.iter().map(|(key, _)| *key).collect()
+}
+
 
 /// Settings above, shortcuts and statistics below, each in explicitly allocated rectangles.
 fn footer_bar(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
@@ -636,9 +651,10 @@ fn footer_bar(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>
         if state.turn_active {
             ui.add(egui::Label::new(theme::meta(ui.ctx(), &format!("{} · 正在生成", turn_label(state)))).truncate());
         } else {
-            kbd(ui, &[icons::Icon::KeyReturn], "发送");
-            kbd(ui, &[icons::Icon::ShiftUp, icons::Icon::KeyReturn], "换行");
-            kbd(ui, &[], "关闭");
+            // The order the design uses: the primary action first.
+            for (key, what) in KEY_HINTS {
+                kbd(ui, key, what);
+            }
         }
     });
     let right = egui::Rect::from_min_max(egui::pos2(left.right() + theme::GAP, info.top()), info.max);

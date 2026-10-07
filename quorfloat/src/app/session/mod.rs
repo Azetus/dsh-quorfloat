@@ -394,8 +394,14 @@ pub struct Stats {
     pub steps: u64,
     /// Output tokens per second, when it can be computed.
     pub tokens_per_second: Option<f64>,
+    /// Every token the session has been billed for.
+    pub total_tokens: Option<u64>,
     /// Cache-read share of the prompt, as a percentage.
-    pub cache_hit_percent: Option<u32>,
+    ///
+    /// A float because a share that would round to a full 100 is reported as `99.9` instead:
+    /// telling somebody their whole prompt was cached when a sliver was not is the one error this
+    /// figure must not make (see `readCacheHitPercent` in `src/harness/adapter.ts`).
+    pub cache_hit_percent: Option<f64>,
     /// Prompt tokens of the most recent request.
     pub context_tokens: Option<u64>,
     /// The model's context capacity.
@@ -1204,10 +1210,8 @@ impl Session {
             turns: stats.get("turns").and_then(Value::as_u64).unwrap_or(0),
             steps: stats.get("steps").and_then(Value::as_u64).unwrap_or(0),
             tokens_per_second: stats.get("tokensPerSecond").and_then(Value::as_f64),
-            cache_hit_percent: stats
-                .get("cacheHitPercent")
-                .and_then(Value::as_u64)
-                .map(|percent| percent as u32),
+            total_tokens: stats.get("totalTokens").and_then(Value::as_u64),
+            cache_hit_percent: stats.get("cacheHitPercent").and_then(Value::as_f64),
             context_tokens: stats.get("contextTokens").and_then(Value::as_u64),
             context_limit: stats.get("contextLimit").and_then(Value::as_u64),
         });
@@ -2457,7 +2461,7 @@ mod tests {
         assert_eq!(stats.turns, 3);
         assert_eq!(stats.steps, 7);
         assert_eq!(stats.tokens_per_second, Some(200.5));
-        assert_eq!(stats.cache_hit_percent, Some(75));
+        assert_eq!(stats.cache_hit_percent, Some(75.0));
         assert_eq!(stats.context_tokens, Some(4000));
         assert_eq!(stats.context_limit, Some(128000));
     }

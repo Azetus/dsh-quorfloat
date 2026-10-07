@@ -1931,6 +1931,7 @@ mod tests {
                         "sessionId": "session-1",
                         "stats": {
                             "turns": 3, "steps": 7, "tokensPerSecond": 200.0,
+                            "totalTokens": 351_000_000,
                             "cacheHitPercent": 75, "contextTokens": 4000, "contextLimit": 128000,
                         },
                     })),
@@ -1941,10 +1942,54 @@ mod tests {
         let drawn = drawn_text(&mut app, size);
         assert!(visible(&drawn, "3 轮 7 步", screen), "the counts: {:?}", on_screen(&drawn, screen));
         assert!(visible(&drawn, "200 tok/s", screen), "the output speed");
-        assert!(visible(&drawn, "缓存命中 75%", screen), "the cache share");
-        // 4000 of 128000 is 3%, rounded down: a share is what a person can act on, and the raw pair
-        // is not.
-        assert!(visible(&drawn, "上下文 3%", screen), "the context share");
+        // The cumulative total and the cache share are one group: "what this conversation cost",
+        // which is how the design nests them (`q-stat-tokens`).
+        assert!(visible(&drawn, "351M tok · 缓存命中 75%", screen), "the token group: {:?}", on_screen(&drawn, screen));
+        // The context share carries no words of its own — the design's element is a bare `0%`, and
+        // the icon already says what it measures.
+        assert!(visible(&drawn, "3%", screen), "the context share");
+        assert!(!visible(&drawn, "上下文", screen), "and no label on it: {:?}", on_screen(&drawn, screen));
+    }
+
+    #[test]
+    fn the_key_hint_chips_use_the_designs_symbols_rather_than_icons() {
+        // The chips are text in the design (`<kbd>↵</kbd> 发送`), and icons here were the whole
+        // difference. `↵` itself is impossible — the bundled fonts have no glyph for it — so the
+        // footer draws `⏎`, which a glyph test in `ui::fonts` pins along with `⇧`.
+        let (mut app, _recorded, _session, _wake) = app_and_session();
+        let size = egui::vec2(708.0, 620.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let drawn = drawn_text(&mut app, size);
+        for (key, what) in [("⏎", "发送"), ("⇧ ⏎", "换行"), ("esc", "关闭")] {
+            assert!(visible(&drawn, key, screen), "the {what} chip draws {key:?}: {:?}", on_screen(&drawn, screen));
+        }
+    }
+
+    #[test]
+    fn a_partial_cache_hit_is_never_shown_as_a_full_one() {
+        // The figure exists to be read as "how much did I pay full price for", so rounding 99.6% up
+        // to "100%" is the one error it must not make. The upstream client has the same rule
+        // (`formatCacheHitPercent`), which is where it came from.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        {
+            let mut sink = RecordingSink(recorded.clone());
+            session.lock().expect("session").on_frame(
+                Inbound::Notification {
+                    method: "session/stats".to_owned(),
+                    params: Some(serde_json::json!({
+                        "sessionId": "session-1",
+                        "stats": {"turns": 1, "steps": 1, "cacheHitPercent": 99.9},
+                    })),
+                },
+                &mut sink,
+            );
+        }
+        let size = egui::vec2(708.0, 620.0);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
+        let drawn = drawn_text(&mut app, size);
+        assert!(visible(&drawn, "缓存命中 99.9%", screen), "the honest share: {:?}", on_screen(&drawn, screen));
+        assert!(!visible(&drawn, "缓存命中 100%", screen), "and never rounded up to a full hit");
     }
 
     #[test]
@@ -2039,7 +2084,7 @@ mod tests {
         }));
         let mut state = app.state();
         state.stats = Some(crate::app::session::Stats {
-            turns: 3, steps: 9, tokens_per_second: Some(229.0), cache_hit_percent: Some(90),
+            turns: 3, steps: 9, tokens_per_second: Some(229.0), total_tokens: Some(351_000_000), cache_hit_percent: Some(90.0),
             context_tokens: Some(10870), context_limit: None,
         });
         state
