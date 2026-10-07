@@ -244,7 +244,7 @@ pub(crate) fn draw(
                     // question with an answer instead of an estimate. In the settings view there is
                     // no thread, so the same measurement is what the page itself occupies.
                     let chrome_above = ui.cursor().min.y - panel_top;
-                    let footer = footer_height(ui);
+                    let footer = footer_height(ui, state);
                     if settings_view {
                         footer_bar(ui, state, action);
                         return PanelLayout {
@@ -628,42 +628,19 @@ fn cards(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
         });
 }
 
-/// The height the footer will occupy, before it is drawn.
-///
-/// Predicted from the design's own padding and type, for the same reason the composer's
-/// height is: the conversation is given what is left, and a first frame that guessed would
-/// make the panel jump on the second. It is one line, and that is a promise the footer has
-/// to keep — the first version drew four lines into a prediction of one, and the last two
-/// were clipped off the bottom of the panel.
-///
-/// @param ui - the frame, for the item spacing.
-/// @returns the strip's height.
-fn footer_height(ui: &egui::Ui) -> f32 {
-    // Two rows and the gap between them, plus the frame's padding: the strip is no longer one line,
-    // and predicting "one line" is what let it draw past the bottom of the panel.
-    2.0 * footer_row_height(ui)
-        + theme::GAP_CLOSE
-        + f32::from(theme::PAD_FOOTER.top + theme::PAD_FOOTER.bottom)
-        + ui.spacing().item_spacing.y
+/// Reserve the exact two strips and their separator before sizing the conversation.
+fn runtime_height(state: &PanelState) -> f32 {
+    if state.options.as_ref().is_some_and(|options| !options.models.is_empty() || !options.permissions.is_empty()) {
+        theme::FOOTER_PICKER_HEIGHT + f32::from(theme::PAD_RUNTIME.bottom)
+    } else { 0.0 }
 }
 
-/// How tall the footer's single row is.
-///
-/// **Measured from the things in it, not predicted from a font size.** The row holds a key chip, a
-/// picker button and a line of text, and the chip is the tallest of the three: a frame with a border
-/// and vertical padding around an 11-point line. Predicting "one line of small text" is what let the
-/// strip draw past the bottom of the panel — twice, because the second attempt predicted a different
-/// wrong number.
-///
-/// @param ui - for the live `TextStyle` heights.
-/// @returns the row's height, borders included.
-fn footer_row_height(ui: &egui::Ui) -> f32 {
-    let text = ui.text_style_height(&egui::TextStyle::Small);
-    // The chip: one line, a hairline top and bottom, and one pixel of padding above and below.
-    let chip = text + 2.0 * theme::BORDER + 2.0;
-    // The picker button: `theme::ICON + 10.0` in `picker_button`, and never less than the icon button.
-    let picker = (theme::ICON + 10.0).max(theme::ICON_BUTTON);
-    chip.max(picker).max(text)
+/// Total reserved height, including the layout's trailing item spacing.
+fn footer_height(ui: &egui::Ui, state: &PanelState) -> f32 {
+    runtime_height(state)
+        + theme::BORDER + theme::FOOTER_INFO_HEIGHT
+        + f32::from(theme::PAD_FOOTER.top + theme::PAD_FOOTER.bottom)
+        + ui.spacing().item_spacing.y
 }
 
 /// Which turn the panel is on, in the design's wording.
@@ -711,93 +688,48 @@ fn kbd(ui: &mut egui::Ui, keys: &[icons::Icon], what: &str) {
                 }
             });
         });
-    ui.label(theme::meta(ui.ctx(), what));
+    ui.label(egui::RichText::new(what).size(theme::TEXT_SMALL).color(muted()));
 }
 
-/// The bottom bar: what the keys do, and what the panel is doing.
-///
-/// One row, always: the shortcut hints on the left, and whatever the panel has to report on
-/// the right. The keys are spelled out rather than drawn as `↵` and `⇧` because the bundled
-/// fonts have no glyphs for them — the first version showed two tofu boxes where the user
-/// was supposed to read a keyboard.
+/// Settings above, shortcuts and statistics below, each in explicitly allocated rectangles.
 fn footer_bar(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
-    let frame = egui::Frame::NONE.inner_margin(theme::PAD_FOOTER);
-    frame.show(ui, |ui| {
-        // **One row, and the right-hand side is placed before the left.** The panel is 640 wide and
-        // this strip now carries key hints, statistics and three controls; laying the hints out first
-        // and then asking for "the rest" left the statistics printed over them, because a
-        // right-to-left area inside a horizontal row starts wherever the row's cursor has got to. So
-        // the controls are placed against the strip's right edge first, and the hints take what is
-        // genuinely left over — which is also the order of importance when space runs short.
-        // **One rectangle, allocated, with both groups drawn inside it.** The strip used to place two
-        // children into the space the frame had already handed out, and the frame had measured that
-        // space from a *prediction* of one text line — so a strip holding chips, statistics and three
-        // controls drew past the bottom of the panel it had asked for, which the layout invariant test
-        // caught as "the lowest text is at 397, but the panel asked for 228".
-        // **The idiomatic pattern, and the one that works.** `with_layout(right_to_left)` inside a
-        // horizontal row is how egui itself lays out a left label beside right-aligned controls: the
-        // inner layout is given the row's remaining width and starts at its right edge. Four earlier
-        // attempts failed by placing *children* — `new_child` does not move the parent's cursor, and a
-        // right-to-left child starts from the width it is given rather than from the row's edge — so
-        // the hints and the statistics ended up printed over each other. The row itself is what
-        // carries the position here, and there is nothing left to measure or predict.
-        // **Two rows, because the content does not fit in one.** The strip now carries key hints, up
-        // to four statistics, three pickers and a status line; at 640 pixels the left group and the
-        // right group overlap, and the attempts to make one row work by measuring and placing cost
-        // more than the second row does. Splitting them is also what the panel's own hierarchy wants:
-        // the first row is about *this conversation* (what the keys do, or that it is still
-        // generating), and the second is about *its settings* (what it ran with, and what it may be
-        // changed to). The design's own single strip is the thing to reconcile later, with the final
-        // styling.
-        ui.vertical(|ui| {
-            // **The width is pinned before the rows are drawn.** A vertical layout sizes itself to its
-            // children, so the rows inside it were given a shrunken width — the right-hand group then
-            // ran off the panel's right edge, and the statistics printed over the hints. `set_width`
-            // takes what the panel actually has.
-            ui.set_width(ui.available_width());
-            ui.spacing_mut().item_spacing.y = theme::GAP_CLOSE;
-            // The first row: the keys, and whatever the panel has to report.
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = theme::GAP_TIGHT;
-                // While a turn is being worked on the hints give way to what is happening: the design
-                // does the same (its `shortcuts()` is restored when the turn ends), and a key hint is
-                // worth less than knowing whether the model is still going.
-                if state.turn_active {
-                    ui.add(
-                        egui::Label::new(theme::meta(ui.ctx(), &format!("{} · 正在生成", turn_label(state)))).truncate(),
-                    );
-                } else {
-                    // The keys are drawn as chips, which is how the design shows them: a key is a thing
-                    // you press, and a bordered box says so at a glance. `KEY_RETURN` and a fat up arrow
-                    // are the font's nearest glyphs to ↵ and ⇧ — the shift symbol it does not have.
-                    kbd(ui, &[icons::Icon::KeyReturn], "发送");
-                    kbd(ui, &[icons::Icon::ShiftUp, icons::Icon::KeyReturn], "换行");
-                    kbd(ui, &[], "关闭");
-                }
-                if let Some(status) = status_line(state) {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(status.text).size(theme::TEXT_SMALL).color(status.colour),
-                            )
-                            .truncate(),
-                        );
-                    });
-                }
-            });
-            // The second row: the statistics, and the three settings. Both are about the conversation
-            // rather than about the keys, and they are laid out from the right so the controls keep
-            // their place whatever the statistics end up saying.
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = theme::GAP_TIGHT;
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = theme::GAP_TIGHT;
-                    footer::settings(ui, state, action);
-                    ui.add_space(theme::GAP);
-                    footer::statistics(ui, state.stats);
-                });
-            });
+    let width = ui.available_width();
+    let height = footer_height(ui, state) - ui.spacing().item_spacing.y;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let runtime = egui::Rect::from_min_max(
+        rect.min + egui::vec2(f32::from(theme::PAD_RUNTIME.left), 0.0),
+        egui::pos2(rect.right() - f32::from(theme::PAD_RUNTIME.right), rect.top() + theme::FOOTER_PICKER_HEIGHT),
+    );
+    if runtime_height(state) > 0.0 {
+        ui.scope_builder(egui::UiBuilder::new().max_rect(runtime), |ui| {
+            ui.set_width(runtime.width());
+            footer::settings(ui, state, action);
         });
+    }
+    let rule_y = rect.top() + runtime_height(state);
+    ui.painter().hline(rect.x_range(), rule_y, egui::Stroke::new(theme::BORDER, theme::line()));
+    let info = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + f32::from(theme::PAD_FOOTER.left), rule_y + theme::BORDER + f32::from(theme::PAD_FOOTER.top)),
+        rect.max - egui::vec2(f32::from(theme::PAD_FOOTER.right), f32::from(theme::PAD_FOOTER.bottom)),
+    );
+    let left = egui::Rect::from_min_max(info.min, egui::pos2(info.left() + theme::FOOTER_HINT_WIDTH, info.bottom()));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(left).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+        ui.spacing_mut().item_spacing.x = theme::GAP_TIGHT;
+        if state.turn_active {
+            ui.add(egui::Label::new(theme::meta(ui.ctx(), &format!("{} · 正在生成", turn_label(state)))).truncate());
+        } else {
+            kbd(ui, &[icons::Icon::KeyReturn], "发送");
+            kbd(ui, &[icons::Icon::ShiftUp, icons::Icon::KeyReturn], "换行");
+            kbd(ui, &[], "关闭");
+        }
+    });
+    let right = egui::Rect::from_min_max(egui::pos2(left.right() + theme::GAP, info.top()), info.max);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+        if let Some(status) = status_line(state) {
+            ui.add(egui::Label::new(egui::RichText::new(status.text).size(theme::TEXT_SMALL).color(status.colour)).truncate());
+        } else {
+            footer::statistics(ui, state.stats);
+        }
     });
 }
 

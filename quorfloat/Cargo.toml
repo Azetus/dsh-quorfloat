@@ -31,7 +31,7 @@ eframe = { version = "0.36", default-features = false, features = ["default_font
 # Global hotkey. This is the only way to summon the panel while Harness itself is
 # not focused, so it cannot be a window-local key binding.
 global-hotkey = "0.8"
-egui-phosphor = "0.14"
+egui-phosphor = { version = "0.14", features = ["fill"] }
 egui_commonmark = { version = "0.25", default-features = false }
 # The parser `egui_commonmark` itself uses: it reports the byte range of every table, so
 # nothing here re-implements Markdown to find them.

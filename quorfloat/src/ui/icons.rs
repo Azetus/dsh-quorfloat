@@ -64,12 +64,18 @@ pub enum Icon {
     KeyReturn,
     /// Shift, drawn as a fat arrow because the font has no shift glyph.
     ShiftUp,
+    /// Session throughput.
+    Gauge,
+    /// Cache usage.
+    Database,
+    /// Context occupancy.
+    ChartPie,
     /// A folded section, pointing right.
     CaretRight,
 }
 
 /// Every icon this build knows, for the checks that have to consider all of them.
-pub const ALL: [Icon; 21] = [
+pub const ALL: [Icon; 24] = [
     Icon::Folder,
     Icon::FolderSimple,
     Icon::Chat,
@@ -88,6 +94,9 @@ pub const ALL: [Icon; 21] = [
     Icon::Eye,
     Icon::Check,
     Icon::Plus,
+    Icon::Gauge,
+    Icon::Database,
+    Icon::ChartPie,
     Icon::KeyReturn,
     Icon::ShiftUp,
     Icon::CaretRight,
@@ -98,7 +107,7 @@ pub const ALL: [Icon; 21] = [
 /// Kept apart from [`ALL`] so that the cross-check against the mockup stays meaningful: the
 /// design's map is what those icons are checked against, while an icon for a control the
 /// design does not have — the keyboard hints, here — is a choice this panel made and says so.
-pub const DESIGNED: [Icon; 18] = [
+pub const DESIGNED: [Icon; 21] = [
     Icon::Folder,
     Icon::FolderSimple,
     Icon::Chat,
@@ -117,6 +126,9 @@ pub const DESIGNED: [Icon; 18] = [
     Icon::Eye,
     Icon::Check,
     Icon::Plus,
+    Icon::Gauge,
+    Icon::Database,
+    Icon::ChartPie,
 ];
 
 impl Icon {
@@ -142,6 +154,9 @@ impl Icon {
             Self::Eye => "eye",
             Self::Check => "check",
             Self::Plus => "plus",
+            Self::Gauge => "gauge",
+            Self::Database => "database",
+            Self::ChartPie => "chart-pie",
             Self::KeyReturn => "key-return",
             Self::ShiftUp => "arrow-fat-up",
             Self::CaretRight => "caret-right",
@@ -170,11 +185,20 @@ impl Icon {
             Self::Eye => egui_phosphor::regular::EYE,
             Self::Check => egui_phosphor::regular::CHECK,
             Self::Plus => egui_phosphor::regular::PLUS,
+            Self::Gauge => egui_phosphor::regular::GAUGE,
+            Self::Database => egui_phosphor::regular::DATABASE,
+            Self::ChartPie => egui_phosphor::regular::CHART_PIE,
             Self::KeyReturn => egui_phosphor::regular::KEY_RETURN,
             Self::ShiftUp => egui_phosphor::regular::ARROW_FAT_UP,
             Self::CaretRight => egui_phosphor::regular::CARET_RIGHT,
         }
     }
+}
+
+/// Non-minimal permission uses the filled variant; other marks stay outlined.
+fn font(icon: Icon, size: f32) -> egui::FontId {
+    if icon == Icon::Shield { crate::ui::fonts::filled_icon_font(size) }
+    else { crate::ui::fonts::icon_font(size) }
 }
 
 /// Render one icon.
@@ -196,7 +220,7 @@ pub fn glyph(ctx: &egui::Context, icon: Icon, size: f32, colour: egui::Color32) 
     if !crate::ui::fonts::icons_ready(ctx) {
         return egui::RichText::new("");
     }
-    egui::RichText::new(icon.chars()).font(crate::ui::fonts::icon_font(size)).color(colour)
+    egui::RichText::new(icon.chars()).font(font(icon, size)).color(colour)
 }
 
 /// Paint one icon into a rect, for the places that draw rather than lay out text.
@@ -220,7 +244,7 @@ pub fn paint(ui: &egui::Ui, center: egui::Pos2, icon: Icon, size: f32, colour: e
         center,
         egui::Align2::CENTER_CENTER,
         icon.chars(),
-        crate::ui::fonts::icon_font(size),
+        font(icon, size),
         colour,
     );
 }

@@ -1996,6 +1996,130 @@ mod tests {
         }
     }
 
+    /// Match the host projection already exercised by the footer tests, then render with the
+    /// bundled CJK font: fallback Latin glyph widths cannot prove that Chinese labels fit.
+    fn footer_state_for_layout() -> PanelState {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        give_options(&session, &recorded, serde_json::json!({
+            "groups": [{"provider": "deepseek-official", "name": "DeepSeek", "models": [
+                {"id": "v41-flash", "name": "DeepSeek-V41-Flash", "efforts": [
+                    {"id": "low", "name": "低"}, {"id": "high", "name": "高"}
+                ]},
+                {"id": "second", "name": "Second", "efforts": []}
+            ]}],
+            "current": {"provider": "deepseek-official", "model": "v41-flash", "reasoningEffort": "high"},
+            "permissions": [{"value": "read-only", "name": "只读"}, {"value": "workspace-write", "name": "工作区修改"}],
+            "permission": "workspace-write"
+        }));
+        let mut state = app.state();
+        state.stats = Some(crate::app::session::Stats {
+            turns: 3, steps: 9, tokens_per_second: Some(229.0), cache_hit_percent: Some(90),
+            context_tokens: Some(10870), context_limit: None,
+        });
+        state
+    }
+
+    #[test]
+    fn footer_rectangles_contain_real_font_text_even_with_long_values() {
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let font = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/NotoSansSC-VF.otf");
+        assert!(matches!(crate::ui::fonts::install_from(&ctx, &font), crate::ui::fonts::FontStatus::Loaded { .. }));
+        let mut state = footer_state_for_layout();
+        for long in [false, true] {
+            if long {
+                let options = state.options.as_mut().unwrap();
+                options.models[0].name = "长模型名称-".repeat(30);
+                options.models[0].efforts[1].name = "很长的推理档位".repeat(20);
+                options.permissions[1].name = "很长的权限预设名称".repeat(20);
+                let stats = state.stats.as_mut().unwrap();
+                stats.turns = u64::MAX;
+                stats.steps = u64::MAX;
+                stats.context_tokens = Some(u64::MAX);
+            }
+            for height in [318.0, 620.0] {
+                let mut texts = Vec::new();
+                let mut desired = 0.0;
+                for _ in 0..3 {
+                    let mut output = ctx.run_ui(egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(708.0, height))),
+                        ..Default::default()
+                    }, |ui| {
+                        desired = crate::ui::draw(ui, &state, &mut String::new(), &mut None,
+                            &mut egui_commonmark::CommonMarkCache::default()).desired_height;
+                    });
+                    texts.clear();
+                    for shape in &output.shapes { collect_text(&shape.shape, &mut texts); }
+                    output.textures_delta.clear();
+                }
+                let permission = texts.iter().find(|(text, _)| text.starts_with(if long { "很长的权限" } else { "工作区修改" })).expect("permission").1;
+                let model = texts.iter().find(|(text, _)| text.starts_with(if long { "长模型名称" } else { "DeepSeek-V41-Flash" })).expect("model").1;
+                let panel = egui::Rect::from_min_max(
+                    egui::pos2(f32::from(crate::ui::theme::SHADOW_ROOM_SIDE), f32::from(crate::ui::theme::SHADOW_ROOM_TOP)),
+                    egui::pos2(708.0 - f32::from(crate::ui::theme::SHADOW_ROOM_SIDE),
+                        (height - f32::from(crate::ui::theme::SHADOW_ROOM_BOTTOM)).min(f32::from(crate::ui::theme::SHADOW_ROOM_TOP) + desired)),
+                );
+                let footer: Vec<_> = texts.iter().filter(|(_, rect)| rect.top() >= permission.top() - 3.0).collect();
+                assert!(footer.len() >= 12, "check text and icons, not an empty set: {footer:?}");
+                for (index, (text, rect)) in footer.iter().enumerate() {
+                    assert!(panel.contains_rect(*rect), "{text:?} at {rect:?} outside {panel:?}");
+                    for (other, other_rect) in &footer[index + 1..] {
+                        assert!(!rect.intersects(*other_rect), "{text:?} overlaps {other:?}: {rect:?} / {other_rect:?}");
+                    }
+                }
+                let counts = texts.iter().find(|(text, _)| text.contains("轮")).expect("counts").1;
+                let close = texts.iter().find(|(text, _)| text == "关闭").expect("hints").1;
+                assert!(permission.right() < model.left());
+                assert!((permission.center().y - model.center().y).abs() < 2.0);
+                assert!(model.bottom() < counts.top());
+                assert!(close.right() < counts.left());
+            }
+        }
+    }
+
+    #[test]
+    fn combined_footer_menu_still_selects_model_effort_and_permission() {
+        fn frame(ctx: &egui::Context, state: &PanelState, events: Vec<egui::Event>) -> (Vec<(String, egui::Rect)>, Option<crate::ui::Action>) {
+            let mut action = None;
+            let mut output = ctx.run_ui(egui::RawInput {
+                events, focused: true,
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(708.0, 620.0))),
+                ..Default::default()
+            }, |ui| { crate::ui::draw(ui, state, &mut String::new(), &mut action, &mut egui_commonmark::CommonMarkCache::default()); });
+            let mut texts = Vec::new();
+            for shape in &output.shapes { collect_text(&shape.shape, &mut texts); }
+            output.textures_delta.clear();
+            (texts, action)
+        }
+        fn click(ctx: &egui::Context, state: &PanelState, label: &str) -> Option<crate::ui::Action> {
+            let _ = frame(ctx, state, vec![]);
+            let (texts, _) = frame(ctx, state, vec![]);
+            let pos = texts.iter().find(|(text, _)| text == label).unwrap_or_else(|| panic!("missing {label}: {texts:?}")).1.center();
+            let _ = frame(ctx, state, vec![egui::Event::PointerMoved(pos)]);
+            let mut chosen = None;
+            for pressed in [true, false] {
+                let (_, action) = frame(ctx, state, vec![egui::Event::PointerButton {
+                    pos, pressed, button: egui::PointerButton::Primary, modifiers: egui::Modifiers::NONE,
+                }]);
+                if action.is_some() { chosen = action; }
+            }
+            chosen
+        }
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let state = footer_state_for_layout();
+        click(&ctx, &state, "DeepSeek-V41-Flash");
+        click(&ctx, &state, "推理等级");
+        assert!(matches!(click(&ctx, &state, "低"), Some(crate::ui::Action::SelectEffort { effort }) if effort == "low"));
+        click(&ctx, &state, "DeepSeek-V41-Flash");
+        click(&ctx, &state, "模型");
+        assert!(matches!(click(&ctx, &state, "Second"), Some(crate::ui::Action::SelectModel { provider, model, effort: None })
+            if provider == "deepseek-official" && model == "second"));
+        click(&ctx, &state, "工作区修改");
+        assert!(matches!(click(&ctx, &state, "只读"), Some(crate::ui::Action::SetPermission { value }) if value == "read-only"));
+    }
+
     #[test]
     fn the_footer_groups_do_not_print_over_each_other() {
         // The bug this exists for: the key hints and the statistics were drawn into the same
@@ -2041,6 +2165,20 @@ mod tests {
             .map(|(_, rect)| rect.bottom())
             .fold(f32::MIN, f32::max);
         let strip = drawn.iter().filter(|(_, rect)| rect.bottom() > lowest - 60.0).collect::<Vec<_>>();
+        let panel = egui::Rect::from_min_max(
+            egui::pos2(f32::from(crate::ui::theme::SHADOW_ROOM_SIDE), 0.0),
+            egui::pos2(size.x - f32::from(crate::ui::theme::SHADOW_ROOM_SIDE), size.y),
+        );
+        for (text, rect) in &strip {
+            assert!(panel.contains_rect(*rect), "footer text {text:?} escaped {panel:?}: {rect:?}");
+        }
+        let permission = drawn.iter().find(|(text, _)| text == "只读").expect("permission").1;
+        let model = drawn.iter().find(|(text, _)| text == "V4.1 Flash").expect("model").1;
+        let stats = drawn.iter().find(|(text, _)| text.contains("3 轮 9 步")).expect("stats").1;
+        assert!(permission.right() < model.left(), "permission left, model right");
+        assert!((permission.center().y - model.center().y).abs() < 2.0, "settings share the upper row");
+        assert!(model.bottom() < stats.top(), "statistics sit below the settings");
+
         // Two groups, and their text must not overlap horizontally: the hints' right edge is left of
         // the statistics' left edge.
         let hint = strip

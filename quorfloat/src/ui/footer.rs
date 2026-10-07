@@ -1,11 +1,9 @@
 //! What the panel shows about the conversation's *settings*: its statistics, its model and
 //! reasoning effort, and its permission preset.
 //!
-//! **Function first.** The design draws all three in the bottom strip of the window, and their
-//! final shape is a later pass; what this file is for is making each of them do the thing it exists
-//! to do — read a value from the host, offer the alternatives, and report the choice. The geometry
-//! here is therefore deliberately plain: the pickers reuse the rows the workspace menu already had
-//! (`ui/picker.rs`), so the vocabulary is not new even where the arrangement is.
+//! Permission sits on the left of the upper strip, a combined model/effort picker on the
+//! right, and measured statistics below. Each group receives an allocated rectangle;
+//! text is ellipsized before painting, so clipping never disguises a layout overflow.
 //!
 //! Two rules carried over from the rest of the panel, because they are what makes a strip of
 //! controls honest rather than decorative:
@@ -28,6 +26,8 @@ use crate::ui::{Action, theme};
 /// Which footer popup is open, for the development switch in `ui/mod.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
+    /// The combined model and effort menu.
+    Config,
     /// The model list.
     Model,
     /// The reasoning-effort list.
@@ -51,57 +51,130 @@ pub(crate) fn popup_id(kind: Kind) -> egui::Id {
     kind.id()
 }
 
-/// Draw the three settings controls, right to left.
-///
-/// Right to left because that is how the design's strip reads: the model is the widest label and
-/// sits at the far right, with the effort beside it and the permission at the left of the group.
-///
-/// @param ui - where to draw; a right-to-left layout.
-/// @param state - for the options, the current values, and any refusal.
-/// @param action - where a choice is reported.
-pub(super) fn settings(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
-    permissions(ui, state, action);
-    effort(ui, state, action);
-    model(ui, state, action);
+/// Allocate a bounded, single-line picker, including optional effort text.
+fn button(ui: &mut egui::Ui, id: egui::Id, icon: Option<Icon>, label: &str, suffix: Option<&str>, marked: bool) -> egui::Response {
+    let font = theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_META);
+    let suffix = suffix.map(|text| {
+        let mut job = egui::text::LayoutJob::simple(text.to_owned(), font.clone(), theme::muted(), ui.available_width() / 3.0);
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        ui.painter().layout_job(job)
+    });
+    let suffix_width = suffix.as_ref().map_or(0.0, |text| text.size().x + theme::GAP_CONFIG);
+    let icon_width = icon.map_or(0.0, |_| theme::ICON_PICKER + theme::GAP_TIGHT);
+    let fixed = theme::FOOTER_PICKER_PAD * 2.0 + icon_width + suffix_width + theme::ICON_CHEVRON + theme::GAP_CONFIG;
+    let natural = ui.painter().layout_no_wrap(label.to_owned(), font.clone(), theme::text()).size().x;
+    let width = (natural + fixed).min(ui.available_width());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, theme::FOOTER_PICKER_HEIGHT), egui::Sense::click());
+    if response.hovered() || egui::Popup::is_id_open(ui.ctx(), id) {
+        ui.painter().rect_filled(rect, theme::RADIUS_PICKER, theme::soft());
+    }
+    let mut x = rect.left() + theme::FOOTER_PICKER_PAD;
+    if let Some(icon) = icon {
+        crate::ui::icons::paint(ui, egui::pos2(x + theme::ICON_PICKER / 2.0, rect.center().y), icon, theme::ICON_PICKER,
+            if marked { theme::accent() } else { theme::muted() });
+        x += icon_width;
+    }
+    let mut job = egui::text::LayoutJob::simple(label.to_owned(), font, theme::text(), (width - fixed).max(0.0));
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    let text = ui.painter().layout_job(job);
+    ui.painter().galley(egui::pos2(x, rect.center().y - text.size().y / 2.0), text, theme::text());
+    if let Some(suffix) = suffix {
+        ui.painter().galley(egui::pos2(rect.right() - theme::FOOTER_PICKER_PAD - theme::ICON_CHEVRON - theme::GAP_CONFIG - suffix.size().x,
+            rect.center().y - suffix.size().y / 2.0), suffix, theme::muted());
+    }
+    crate::ui::icons::paint(ui, egui::pos2(rect.right() - theme::FOOTER_PICKER_PAD - theme::ICON_CHEVRON / 2.0, rect.center().y),
+        Icon::CaretDown, theme::ICON_CHEVRON, theme::muted());
+    response.on_hover_text(label)
 }
 
-/// The statistics: turns, steps, output speed, cache share and context occupancy.
-///
-/// **Only what was measured.** Every figure is optional and an absent one is left out rather than
-/// drawn as zero: "0 tok/s" reads as a stalled model, and a session that has not finished a step has
-/// no speed at all — which is the normal state of a panel somebody has just opened.
-///
-/// @param ui - where to draw.
-/// @param stats - what the host reported, if anything.
+/// Permission left, model and effort together on the right.
+pub(super) fn settings(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
+    let width = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, theme::FOOTER_PICKER_HEIGHT), egui::Sense::hover());
+    let split = rect.left() + width / 3.0;
+    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_max(rect.min, egui::pos2(split, rect.bottom())))
+        .layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| permissions(ui, state, action));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_max(egui::pos2(split + theme::GAP_RUNTIME, rect.top()), rect.max))
+        .layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| config(ui, state, action));
+}
+
+fn effort_label(options: &SessionOptions) -> Option<String> {
+    let model = current_model(options)?;
+    if model.efforts.is_empty() { return None; }
+    Some(options.current_effort.as_ref().map_or_else(|| "默认".to_owned(), |effort|
+        model.efforts.iter().find(|option| &option.id == effort).map_or_else(|| effort.clone(), |option| option.name.clone())))
+}
+
+fn config(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
+    let Some(options) = &state.options else { return };
+    if options.models.is_empty() { return; }
+    let label = current_model(options).map_or("模型", |model| model.name.as_str());
+    let effort = effort_label(options);
+    let response = button(ui, Kind::Config.id(), None, label, effort.as_deref(), false);
+    egui::Popup::menu(&response).id(Kind::Config.id()).frame(theme::popover_frame())
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            ui.set_width(theme::POPOVER_WIDTH);
+            for (kind, title, value) in [(Kind::Model, "模型", Some(label)), (Kind::Effort, "推理等级", effort.as_deref())] {
+                let Some(value) = value else { continue };
+                if let Some(Row::Chosen) = picker::option_row(ui, None, title, Some(value), false, false, false) {
+                    egui::Popup::open_id(ui.ctx(), kind.id());
+                }
+            }
+        });
+    model(ui, state, action, &response);
+    effort_menu(ui, state, action, &response);
+}
+
+fn back(ui: &mut egui::Ui, kind: Kind) {
+    if ui.button("‹ 返回模型与推理等级").clicked() {
+        egui::Popup::close_id(ui.ctx(), kind.id());
+        egui::Popup::open_id(ui.ctx(), Kind::Config.id());
+    }
+}
+
+/// Measured statistics, grouped like the design; no invented token total or absent speed.
+fn stat_items(stats: Stats) -> Vec<(Icon, String)> {
+    let mut counts = format!("{} 轮 {} 步", stats.turns, stats.steps);
+    if let Some(speed) = stats.tokens_per_second { counts += &format!(" · {speed:.0} tok/s"); }
+    let mut items = vec![(Icon::Gauge, counts)];
+    if let Some(percent) = stats.cache_hit_percent { items.push((Icon::Database, format!("缓存命中 {percent}%"))); }
+    if let Some(tokens) = stats.context_tokens {
+        let text = match stats.context_limit.filter(|limit| *limit > 0) {
+            Some(limit) => format!("上下文 {}%", tokens.saturating_mul(100) / limit),
+            None => format!("上下文 {tokens}"),
+        };
+        items.push((Icon::ChartPie, text));
+    }
+    items
+}
+
+/// A fixed right-aligned group: allocate first, then paint within its rectangle.
 pub(super) fn statistics(ui: &mut egui::Ui, stats: Option<Stats>) {
     let Some(stats) = stats else { return };
-    ui.spacing_mut().item_spacing.x = theme::GAP_TIGHT;
-    // The counts are the figures the web UI's own strip leads with, in its wording ("3 轮 7 步").
-    let counts = format!("{} 轮 {} 步", stats.turns, stats.steps);
-    ui.label(theme::meta(ui.ctx(), &counts));
-    if let Some(speed) = stats.tokens_per_second {
-        chip(ui, &format!("{speed:.0} tok/s"));
+    let items = stat_items(stats);
+    let font = theme::font(ui.ctx(), theme::Weight::Regular, theme::TEXT_SMALL);
+    let widths: Vec<f32> = items.iter().map(|(_, text)| ui.painter().layout_no_wrap(text.clone(), font.clone(), theme::muted()).size().x
+        + theme::ICON_STAT + theme::GAP_STAT_LABEL).collect();
+    let natural = widths.iter().sum::<f32>() + theme::GAP_STATS * (items.len() - 1) as f32;
+    let width = natural.min(ui.available_width());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, theme::FOOTER_INFO_HEIGHT), egui::Sense::hover());
+    let budget = (width - theme::GAP_STATS * (items.len() - 1) as f32) / items.len() as f32;
+    let mut x = rect.left();
+    for ((icon, label), natural_width) in items.into_iter().zip(widths) {
+        let item_width = if natural > width { budget } else { natural_width };
+        crate::ui::icons::paint(ui, egui::pos2(x + theme::ICON_STAT / 2.0, rect.center().y), icon, theme::ICON_STAT, theme::muted());
+        let mut job = egui::text::LayoutJob::simple(label.clone(), font.clone(), theme::muted(),
+            (item_width - theme::ICON_STAT - theme::GAP_STAT_LABEL).max(0.0));
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        let galley = ui.painter().layout_job(job);
+        ui.painter().galley(egui::pos2(x + theme::ICON_STAT + theme::GAP_STAT_LABEL, rect.center().y - galley.size().y / 2.0), galley, theme::muted());
+        ui.interact(egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(item_width, rect.height())),
+            ui.id().with(icon.name()), egui::Sense::hover()).on_hover_text(label);
+        x += item_width + theme::GAP_STATS;
     }
-    if let Some(percent) = stats.cache_hit_percent {
-        chip(ui, &format!("缓存命中 {percent}%"));
-    }
-    if let Some(tokens) = stats.context_tokens {
-        // A share when the capacity is known, the raw count when it is not: a percentage of an
-        // unknown total is not a number anybody can act on.
-        match stats.context_limit.filter(|limit| *limit > 0) {
-            Some(limit) => chip(ui, &format!("上下文 {}%", tokens.saturating_mul(100) / limit)),
-            None => chip(ui, &format!("上下文 {tokens}")),
-        }
-    }
-}
-
-/// One small figure, with the same muted treatment as the counts beside it.
-///
-/// @param ui - where to draw.
-/// @param text - the figure.
-fn chip(ui: &mut egui::Ui, text: &str) {
-    // `_` separators are for the eye: a six-digit token count is unreadable as one run.
-    ui.label(theme::meta(ui.ctx(), &text.replace('_', "")));
 }
 
 /// The model: which one, and a menu of the rest.
@@ -109,22 +182,21 @@ fn chip(ui: &mut egui::Ui, text: &str) {
 /// @param ui - where to draw.
 /// @param state - for the options and the current model.
 /// @param action - where a choice is reported.
-fn model(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
+fn model(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>, response: &egui::Response) {
     let Some(options) = &state.options else { return };
     let current = options
         .current_model
         .as_ref()
         .and_then(|(provider, id)| options.models.iter().find(|model| &model.provider == provider && &model.id == id));
-    let label = current.map_or_else(|| "模型".to_owned(), |model| model.name.clone());
-    let response = picker::picker_button(ui, Kind::Model.id(), Some(Icon::Chat), &label, false);
-    // The model and its effort live in one menu, because the host holds them in one selection: an
-    // effort chosen without its model would be a value the model may not accept.
     let mut chosen: Option<Action> = None;
-    egui::Popup::menu(&response)
+    egui::Popup::menu(response)
+        .open_memory(None)
+        .frame(theme::popover_frame())
         .id(Kind::Model.id())
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.set_min_width(theme::POPOVER_WIDTH);
+            back(ui, Kind::Model);
             picker::popover_head(ui, "模型", "");
             if options.models.is_empty() {
                 picker::popover_note(ui, "宿主没有提供可选模型");
@@ -152,6 +224,7 @@ fn model(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
         });
     if let Some(chosen) = chosen {
         *action = Some(chosen);
+        egui::Popup::close_id(ui.ctx(), Kind::Model.id());
     }
 }
 
@@ -183,29 +256,21 @@ fn effort_for(options: &SessionOptions, model: &ModelOption) -> Option<String> {
 /// @param ui - where to draw.
 /// @param state - for the options.
 /// @param action - where a choice is reported.
-fn effort(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
+fn effort_menu(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>, response: &egui::Response) {
     let Some(options) = &state.options else { return };
     let Some(current) = current_model(options) else { return };
     if current.efforts.is_empty() {
         return;
     }
-    let label = match &options.current_effort {
-        Some(effort) => current
-            .efforts
-            .iter()
-            .find(|option| &option.id == effort)
-            .map_or_else(|| effort.clone(), |option| option.name.clone()),
-        // No effort set: the model's own default is what the host will use, and saying so is more
-        // honest than showing an empty control.
-        None => "默认".to_owned(),
-    };
-    let response = picker::picker_button(ui, Kind::Effort.id(), Some(Icon::Brain), &label, false);
     let mut chosen = None;
-    egui::Popup::menu(&response)
+    egui::Popup::menu(response)
+        .open_memory(None)
+        .frame(theme::popover_frame())
         .id(Kind::Effort.id())
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.set_min_width(theme::POPOVER_WIDTH);
+            back(ui, Kind::Effort);
             picker::popover_head(ui, "思考档位", &current.name);
             for option in &current.efforts {
                 if let Some(Row::Chosen) =
@@ -217,6 +282,7 @@ fn effort(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
         });
     if let Some(chosen) = chosen {
         *action = Some(chosen);
+        egui::Popup::close_id(ui.ctx(), Kind::Effort.id());
     }
 }
 
@@ -241,16 +307,18 @@ fn permissions(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action
         .current_permission
         .as_deref()
         .is_some_and(|value| value != options.permissions[0].value);
-    let response = picker::picker_button(
+    let response = button(
         ui,
         Kind::Permission.id(),
         Some(if elevated { Icon::Shield } else { Icon::ShieldCheck }),
         &label,
+        None,
         elevated,
     );
     let mut chosen = None;
     egui::Popup::menu(&response)
         .id(Kind::Permission.id())
+        .frame(theme::popover_frame())
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.set_min_width(theme::POPOVER_WIDTH);

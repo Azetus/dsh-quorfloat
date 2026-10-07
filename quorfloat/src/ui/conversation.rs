@@ -44,6 +44,9 @@ pub(super) fn conversation(
         // (see `docs/progress.md` §30).
         .auto_shrink([false, true])
         .stick_to_bottom(true)
+        // The footer has already reserved its space; egui's default 64px minimum
+        // must not take that space back while the native window is still growing.
+        .min_scrolled_height(0.0)
         .max_height(height)
         .show(ui, |ui| {
             if state.entries.is_empty() && state.live.is_none() {

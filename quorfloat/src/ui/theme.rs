@@ -547,8 +547,25 @@ pub const PAD_COMPOSER: egui::Margin = egui::Margin { left: 22, right: 22, top: 
 /// Space inside the conversation: `padding:20px 24px 22px`.
 pub const PAD_THREAD: egui::Margin = egui::Margin { left: 24, right: 24, top: 20, bottom: 22 };
 
-/// Space inside the footer: `padding:8px 15px 8px 22px`.
-pub const PAD_FOOTER: egui::Margin = egui::Margin { left: 22, right: 15, top: 8, bottom: 8 };
+/// Bottom hints and statistics: `padding:9px 22px`.
+pub const PAD_FOOTER: egui::Margin = egui::Margin { left: 22, right: 22, top: 9, bottom: 9 };
+/// Settings strip: `.q-runtime { padding:0 15px 10px }`.
+pub const PAD_RUNTIME: egui::Margin = egui::Margin { left: 15, right: 15, top: 0, bottom: 10 };
+/// Picker padding and height from `.q-picker`.
+pub const FOOTER_PICKER_PAD: f32 = 7.0;
+pub const FOOTER_PICKER_HEIGHT: f32 = 28.0;
+/// Space between the permission and model controls.
+pub const GAP_RUNTIME: f32 = 12.0;
+/// Model/effort spacing in the combined control.
+pub const GAP_CONFIG: f32 = 4.0;
+/// Statistics use 13px icons, a 5px label gap and 13px between groups.
+pub const ICON_STAT: f32 = 13.0;
+pub const GAP_STAT_LABEL: f32 = 5.0;
+pub const GAP_STATS: f32 = 13.0;
+/// The keyboard group retains its space when statistics have long values.
+pub const FOOTER_HINT_WIDTH: f32 = 192.0;
+/// A statistics row includes the key chips' border and padding.
+pub const FOOTER_INFO_HEIGHT: f32 = 20.0;
 
 /// Gap between the parts of a row (`gap:14px` in the top bar, `gap:10px` in the footer).
 pub const GAP: f32 = 10.0;

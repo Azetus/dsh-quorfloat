@@ -372,6 +372,14 @@ pub fn ensure_icons(ctx: &egui::Context) {
 /// @param ctx - the render context.
 pub fn install_icons(ctx: &egui::Context) {
     ctx.add_font(egui::epaint::text::FontInsert {
+        name: "icons-fill".to_owned(),
+        data: egui::FontData::from_static(egui_phosphor::Variant::Fill.font_bytes()),
+        families: vec![egui::epaint::text::InsertFontFamily {
+            family: egui::FontFamily::Name("icons-fill".into()),
+            priority: egui::epaint::text::FontPriority::Highest,
+        }],
+    });
+    ctx.add_font(egui::epaint::text::FontInsert {
         name: ICON_FAMILY.to_owned(),
         data: egui::FontData::from_static(egui_phosphor::Variant::Regular.font_bytes()),
         families: vec![egui::epaint::text::InsertFontFamily {
@@ -388,6 +396,13 @@ pub fn install_icons(ctx: &egui::Context) {
 #[must_use]
 pub fn icon_font(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Name(ICON_FAMILY.into()))
+}
+
+/// Filled permission shield, kept separate from regular icons and text fallbacks.
+/// @param size - glyph size in points.
+/// @returns the explicitly registered filled family.
+pub fn filled_icon_font(size: f32) -> egui::FontId {
+    egui::FontId::new(size, egui::FontFamily::Name("icons-fill".into()))
 }
 
 /// Whether the panel can currently draw its own text.
