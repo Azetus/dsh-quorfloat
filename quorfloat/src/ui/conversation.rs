@@ -53,26 +53,372 @@ pub(super) fn conversation(
                 ui.label(theme::meta(ui.ctx(), "尚无对话内容"));
                 return;
             }
-            // Turns are drawn as turns: the design separates them with a hairline, 20px above
-            // and 18px below, which is what makes a long conversation scannable — the eye finds
-            // the questions without reading the answers (`.q-turn + .q-turn`).
+            // **Every turn is drawn as two parts: one disclosure, then the answer.**
+            //
+            // **The rule is this project's own, and deliberately simple**: everything the model
+            // produced that is not the turn's final answer goes behind `已完成` — its reasoning, its
+            // tool calls and their results, and any prose it wrote along the way. What stays out is
+            // the final answer (what the user came to read) and the question (the user's own words).
+            //
+            // We no longer chase the upstream Harness's presentation (`turn-process`, with its
+            // per-step `latestAnswer`, `groupPart` splitting of one message, forced-open aborted
+            // turns, …): it is a different client with different furniture around the same events.
+            // Where a rule here still agrees with upstream, that is a coincidence of both being
+            // simple — not a compatibility goal. See `docs/dsh-quorfloat.md` §11.
+            //
+            // Turns are separated by a hairline, 20px above and 18px below, which is what makes a
+            // long conversation scannable (`.q-turn + .q-turn`).
+            let total = state.entries.len();
             let mut first_turn = true;
-            for entry in state.entries.iter() {
-                if matches!(entry, Entry::User { .. }) {
-                    if !first_turn {
-                        ui.add_space(theme::TURN_GAP_ABOVE);
-                        separator(ui);
-                        ui.add_space(theme::TURN_GAP_BELOW);
-                    }
-                    first_turn = false;
+            let mut index = 0;
+            // A `loop` rather than `while index < total`, because an empty transcript still has one
+            // thing worth drawing: the answer that is being written before any line of it has landed.
+            loop {
+                let turn_end = next_turn_start(&state.entries, index);
+                let is_last = turn_end == total;
+                if !first_turn {
+                    ui.add_space(theme::TURN_GAP_ABOVE);
+                    separator(ui);
+                    ui.add_space(theme::TURN_GAP_BELOW);
                 }
-                entry_ui(ui, entry, markdown);
-            }
-            if let Some(live) = &state.live {
-                entry_ui(ui, live, markdown);
+                first_turn = false;
+                // The answer being written belongs to the last turn, and is drawn as part of it: its
+                // reasoning joins that turn's working, its text is that turn's answer.
+                let live = if is_last { state.live.as_ref() } else { None };
+                // **A turn still being worked on keeps its disclosure open**: while the model works,
+                // the working is the only thing happening, so there is nothing to fold it behind. The
+                // moment the answer lands and the turn ends it folds — the other half of the rule, and
+                // the default the reader sees. (`live` alone counts: a turn whose stream is still
+                // arriving is being worked on even if its `turn/end` has already been folded in.)
+                let running = is_last && (state.turn_active || live.is_some());
+                turn_ui(ui, &state.entries[index..turn_end], live, running.then_some(true), markdown);
+                index = turn_end;
+                if index >= total {
+                    break;
+                }
             }
         });
     output.content_size.y
+}
+
+/// Where the next turn starts, so one turn's lines can be drawn together.
+///
+/// A turn begins at a user line. Anything before the first one — a notice, a system line — is its own
+/// leading group, which keeps the caller free of a special case.
+///
+/// @param entries - the transcript's lines.
+/// @param from - the index this turn starts at.
+/// @returns the exclusive end index of the turn starting at `from`.
+fn next_turn_start(entries: &[Entry], from: usize) -> usize {
+    (from + 1..entries.len())
+        .find(|index| matches!(entries[*index], Entry::User { .. }))
+        .unwrap_or(entries.len())
+}
+
+/// Which line of a turn is its final answer, if it has one.
+///
+/// **The final answer is the turn's last assistant line that has reply text and no tool call.** A
+/// message that ends in a tool call is the model still working, however much prose precedes the call:
+/// it has not answered anything yet, and everything it wrote there is part of the working.
+///
+/// @param turn - the turn's lines.
+/// @returns the answer's index within `turn`, or `None` while the turn has produced no answer.
+fn answer_index(turn: &[Entry]) -> Option<usize> {
+    turn.iter()
+        .enumerate()
+        .rev()
+        .find(|(_, entry)| match entry {
+            Entry::Assistant { blocks, .. } => {
+                !blocks.iter().any(|block| matches!(block, Block::Call { .. }))
+                    && blocks.iter().any(|block| match block {
+                        Block::Text(text) => !text.trim().is_empty(),
+                        _ => false,
+                    })
+            }
+            _ => false,
+        })
+        .map(|(index, _)| index)
+}
+
+/// One turn: its working behind a disclosure, then its answer.
+///
+/// @param ui - where to draw.
+/// @param turn - the turn's lines.
+/// @param live - the answer still being written, when this is the turn writing it.
+/// @param open_override - force the disclosure open (the turn is being worked on); `None` leaves it
+///   to what the reader chose, which for a settled turn is closed.
+/// @param markdown - the viewer's cache.
+fn turn_ui(
+    ui: &mut egui::Ui,
+    turn: &[Entry],
+    live: Option<&Entry>,
+    open_override: Option<bool>,
+    markdown: &mut egui_commonmark::CommonMarkCache,
+) {
+    let split = split_turn(turn);
+    if let Some(question) = split.question {
+        entry_ui(ui, question, markdown);
+    }
+    // What the harness said during this turn is not the model's working and is not folded: a resync
+    // or an approval decision is something to act on.
+    for entry in &split.loose {
+        entry_ui(ui, entry, markdown);
+    }
+    // The answer in flight is a line of the working as far as its thinking goes: it has no line of
+    // the turn yet, and while the model thinks it is the only thing happening.
+    let mut held = split.held;
+    if let Some(thinking) = live.filter(|entry| has_reasoning(entry)) {
+        held.push(Held::Reasoning(thinking));
+    }
+    // **One disclosure, and only when there is something behind it.** A fold over nothing is a
+    // control that does nothing; a second fold — the answer folding its own reasoning — is the same
+    // fact asked twice, and closed, so opening the first would appear to reveal nothing.
+    if !held.is_empty() {
+        process_fold(ui, &held, open_override, markdown);
+    }
+    for entry in &split.answer {
+        entry_ui(ui, entry, markdown);
+    }
+    // Below the disclosure, where an answer belongs. The reasoning it may carry is inside it.
+    if let Some(live) = live {
+        entry_ui(ui, live, markdown);
+    }
+}
+
+/// One thing a turn's disclosure holds.
+///
+/// The two cases are two answers to "is this message the final answer?": usually not (an earlier step,
+/// a tool result, a narrated line — held whole), but the answering message itself can carry reasoning,
+/// and **only its reasoning is not the answer.**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Held<'a> {
+    /// A line of the working, drawn whole: its reasoning as text, then the calls it made and the
+    /// prose it wrote around them.
+    Working(&'a Entry),
+    /// The reasoning of a line whose reply is drawn elsewhere — the answer's, or the one still being
+    /// streamed. **Only the reasoning**: holding the reply as well would put it on screen twice.
+    Reasoning(&'a Entry),
+}
+
+/// One turn, cut into the four parts the drawer needs.
+///
+/// A pure description of the split, so the rule can be tested without a frame: what is *hidden* by
+/// the fold is the thing worth asserting, and a rendering test cannot see it (a fresh egui context
+/// per call means a closed fold cannot be reopened to check what was behind it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TurnSplit<'a> {
+    /// The user's question — the turn's first line, always drawn and never folded: it is the
+    /// signpost that makes a long conversation scannable.
+    question: Option<&'a Entry>,
+    /// What the harness told the user during the turn. Drawn outside the disclosure.
+    loose: Vec<&'a Entry>,
+    /// The model's working, in the order it happened. Empty when there is nothing to disclose.
+    held: Vec<Held<'a>>,
+    /// The answer — everything from the answer line on.
+    answer: Vec<&'a Entry>,
+}
+
+/// Cut one turn into its parts.
+///
+/// **Question, one disclosure, answer.** The question is never inside the fold — it is what the user
+/// wrote, and the signpost that makes a long conversation scannable. The final answer stays outside it
+/// too: it is the point of the turn. **Everything else the model produced is held** — reasoning, tool
+/// calls, tool results, and the prose it narrated between them.
+///
+/// @param turn - the turn's lines.
+/// @returns the parts, with `held` empty when the turn produced nothing but its answer.
+fn split_turn(turn: &[Entry]) -> TurnSplit<'_> {
+    let question = match turn.first() {
+        Some(entry @ Entry::User { .. }) => Some(entry),
+        _ => None,
+    };
+    let from = if question.is_some() { 1 } else { 0 };
+    let answer_at = answer_index(turn);
+    let answer_from = answer_at.unwrap_or(turn.len());
+    let mut loose = Vec::new();
+    let mut held = Vec::new();
+    // Every line between the question and the answer is drawn exactly once: the harness's own lines
+    // outside the disclosure, the model's working inside it. Letting either side drop a line is how a
+    // notice about the session disappears behind `已完成`.
+    for entry in &turn[from..answer_from] {
+        if is_process_line(entry) {
+            held.push(Held::Working(entry));
+        } else {
+            loose.push(entry);
+        }
+    }
+    // The answering message's own reasoning is part of the working, and it goes last: it is the last
+    // thing the model thought before it answered. Holding the line *whole* would put the answer inside
+    // the fold as well, and folding the answer's reasoning separately — which is what this panel used
+    // to do — put a second disclosure on screen (`已完成` above `思考`), closed, so opening the first
+    // revealed nothing about the thinking it exists to show.
+    if let Some(at) = answer_at {
+        if has_reasoning(&turn[at]) {
+            held.push(Held::Reasoning(&turn[at]));
+        }
+    }
+    TurnSplit { question, loose, held, answer: turn[answer_from..].iter().collect() }
+}
+
+/// Whether a line is part of the model working rather than something the user wrote or needs.
+///
+/// @param entry - the line.
+/// @returns whether it belongs inside the process fold.
+fn is_process_line(entry: &Entry) -> bool {
+    match entry {
+        Entry::Assistant { blocks, .. } => !blocks.is_empty(),
+        Entry::Tool { .. } | Entry::System { .. } => true,
+        // A question, a notice about the harness, and an approval decision are the user's business,
+        // not the model's working: they stay outside the fold.
+        Entry::User { .. } | Entry::Notice { .. } => false,
+    }
+}
+
+/// Whether a line carries reasoning of its own.
+///
+/// Blank blocks do not count: a disclosure opened onto an empty thought is a control that does
+/// nothing.
+///
+/// @param entry - the line.
+/// @returns whether there is reasoning to hold.
+fn has_reasoning(entry: &Entry) -> bool {
+    match entry {
+        Entry::Assistant { blocks, .. } => blocks
+            .iter()
+            .any(|block| matches!(block, Block::Reasoning(text) if !text.trim().is_empty())),
+        _ => false,
+    }
+}
+
+/// The folded working: a header that says the turn worked, and the rows behind it.
+///
+/// @param ui - where to draw.
+/// @param held - the rows the disclosure holds.
+/// @param open_override - force the state, for a turn that is still being worked on.
+/// @param markdown - the viewer's cache.
+fn process_fold(
+    ui: &mut egui::Ui,
+    held: &[Held<'_>],
+    open_override: Option<bool>,
+    markdown: &mut egui_commonmark::CommonMarkCache,
+) {
+    let id = process_id(held);
+    let remembered = ui.memory(|memory| memory.data.get_temp::<bool>(id));
+    // **Collapsed by default, once the turn has settled**: the working is not what the user came to
+    // read, and a turn's worth of it buries the answer. While the turn runs it is open and cannot be
+    // closed, because it is the only thing happening.
+    let open = open_override.unwrap_or_else(|| remembered.unwrap_or(false));
+    let content = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let mark = if open { icons::Icon::CaretDown } else { icons::Icon::CaretRight };
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(theme::ICON_CHEVRON, theme::ICON_CHEVRON),
+                egui::Sense::hover(),
+            );
+            icons::paint(ui, rect.center(), mark, theme::ICON_CHEVRON, theme::muted());
+            let label = if open_override == Some(true) { "正在工作" } else { "已完成" };
+            // **Not selectable**, unlike the prose around it. A selectable label is a
+            // `click_and_drag` widget — that is how egui implements drag-to-select text — and it sits
+            // on top of the row that contains it, so it takes the click the row was waiting for. The
+            // header is a control, not text to copy: the words are three characters the reader
+            // already knows, and the click is the whole point of the row.
+            // Not selectable, unlike the prose around it: the header is the row's control, and a
+            // selectable label is a `click_and_drag` widget (that is how egui implements
+            // drag-to-select text) sitting on top of the row that owns it.
+            ui.add(egui::Label::new(egui::RichText::new(label).size(theme::TEXT_SMALL).color(theme::muted())).selectable(false));
+        })
+        .response;
+    // The header is **a widget of its own**, not the layout's response made clickable. Measured, after
+    // a click on this row did nothing: `.interact(Sense::click())` on the response produced a widget
+    // the hit test never picked — `hovered` and `clicked` both false with the pointer inside its own
+    // rectangle — while an explicit `ui.interact` over that same rectangle was hovered and clicked.
+    // The row therefore highlighted under the pointer and **no click ever arrived**: a disclosure that
+    // could be seen and not opened. Every other clickable row in this panel is registered this way.
+    let row = ui.interact(content.rect, ui.id().with(("quorfloat-process", id)), egui::Sense::click());
+    if row.clicked() && open_override.is_none() {
+        ui.memory_mut(|memory| memory.data.insert_temp(id, !open));
+    }
+    if row.hovered() && open_override.is_none() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    if open {
+        ui.add_space(theme::GAP_CLOSE);
+        for row in held {
+            process_line(ui, *row, markdown);
+        }
+        ui.add_space(theme::GAP_CLOSE);
+    }
+}
+
+/// One row inside an open working disclosure.
+///
+/// **The reasoning is drawn as text, never behind a second disclosure.** The row is already inside
+/// one: this disclosure *is* the thinking's fold, and `entry_ui` does not fold reasoning at all. A
+/// fold inside it would be the same fact asked twice — and closed by default, so opening the working
+/// would appear to reveal nothing (see `docs/progress.md` §5).
+///
+/// @param ui - where to draw.
+/// @param row - the held row.
+/// @param markdown - the viewer's cache.
+fn process_line(ui: &mut egui::Ui, row: Held<'_>, markdown: &mut egui_commonmark::CommonMarkCache) {
+    match row {
+        // Only the reasoning: this line's reply is the answer, drawn below the disclosure.
+        Held::Reasoning(entry) => {
+            if let Entry::Assistant { blocks, .. } = entry {
+                reasoning_ui(ui, &reasoning_text(blocks));
+            }
+        }
+        // A working line, drawn whole. Its prose is the *narration* of the work — the answer is the
+        // only line whose prose is drawn outside the disclosure — so dropping it here would lose the
+        // model's own account of what it was doing.
+        Held::Working(Entry::Assistant { blocks, streaming }) => {
+            reasoning_ui(ui, &reasoning_text(blocks));
+            let rest: Vec<Block> = blocks
+                .iter()
+                .filter(|block| !matches!(block, Block::Reasoning(_)))
+                .cloned()
+                .collect();
+            if !rest.is_empty() {
+                assistant_ui(ui, &rest, *streaming, markdown);
+            }
+        }
+        // A tool result, a system line: nothing to take apart.
+        Held::Working(entry) => entry_ui(ui, entry, markdown),
+    }
+}
+
+/// The reasoning of one message, as text on screen.
+///
+/// @param ui - where to draw.
+/// @param reasoning - the message's reasoning, or an empty string when it has none.
+fn reasoning_ui(ui: &mut egui::Ui, reasoning: &str) {
+    if reasoning.is_empty() {
+        return;
+    }
+    ui.add_space(6.0);
+    wrapped(
+        ui,
+        egui::RichText::new(reasoning)
+            .size(theme::TEXT_META)
+            .color(theme::muted()),
+    );
+}
+
+/// The identity a working disclosure's open/closed state is remembered under.
+///
+/// Keyed by the working's own text, like every other remembered state here: the transcript drops its
+/// oldest lines as it grows, and a fold that jumped to another turn when the buffer trimmed would be
+/// worse than one that forgot.
+///
+/// @param held - the rows the disclosure holds.
+/// @returns the egui id for its fold.
+fn process_id(held: &[Held<'_>]) -> egui::Id {
+    let mut seed = String::new();
+    for row in held {
+        seed.push_str(&format!("{row:?}"));
+    }
+    egui::Id::new(("quorfloat-process", text_hash(&seed)))
 }
 
 /// The line under an answer: what happened to it, and the copy control.
@@ -146,7 +492,7 @@ pub(super) fn answer_source(blocks: &[Block]) -> String {
 /// @returns the egui id for its state.
 #[must_use]
 pub(super) fn copy_id(source: &str) -> egui::Id {
-    reasoning_id(source)
+    egui::Id::new(("quorfloat-copied", text_hash(source)))
 }
 
 /// The who-said-it line, for the entries the design has no shape for.
@@ -181,19 +527,6 @@ pub(super) fn reasoning_text(
         })
         .collect::<Vec<_>>()
         .join("\n\n")
-}
-
-/// The identity a fold's open/closed state is remembered under.
-///
-/// Keyed by the text rather than by position: the transcript drops its oldest entries as it
-/// grows, and a fold that jumped to another answer when the buffer trimmed would be worse than
-/// one that forgot.
-///
-/// @param reasoning - the reasoning text.
-/// @returns the egui id for its fold.
-#[must_use]
-pub(super) fn reasoning_id(reasoning: &str) -> egui::Id {
-    egui::Id::new(("quorfloat-reasoning", text_hash(reasoning)))
 }
 
 /// Give the layout somewhere to break inside long unbroken runs.
@@ -284,7 +617,7 @@ pub(super) fn entry_ui(
     entry: &crate::app::session::transcript::Entry,
     markdown: &mut egui_commonmark::CommonMarkCache,
 ) {
-    use crate::app::session::transcript::{Block, Entry};
+    use crate::app::session::transcript::Entry;
 
     ui.add_space(6.0);
     match entry {
@@ -301,91 +634,11 @@ pub(super) fn entry_ui(
             ui.add_space(theme::QUESTION_GAP);
         }
         Entry::Assistant { blocks, streaming } => {
-            // The model's working-out, folded away. It is kept rather than dropped — it is what
-            // the model is doing, and a panel that shows only conclusions makes a slow answer
-            // look stuck — but it is not what the user came to read, so it is one click away
-            // instead of always on screen. The design has no opinion here; the request for it
-            // came from using the panel (see `docs/progress.md` §35).
-            let reasoning = reasoning_text(blocks);
-            if !reasoning.is_empty() {
-                let id = reasoning_id(&reasoning);
-                let open = ui.memory(|memory| memory.data.get_temp::<bool>(id).unwrap_or(false));
-                let label = if *streaming && !open { "思考中…" } else { "思考" };
-                let row = ui
-                    .horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        let mark = if open { icons::Icon::CaretDown } else { icons::Icon::CaretRight };
-                        let (rect, _) = ui.allocate_exact_size(
-                            egui::vec2(theme::ICON_CHEVRON, theme::ICON_CHEVRON),
-                            egui::Sense::hover(),
-                        );
-                        icons::paint(ui, rect.center(), mark, theme::ICON_CHEVRON, theme::muted());
-                        ui.label(
-                            egui::RichText::new(label).size(theme::TEXT_SMALL).color(theme::muted()),
-                        );
-                    })
-                    .response
-                    .interact(egui::Sense::click());
-                if row.clicked() {
-                    ui.memory_mut(|memory| memory.data.insert_temp(id, !open));
-                }
-                if row.hovered() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                }
-                if open {
-                    wrapped(
-                        ui,
-                        egui::RichText::new(&reasoning)
-                            .size(theme::TEXT_META)
-                            .color(theme::muted())
-                            .italics(),
-                    );
-                }
-            }
-            for block in blocks {
-                match block {
-                    // Markdown, once the answer has stopped growing. While it streams the text
-                    // is drawn as it is: half a fence or an unclosed `**` renders as literal
-                    // punctuation for a moment and then reflows, and watching an answer
-                    // rearrange itself is worse than watching it arrive plainly.
-                    Block::Text(text) => {
-                        if *streaming {
-                            wrapped(ui, answer(ui.ctx(), text));
-                        } else {
-                            // An id scope per answer, because `ui.scope` is *not* one: it restores
-                            // the style but shares the id namespace, and the Markdown viewer draws
-                            // tables with an auto-id `Grid`. Two of them in one frame collide, and
-                            // egui says so on screen — "Second use of Grid ID 2A87 … Sometimes the
-                            // solution is to use ui.push_id", which is exactly this (see
-                            // `docs/progress.md` §39).
-                            ui.push_id(answer_id(text), |ui| {
-                                let style = theme::markdown_style(ui.style(), theme::palette());
-                                ui.style_mut().clone_from(&style);
-                                let available = ui.available_width().max(1.0);
-                                ui.set_max_width(available);
-                                // Tables are drawn by this panel (`super::table`), because the
-                                // viewer draws them as an `egui::Grid` — measured from its content,
-                                // with no scroll of its own — and one wide cell painted past the
-                                // panel's edge. Everything else goes to the viewer as one piece, so
-                                // prose is laid out exactly as it was before (see §40).
-                                // The viewer draws the answer, with the tables bounded: the
-                                // parser tells us where they are, and nothing else about the
-                                // Markdown is decided here (see `super::table`).
-                                super::table::draw(ui, markdown, text, available);
-                            });
-                        }
-                    }
-                    // Drawn above, folded; never twice.
-                    Block::Reasoning(_) => {}
-                    Block::Call { name, arguments } => {
-                        wrapped(ui, egui::RichText::new(format!("$ {name} {arguments}")).size(theme::TEXT_META).color(theme::muted()).monospace());
-                    }
-                }
-                ui.add_space(2.0);
-            }
+            assistant_ui(ui, blocks, *streaming, markdown);
             // The bar replaces the bare "生成中…" this used to be: the design puts the turn's
             // status and the copy control on one line under the answer, and the status is what
-            // says whether the answer is finished (`.q-answerbar`).
+            // says whether the answer is finished (`.q-answerbar`). It belongs to the *answer*:
+            // see `assistant_ui` for why a line inside the working does not get one.
             answer_bar(ui, blocks, *streaming, markdown);
         }
         Entry::Tool { text, is_error, .. } => {
@@ -407,6 +660,72 @@ pub(super) fn entry_ui(
     }
 }
 
+/// The blocks of one assistant line, drawn as they are.
+///
+/// Separated from [`entry_ui`] because **a line inside the working disclosure is not an answer**: the
+/// bar under an answer carries the turn's status and a copy control for the prose above it, and a
+/// second one inside the disclosure is a copy button for something the reader is reading as a step of
+/// the work. (It is not a cosmetic difference: the first version drew the bar for every assistant
+/// line, so opening the working showed `回答完成 … 复制回答` in the middle of it.)
+///
+/// **The reasoning is not drawn here, and there is no disclosure on this line.** A model's
+/// working-out belongs to the turn's disclosure (`split_turn` holds it), which is the *one* fold a
+/// turn has: a second one here is what showed up on screen as `已完成` above `思考`.
+///
+/// @param ui - where to draw.
+/// @param blocks - the line's blocks.
+/// @param streaming - whether the line is still growing.
+/// @param markdown - the viewer's cache.
+fn assistant_ui(
+    ui: &mut egui::Ui,
+    blocks: &[Block],
+    streaming: bool,
+    markdown: &mut egui_commonmark::CommonMarkCache,
+) {
+    for block in blocks {
+        match block {
+            // Markdown, once the answer has stopped growing. While it streams the text
+            // is drawn as it is: half a fence or an unclosed `**` renders as literal
+            // punctuation for a moment and then reflows, and watching an answer
+            // rearrange itself is worse than watching it arrive plainly.
+            Block::Text(text) => {
+                if streaming {
+                    wrapped(ui, answer(ui.ctx(), text));
+                } else {
+                    // An id scope per answer, because `ui.scope` is *not* one: it restores
+                    // the style but shares the id namespace, and the Markdown viewer draws
+                    // tables with an auto-id `Grid`. Two of them in one frame collide, and
+                    // egui says so on screen — "Second use of Grid ID 2A87 … Sometimes the
+                    // solution is to use ui.push_id", which is exactly this (see
+                    // `docs/progress.md` §39).
+                    ui.push_id(answer_id(text), |ui| {
+                        let style = theme::markdown_style(ui.style(), theme::palette());
+                        ui.style_mut().clone_from(&style);
+                        let available = ui.available_width().max(1.0);
+                        ui.set_max_width(available);
+                        // Tables are drawn by this panel (`super::table`), because the
+                        // viewer draws them as an `egui::Grid` — measured from its content,
+                        // with no scroll of its own — and one wide cell painted past the
+                        // panel's edge. Everything else goes to the viewer as one piece, so
+                        // prose is laid out exactly as it was before (see §40).
+                        // The viewer draws the answer, with the tables bounded: the
+                        // parser tells us where they are, and nothing else about the
+                        // Markdown is decided here (see `super::table`).
+                        super::table::draw(ui, markdown, text, available);
+                    });
+                }
+            }
+            // The turn's working disclosure draws it, and it is the only thing that does.
+            // Drawing it here as well is the second fold this panel must never show.
+            Block::Reasoning(_) => {}
+            Block::Call { name, arguments } => {
+                wrapped(ui, egui::RichText::new(format!("$ {name} {arguments}")).size(theme::TEXT_META).color(theme::muted()).monospace());
+            }
+        }
+        ui.add_space(2.0);
+    }
+}
+
 /// Who a line is from, as the panel labels it.
 ///
 /// @param entry - the line.
@@ -424,5 +743,212 @@ pub(crate) fn speaker(entry: &crate::app::session::transcript::Entry) -> String 
         // The kind is in the label rather than only in the text: an unrecognised event
         // is exactly the case where the reader needs to know what it was called.
         Entry::Notice { kind, .. } => format!("事件 · {kind}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::session::transcript::{Block, Entry};
+
+    /// A question line.
+    fn question(text: &str) -> Entry {
+        Entry::User { text: text.to_owned() }
+    }
+
+    /// An assistant line with the given blocks.
+    fn assistant(blocks: Vec<Block>) -> Entry {
+        Entry::Assistant { blocks, streaming: false }
+    }
+
+    /// A tool result line.
+    fn tool(text: &str) -> Entry {
+        Entry::Tool { name: Some("bash".to_owned()), text: text.to_owned(), is_error: false }
+    }
+
+    /// A line of reasoning, as a message carries it.
+    fn reasoning(text: &str) -> Block {
+        Block::Reasoning(text.to_owned())
+    }
+
+    /// A tool call, as a message carries it.
+    fn call(name: &str) -> Block {
+        Block::Call { name: name.to_owned(), arguments: "{}".to_owned() }
+    }
+
+    /// An answer's prose.
+    fn prose(text: &str) -> Block {
+        Block::Text(text.to_owned())
+    }
+
+    /// Where a line sits in the turn, so an assertion can be about indexes rather than references.
+    ///
+    /// @param turn - the turn's lines.
+    /// @param entry - one of them.
+    /// @returns its index.
+    fn position(turn: &[Entry], entry: &Entry) -> usize {
+        turn.iter()
+            .position(|line| std::ptr::eq(line, entry))
+            .unwrap_or_else(|| panic!("{entry:?} is not a line of this turn"))
+    }
+
+    /// Every line the split names, as indexes, in no particular order.
+    ///
+    /// @param turn - the turn's lines.
+    /// @returns one index per named part; a line held *and* answered appears twice.
+    fn named(turn: &[Entry]) -> Vec<usize> {
+        let split = split_turn(turn);
+        let mut indexes: Vec<usize> = Vec::new();
+        indexes.extend(split.question.map(|entry| position(turn, entry)));
+        indexes.extend(split.loose.iter().map(|entry| position(turn, entry)));
+        indexes.extend(split.held.iter().map(|row| match row {
+            Held::Working(entry) | Held::Reasoning(entry) => position(turn, entry),
+        }));
+        indexes.extend(split.answer.iter().map(|entry| position(turn, entry)));
+        indexes.sort_unstable();
+        indexes
+    }
+
+    /// The text of everything a split puts behind the disclosure.
+    ///
+    /// @param turn - the turn's lines.
+    /// @returns the held rows, as text.
+    fn held_text(turn: &[Entry]) -> Vec<String> {
+        let split = split_turn(turn);
+        assert!(!split.held.is_empty(), "expected something to disclose");
+        split.held.iter().map(|row| format!("{row:?}")).collect()
+    }
+
+    #[test]
+    fn a_turns_working_folds_and_its_question_and_answer_do_not() {
+        // The rule the whole change is about, asserted as a rule: what folds is everything the model
+        // produced except its final answer, and what stays is the question and that answer.
+        let turn = vec![
+            question("看看这个仓库"),
+            assistant(vec![reasoning("先看看目录结构"), call("bash")]),
+            tool("README.md src"),
+            // The answer carries reasoning of its own, which is the real shape of a thinking model's
+            // reply — and the shape that used to put a second disclosure on screen.
+            assistant(vec![reasoning("目录已经看过了"), prose("这个仓库只有 README 和 src。")]),
+        ];
+        let split = split_turn(&turn);
+        assert_eq!(split.question, Some(&turn[0]), "the question is the turn's first line");
+        assert_eq!(
+            split.held,
+            vec![Held::Working(&turn[1]), Held::Working(&turn[2]), Held::Reasoning(&turn[3])],
+            "the working is the step, the tool result, and the answer's thinking",
+        );
+        assert_eq!(split.answer, vec![&turn[3]], "and the answer is the last assistant line");
+        // The thing that matters: neither the question nor the answer's *reply* is inside the fold.
+        let held = held_text(&turn);
+        assert!(held.iter().any(|row| row.contains("先看看目录结构")), "{held:?}");
+        assert!(held.iter().any(|row| row.contains("README.md src")), "{held:?}");
+        assert!(held.iter().any(|row| row.contains("目录已经看过了")), "{held:?}");
+        assert!(!held.iter().any(|row| row.contains("看看这个仓库")), "the question is out: {held:?}");
+        // The answer's reply rides along inside the entry the fold holds — what keeps it off screen
+        // is that the row is held for its *reasoning* (`Held::Reasoning`), which is the thing the
+        // rendering test below can see and this one pins.
+        assert!(
+            !split.held.iter().any(|row| matches!(row, Held::Working(entry) if std::ptr::eq(*entry, &turn[3]))),
+            "the answer is not held whole: {split:?}",
+        );
+    }
+
+    #[test]
+    fn a_message_that_ends_in_a_tool_call_is_working_not_an_answer() {
+        // A message that carries a tool call has not answered anything yet, however much prose
+        // precedes the call. Getting this wrong is what leaves the model's half-finished narration on
+        // screen as if it were the answer.
+        let turn = vec![
+            question("跑一下测试"),
+            assistant(vec![prose("我先看看测试文件，然后——"), call("bash")]),
+        ];
+        let split = split_turn(&turn);
+        assert!(
+            split.answer.is_empty(),
+            "a reply that ends in a call has not answered: {:?}",
+            split.answer,
+        );
+        assert!(!split.held.is_empty(), "it is working, so it has something to disclose");
+    }
+
+    #[test]
+    fn a_turn_with_no_working_has_nothing_to_fold() {
+        // A question and its answer, with no reasoning and no tools between them: the working *is* the
+        // answer, and a disclosure over nothing is a control that does nothing.
+        let turn = vec![
+            question("你好"),
+            assistant(vec![prose("你好，有什么可以帮你的？")]),
+        ];
+        let split = split_turn(&turn);
+        assert!(split.held.is_empty(), "nothing to disclose: {split:?}");
+        assert_eq!(split.answer, vec![&turn[1]], "the answer is still the answer");
+    }
+
+    #[test]
+    fn a_blank_thought_is_not_something_to_disclose() {
+        // Upstream's test is `block.text.trim() !== ''`, and a fold opened onto an empty thought is a
+        // control that does nothing however it is labelled.
+        let turn = vec![
+            question("你好"),
+            assistant(vec![reasoning("   \n"), prose("你好。")]),
+        ];
+        let split = split_turn(&turn);
+        assert!(split.held.is_empty(), "an empty thought is not working: {split:?}");
+        assert_eq!(split.answer, vec![&turn[1]]);
+    }
+
+    #[test]
+    fn notices_are_not_part_of_the_working() {
+        // A notice is about the harness, not about what the model did — the user may need to act on it,
+        // and folding it away would hide a session resync behind "已完成". A turn that *did* work is
+        // the case that matters: with a tool call beside it, the old split dropped the notice instead
+        // of disclosing it.
+        let turn = vec![
+            question("看看"),
+            Entry::Notice { kind: "session/resync".to_owned(), text: "内容不完整".to_owned() },
+            assistant(vec![reasoning("重新读一遍"), call("bash")]),
+            tool("README.md"),
+            assistant(vec![prose("看完了。")]),
+        ];
+        let split = split_turn(&turn);
+        assert_eq!(split.loose, vec![&turn[1]], "the notice stays outside the fold");
+        assert!(
+            !split.held.iter().any(|row| matches!(row, Held::Working(entry) if std::ptr::eq(*entry, &turn[1]))),
+            "and is not inside it: {split:?}",
+        );
+    }
+
+    #[test]
+    fn every_line_of_a_turn_is_drawn_exactly_once() {
+        // The invariant behind a line that vanished into a fold: whatever a turn is made of, each of
+        // its lines is named by some part of the split. The one line that may be named twice is the
+        // answer, which is held for its reasoning and answered for its reply — one message split into
+        // the part that is not the answer and the part that is, not a duplicate.
+        let turn = vec![
+            question("看看"),
+            Entry::Notice { kind: "approval/asked".to_owned(), text: "bash 请求提权".to_owned() },
+            assistant(vec![reasoning("先看一眼"), call("bash")]),
+            tool("README.md src"),
+            Entry::Notice { kind: "approval/decided".to_owned(), text: "提权请求：rejected".to_owned() },
+            assistant(vec![reasoning("记下来了"), prose("这个仓库只有 README 和 src。")]),
+        ];
+        assert_eq!(
+            named(&turn),
+            vec![0, 1, 2, 3, 4, 5, 5],
+            "every line once, and the answer twice — held for its thinking, answered for its reply",
+        );
+    }
+
+    #[test]
+    fn a_group_before_the_first_question_is_drawn_once() {
+        // A transcript can open with the harness talking before the user does: a resync notice, an
+        // approval decision. That group has no question, and it is still drawn exactly once — the
+        // version before this one drew its first line a second time in the question's place.
+        let turn = vec![Entry::Notice { kind: "session/resync".to_owned(), text: "内容不完整".to_owned() }];
+        let split = split_turn(&turn);
+        assert_eq!(split.question, None, "there is no question in this group");
+        assert_eq!(split.loose, vec![&turn[0]], "and the line is loose");
+        assert_eq!(named(&turn), vec![0], "named once, not twice");
     }
 }

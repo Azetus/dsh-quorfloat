@@ -2048,19 +2048,24 @@ mod tests {
         // whatever polyline has its points on that circle. (Finding the arc by looking for a constant
         // radius about its own centroid does not work: the centroid of a half circle is not its
         // centre, so the radii vary by pixels and a chevron icon passes the test while the arc fails.)
+        // The stroke's radius, taken from the code that draws it rather than restated here: the track
+        // is handed `RING_RADIUS - RING_STROKE / 2` because a circle's stroke is drawn *outside* its
+        // radius, and a test that hard-coded the nominal radius is a test that fails when the
+        // alignment is fixed.
         let (centre, radius) = circles
             .iter()
             .copied()
-            .find(|(_, radius)| (*radius - (crate::ui::theme::ICON_STAT - 2.0) / 2.0).abs() < 0.1)
-            .unwrap_or_else(|| panic!("the occupancy ring's track is stroked: {circles:?}"));
+            .find(|(_, radius)| (*radius - crate::ui::track_radius_for_test()).abs() < 0.1)
+            .unwrap_or_else(|| panic!("no circle at the track's radius: {circles:?}"));
 
         let arc = paths
             .iter()
             .find(|points| {
+                // The arc rides the *fill's* radius, which is the nominal one — the track is the
+                // stroke that had to move (see `band_radii`).
+                let fill = crate::ui::fill_radius_for_test();
                 points.len() >= 3
-                    && points
-                        .iter()
-                        .all(|p| ((*p - centre).length() - radius).abs() < 0.2)
+                    && points.iter().all(|p| ((*p - centre).length() - fill).abs() < 0.2)
             })
             .unwrap_or_else(|| {
                 panic!(
@@ -2342,9 +2347,47 @@ mod tests {
         let first = effort_text.iter().find(|(text, _)| text == "Off").expect("first effort").1;
         assert!(back.bottom() < first.top(), "menu header overlaps first choice: {back:?} / {first:?}");
         for label in ["Off", "低", "高", "Prefer for routine", "Use for tasks", "Use for simple"] {
-            let rect = effort_text.iter().find(|(text, rect)| text.starts_with(label) && rect.top() < menu_rect.bottom()).unwrap_or_else(|| panic!("missing menu {label}: {effort_text:?}")).1;
-            assert!(menu_rect.contains_rect(rect), "menu clips {label}: {rect:?} outside {menu_rect:?}");
+            // **The menu's copy, which is the leftmost.** The footer's own effort picker shows the
+            // same word as a menu row — "高" is both the chosen effort and an option — so a lookup by
+            // text alone can land on the picker, at the far right of the panel, and then fail the
+            // containment check below. The popup is a column starting at the same left edge as the
+            // menu, so ordering by x picks the row the assertion is about. (It cannot order by y:
+            // this menu scrolls, and its last rows sit below the visible popup rectangle.)
+            let rect = effort_text
+                .iter()
+                .filter(|(text, _)| text.starts_with(label))
+                .min_by(|left, right| left.1.left().total_cmp(&right.1.left()))
+                .unwrap_or_else(|| panic!("missing menu {label}: {effort_text:?}"))
+                .1;
+            // **Inside the popup horizontally, and in the panel vertically.** The popup scrolls when
+            // the menu does not fit above its button — that is by design (`menu_height` is whatever
+            // room is left), and a header that moves the anchor up makes the last rows sit below the
+            // visible rectangle while still being laid out, and reachable by scrolling. So the
+            // assertion is that a row is *in the menu's column*, not that every row is on screen: the
+            // first version asserted the latter and passed only while the menu happened to fit.
+            assert!(
+                rect.left() >= menu_rect.left() - 0.5 && rect.right() <= menu_rect.right() + 0.5,
+                "menu row {label} is outside the menu's column: {rect:?} vs {menu_rect:?}",
+            );
+            assert!(panel.contains_rect(rect), "menu row {label} is outside the panel: {rect:?}");
         }
+        // And the rows are in the order the options are, which is what makes the column readable.
+        let row_offsets: Vec<f32> = ["Off", "低", "高"]
+            .iter()
+            .map(|label| {
+                effort_text
+                    .iter()
+                    .filter(|(text, _)| text.starts_with(label))
+                    .min_by(|left, right| left.1.left().total_cmp(&right.1.left()))
+                    .expect("row")
+                    .1
+                    .top()
+            })
+            .collect();
+        assert!(
+            row_offsets.windows(2).all(|pair| pair[0] < pair[1]),
+            "the effort rows run in order: {row_offsets:?}",
+        );
         assert!(matches!(click(&ctx, &state, "低"), Some(crate::ui::Action::SelectEffort { effort }) if effort == "low"));
         click(&ctx, &state, "DeepSeek-V41-Flash");
         click(&ctx, &state, "模型");
@@ -2510,7 +2553,30 @@ mod tests {
         // The way `main` does it: before the first frame, because egui builds its font atlas when a
         // pass starts, and a family named in the same frame it was added is not in it.
         crate::ui::fonts::ensure_icons(&ctx);
+        draw_with(&ctx, app, size, vec![])
+    }
+
+    /// Draw the panel into a context the caller keeps, so that what egui *remembers* survives the
+    /// call.
+    ///
+    /// [`drawn_text`] builds a fresh context every time, which is right for "what does this frame look
+    /// like" and wrong for anything the context itself remembers: a fold's open state lives there, so a
+    /// new context is a fold nobody has ever touched — the trap `docs/progress.md` §5 records.
+    ///
+    /// @param ctx - the context to draw into.
+    /// @param app - the panel.
+    /// @param size - the window to draw into.
+    /// @param events - this pass's input.
+    /// @returns every piece of text painted, with where it landed.
+    fn draw_with(
+        ctx: &egui::Context,
+        app: &mut App,
+        size: egui::Vec2,
+        events: Vec<egui::Event>,
+    ) -> Vec<(String, egui::Rect)> {
         let input = egui::RawInput {
+            events,
+            focused: true,
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
             ..Default::default()
         };
@@ -2523,6 +2589,55 @@ mod tests {
             collect_text(&shape.shape, &mut texts);
         }
         texts
+    }
+
+    /// Everything one pass painted, as one string.
+    ///
+    /// @param texts - what [`draw_with`] collected.
+    /// @returns the text, one painted run per line.
+    fn painted(texts: &[(String, egui::Rect)]) -> String {
+        texts.iter().map(|(text, _)| text.as_str()).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Click a label the panel painted, and report what the pass after the click painted.
+    ///
+    /// Two passes before the press, because egui hit-tests against the widget rectangles the
+    /// *previous* pass registered: a press in the first pass reaches nothing at all.
+    ///
+    /// @param ctx - the context the panel is drawn in, kept across the passes.
+    /// @param app - the panel.
+    /// @param size - the window.
+    /// @param label - the text to aim at.
+    /// @returns the text the next pass painted.
+    fn click_painted(
+        ctx: &egui::Context,
+        app: &mut App,
+        size: egui::Vec2,
+        label: &str,
+    ) -> Vec<(String, egui::Rect)> {
+        let _ = draw_with(ctx, app, size, vec![]);
+        let texts = draw_with(ctx, app, size, vec![]);
+        let pos = texts
+            .iter()
+            .find(|(text, _)| text == label)
+            .unwrap_or_else(|| panic!("missing {label}: {texts:?}"))
+            .1
+            .center();
+        let _ = draw_with(ctx, app, size, vec![egui::Event::PointerMoved(pos)]);
+        for pressed in [true, false] {
+            let _ = draw_with(
+                ctx,
+                app,
+                size,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    pressed,
+                    button: egui::PointerButton::Primary,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        draw_with(ctx, app, size, vec![])
     }
 
     /// Whether the user could read this text: drawn, and inside the panel.
@@ -3057,6 +3172,235 @@ mod tests {
     /// past the bottom of the panel's own window.
     /// The three pieces of the design's thread: the question line, the separator between
     /// turns, and the answer bar with its copy control.
+    /// A turn that thinks, calls a tool, and answers — as the records a snapshot carries.
+    ///
+    /// The answer carries reasoning of its own, which is the shape a thinking model really replies in
+    /// and the one that used to put a second disclosure under the first.
+    ///
+    /// @returns the eight records of one finished turn.
+    fn one_working_turn() -> serde_json::Value {
+        serde_json::json!([
+            {"type": "event", "event": {"type": "user/message", "seq": 0, "time": 1,
+             "data": {"role": "user", "content": [{"type": "text", "text": "看看这个仓库"}]}}},
+            {"type": "event", "event": {"type": "turn/start", "seq": 1, "time": 2, "data": {"turn": 1}}},
+            {"type": "event", "event": {"type": "assistant/message", "seq": 2, "time": 3,
+             "data": {"message": {"role": "assistant", "content": [
+                {"type": "reasoning", "text": "先看看目录结构"},
+                {"type": "text", "text": "我先列一下目录。"},
+                {"type": "tool-call", "id": "c1", "name": "bash", "arguments": "{\"command\":\"ls\"}"}]}}}},
+            {"type": "event", "event": {"type": "tool/call", "seq": 3, "time": 4,
+             "data": {"name": "bash", "callId": "c1", "arguments": "{\"command\":\"ls\"}"}}},
+            {"type": "event", "event": {"type": "tool/result", "seq": 4, "time": 5,
+             "data": {"message": {"role": "tool", "toolCallId": "c1",
+                "content": [{"type": "text", "text": "README.md src"}]}}}},
+            {"type": "event", "event": {"type": "assistant/message", "seq": 5, "time": 6,
+             "data": {"message": {"role": "assistant", "content": [
+                {"type": "reasoning", "text": "目录看完了"},
+                {"type": "text", "text": "这个仓库只有 README 和 src。"}]}}}},
+            {"type": "event", "event": {"type": "turn/end", "seq": 6, "time": 7,
+             "data": {"turn": 1, "reason": {"kind": "completed"}}}},
+        ])
+    }
+
+    /// The two turns the fold tests draw, as a snapshot.
+    ///
+    /// @param records - the records the snapshot carries.
+    /// @returns the frame to deliver.
+    fn snapshot_with(records: serde_json::Value) -> Inbound {
+        // The cursor is derived rather than written down: it is the sequence of the last record, and
+        // a hard-coded one above that makes the transcript treat every later event as a duplicate it
+        // has already folded — which is how a test can send a `turn/start` and still be told the turn
+        // is not running.
+        let cursor = records
+            .as_array()
+            .and_then(|records| records.last())
+            .and_then(|record| record.get("event"))
+            .and_then(|event| event.get("seq"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        Inbound::Notification {
+            method: "session/snapshot".to_owned(),
+            params: Some(serde_json::json!({
+                "sessionId": "session-1", "generation": 1, "cursor": cursor, "hasMore": false,
+                "records": records,
+            })),
+        }
+    }
+
+    /// The frame that tells the panel a turn is being worked on.
+    ///
+    /// A `turn/start` is what sets it: the transcript's `turn_active` is driven by the turn boundary
+    /// events rather than by whether an answer has arrived, because a turn that has produced nothing
+    /// yet is still a turn in progress.
+    ///
+    /// @returns the frame to deliver.
+    fn running_now() -> Inbound {
+        Inbound::Notification {
+            method: "session/event".to_owned(),
+            params: Some(serde_json::json!({
+                // Above the snapshot's cursor, or the transcript counts it as a duplicate it has
+                // already folded and drops it.
+                "sessionId": "session-1", "generation": 1, "seq": 99, "time": 8,
+                "type": "turn/start", "data": {"turn": 2},
+            })),
+        }
+    }
+
+    #[test]
+    fn a_finished_turn_folds_its_reasoning_and_tools_but_keeps_its_answer() {
+        // The change this test exists for: once a turn has finished, everything the model produced
+        // that is not its final answer — its reasoning, its tool calls, their results, its narration —
+        // goes behind one disclosure, and the answer stays on screen. The answer is the turn's last
+        // assistant line with reply text and no tool call in it.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        deliver(&session, &recorded, snapshot_with(one_working_turn()));
+
+        let size = egui::vec2(708.0, 620.0);
+        let drawn = drawn_text(&mut app, size);
+        let all = painted(&drawn);
+
+        assert!(all.contains("你 · 看看这个仓库"), "the question stays: {all}");
+        assert!(all.contains("已完成"), "the working is announced: {all}");
+        assert!(all.contains("这个仓库只有 README 和 src。"), "and the answer is on screen: {all}");
+        // **One disclosure, and no second one.** `已完成` above `思考` is what the panel showed while
+        // the answer folded its own reasoning: a fold the reader could see but not account for.
+        assert_eq!(all.matches("已完成").count(), 1, "a turn has one disclosure: {all}");
+        assert!(!all.contains("思考"), "and no second one: {all}");
+        // Folded away: the reasoning of the step, the call it made, the tool's output, and the
+        // reasoning the answer itself carries — a thinking model's reply holds both at once.
+        for hidden in ["先看看目录结构", "我先列一下目录。", "bash", "README.md src", "目录看完了"] {
+            assert!(!all.contains(hidden), "the working hides {hidden:?}: {all}");
+        }
+    }
+
+    #[test]
+    fn an_unfinished_turn_keeps_its_process_open() {
+        // While the model is still working there is nothing else to look at, so the disclosure is
+        // shown and cannot be folded.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        // The same turn with its ending removed, and the panel told it is still running.
+        let mut records = one_working_turn();
+        records.as_array_mut().expect("records").pop();
+        deliver(&session, &recorded, snapshot_with(records));
+        deliver(&session, &recorded, running_now());
+
+        let size = egui::vec2(708.0, 620.0);
+        let drawn = drawn_text(&mut app, size);
+        let all = painted(&drawn);
+        assert!(all.contains("先看看目录结构"), "the working is visible while it works: {all}");
+        assert!(!all.contains("已完成"), "and is not announced as finished: {all}");
+    }
+
+    /// One `session/stream` notification, as the host sends it.
+    ///
+    /// @param frame - the stream frame.
+    /// @returns the frame to deliver.
+    fn stream_frame(frame: serde_json::Value) -> Inbound {
+        Inbound::Notification {
+            method: "session/stream".to_owned(),
+            params: Some(serde_json::json!({
+                "sessionId": "session-1", "generation": 1, "frame": frame,
+            })),
+        }
+    }
+
+    /// One `session/event` notification.
+    ///
+    /// @param seq - the event's sequence, above whatever the snapshot carried.
+    /// @param kind - the event type.
+    /// @param data - the event's data.
+    /// @returns the frame to deliver.
+    fn event_at(seq: i64, kind: &str, data: serde_json::Value) -> Inbound {
+        Inbound::Notification {
+            method: "session/event".to_owned(),
+            params: Some(serde_json::json!({
+                "sessionId": "session-1", "generation": 1, "seq": seq, "time": seq + 1,
+                "type": kind, "data": data,
+            })),
+        }
+    }
+
+    /// A turn whose question has been asked and whose answer is still being thought about.
+    ///
+    /// @returns the snapshot to deliver.
+    fn snapshot_of_a_thinking_turn() -> Inbound {
+        snapshot_with(serde_json::json!([
+            {"type": "event", "event": {"type": "user/message", "seq": 0, "time": 1,
+             "data": {"role": "user", "content": [{"type": "text", "text": "看看这个仓库"}]}}},
+            {"type": "event", "event": {"type": "turn/start", "seq": 1, "time": 2, "data": {"turn": 1}}},
+        ]))
+    }
+
+    #[test]
+    fn the_working_is_open_while_it_runs_and_folds_when_the_answer_lands() {
+        // Both halves of the rule, asserted together because the fold's default only means anything
+        // next to the run that precedes it: while the model works its thinking is the only thing
+        // happening, and the moment the answer lands the disclosure folds itself away, with no click
+        // from anyone.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        deliver(&session, &recorded, snapshot_of_a_thinking_turn());
+        deliver(
+            &session,
+            &recorded,
+            stream_frame(serde_json::json!({"type": "chunk", "revision": 2, "index": 0,
+                "chunk": {"type": "reasoning-delta", "index": 0, "text": "先看看目录结构"}})),
+        );
+
+        let size = egui::vec2(708.0, 620.0);
+        // One context for both halves: the fold's state lives in the context, so a fresh one would
+        // forget whatever the first half had done — and "it folded by itself" is exactly that memory.
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+
+        let running = painted(&draw_with(&ctx, &mut app, size, vec![]));
+        assert!(running.contains("正在工作"), "the turn is being worked on: {running}");
+        assert!(running.contains("先看看目录结构"), "so its thinking is what there is to watch: {running}");
+
+        // The answer lands, and the turn ends.
+        deliver(&session, &recorded, event_at(2, "assistant/message", serde_json::json!({
+            "message": {"role": "assistant", "content": [
+                {"type": "reasoning", "text": "先看看目录结构"},
+                {"type": "text", "text": "这个仓库只有 README 和 src。"}]},
+        })));
+        deliver(&session, &recorded, event_at(3, "turn/end", serde_json::json!({
+            "turn": 1, "reason": {"kind": "completed"},
+        })));
+
+        let settled = painted(&draw_with(&ctx, &mut app, size, vec![]));
+        assert!(settled.contains("已完成"), "the turn is done: {settled}");
+        assert!(!settled.contains("先看看目录结构"), "and its thinking folded itself away: {settled}");
+        assert!(settled.contains("这个仓库只有 README 和 src。"), "leaving the answer: {settled}");
+    }
+
+    #[test]
+    fn the_working_disclosure_opens_on_a_click_when_the_turn_is_done() {
+        // A settled turn's fold is closed, which is only useful if the reader can open it: what is
+        // behind it is the model's working, and a control that cannot reveal it is a decoration.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        deliver(&session, &recorded, snapshot_with(one_working_turn()));
+
+        let size = egui::vec2(708.0, 620.0);
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+
+        let opened = painted(&click_painted(&ctx, &mut app, size, "已完成"));
+        // Including the prose the working narrated between the calls: a working line is drawn whole,
+        // and dropping its text here is how the model's own account of what it was doing goes missing.
+        for shown in ["先看看目录结构", "我先列一下目录。", "bash", "README.md src", "目录看完了"] {
+            assert!(opened.contains(shown), "the working holds {shown:?}: {opened}");
+        }
+        assert!(opened.contains("这个仓库只有 README 和 src。"), "and the answer is still there: {opened}");
+        assert!(!opened.contains("思考"), "with no second disclosure inside it: {opened}");
+        // One bar, and it is the answer's: a bar inside the working would put a status and a copy
+        // control on a step of the work.
+        assert_eq!(opened.matches("回答完成").count(), 1, "the answer owns the only bar: {opened}");
+        assert_eq!(opened.matches("复制回答").count(), 1, "and the only copy control: {opened}");
+    }
+
     #[test]
     fn a_turn_is_a_question_a_separator_and_an_answer_bar() {
         let (mut app, recorded, session, _wake) = app_and_session();
@@ -3099,27 +3443,31 @@ mod tests {
 
     /// Reasoning is folded away by default, and one click opens it.
     ///
-    /// The request came from using the panel: a chain of thought on screen for every answer
-    /// buries the answer. It is kept rather than dropped, because a long silence with no visible
-    /// work is how a slow model looks broken.
+    /// The request came from using the panel: a chain of thought on screen for every answer buries
+    /// the answer. It is kept rather than dropped, because a long silence with no visible work is how
+    /// a slow model looks broken — and it is kept behind the turn's **one** disclosure, which is the
+    /// upstream shape (`turn-process`): the answer does not fold its own reasoning as well, because
+    /// that is the same fact asked twice, with the inner fold closed so the outer one reveals nothing.
     #[test]
     fn reasoning_is_folded_away_until_it_is_asked_for() {
         let (mut app, recorded, session, _wake) = app_and_session();
         attach_one(&mut app, &recorded, &session);
         deliver(&session, &recorded, conversation_frame());
         let size = egui::vec2(708.0, 620.0);
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
 
-        let folded = drawn_text(&mut app, size);
-        assert!(
-            folded.iter().any(|(text, _)| text.contains("思考")),
-            "the fold is offered: {folded:#?}",
-        );
-        assert!(
-            !folded.iter().any(|(text, _)| text.contains("想一下")),
-            "and its contents are not on screen: {folded:#?}",
-        );
-        // The answer itself is there, which is the point of folding the working-out.
-        assert!(folded.iter().any(|(text, _)| text.contains("看到了")), "{folded:#?}");
+        let folded = painted(&draw_with(&ctx, &mut app, size, vec![]));
+        assert!(folded.contains("已完成"), "the working is announced: {folded}");
+        assert!(folded.contains("看到了"), "and the answer is on screen: {folded}");
+        assert!(!folded.contains("思考"), "with no second disclosure above it: {folded}");
+        assert!(!folded.contains("想一下"), "and the thinking itself off screen: {folded}");
+
+        // A click on the header, and the thinking is there — the same context, because the fold's
+        // state is what it remembers.
+        let opened = painted(&click_painted(&ctx, &mut app, size, "已完成"));
+        assert!(opened.contains("想一下"), "the thinking is behind the header: {opened}");
+        assert!(opened.contains("看到了"), "and the answer is still there: {opened}");
     }
 
     #[test]

@@ -675,6 +675,22 @@ fn menu_height(ui: &egui::Ui, anchor: egui::Rect) -> f32 {
         - theme::POPOVER_GAP - heading - padding).max(theme::MENU_LINE_HEIGHT)
 }
 
+/// The radius the track's circle is stroked at, for tests that have to find it in a frame.
+///
+/// @returns the radius, in logical pixels.
+#[cfg(test)]
+pub(crate) fn track_radius_for_test() -> f32 {
+    band_radii().0
+}
+
+/// The radius the fill's polyline is drawn at, for tests that have to find it in a frame.
+///
+/// @returns the radius, in logical pixels.
+#[cfg(test)]
+pub(crate) fn fill_radius_for_test() -> f32 {
+    band_radii().1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

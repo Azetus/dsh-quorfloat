@@ -27,6 +27,8 @@ mod table;
 /// The one thing the app needs from the picker: the id of the workspace menu, so a send that
 /// has no workspace to create in can open the menu that chooses one.
 pub(crate) use footer::{Kind as FooterKind, popup_id as footer_popup_id};
+#[cfg(test)]
+pub(crate) use footer::{fill_radius_for_test, track_radius_for_test};
 pub(crate) use picker::{Kind as PickerKind, popup_id as picker_popup_id};
 /// The display-only soft wrapper, reachable from the panel's tests.
 #[cfg(test)]
