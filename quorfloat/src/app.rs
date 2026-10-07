@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
+mod appearance;
 pub mod pinned;
 pub mod preferences;
 pub mod session;
@@ -53,6 +54,13 @@ pub struct App {
     wake: Receiver<Wake>,
     /// Whether the panel is currently shown, as last commanded.
     visible: bool,
+    /// The native window stays up while the commanded hide fades out.
+    native_visible: bool,
+    /// Showing a hidden OS window can take a frame; begin its fade at the first paint.
+    opening_first_paint: bool,
+    appearance: appearance::Appearance,
+    /// egui input time can be stale while a native window is hidden.
+    appearance_clock: std::time::Instant,
     /// Whether the host has been told the current visibility.
     reported_visible: Option<bool>,
     /// Why the session ended, if it has. Shared with the reader thread so either
@@ -96,6 +104,9 @@ pub struct App {
     /// framebuffer rather than from the desktop — which is also its limit: it shows what the
     /// panel draws, not how the platform composites it.
     screenshot: Option<std::path::PathBuf>,
+    /// Opt-in development frame sequence; absent in ordinary runs.
+    animation_capture: Option<std::path::PathBuf>,
+    captured_appearance: Option<f32>,
     /// Whether that picture has been asked for yet this run.
     screenshot_asked: bool,
     /// When the last picture was successfully written.
@@ -199,6 +210,10 @@ impl App {
             // Starts hidden to match the viewport, which is built hidden so a
             // launch (or an automatic restart) cannot flash a panel on screen.
             visible: false,
+            native_visible: settings.start_visible,
+            opening_first_paint: settings.start_visible,
+            appearance: appearance::Appearance::default(),
+            appearance_clock: std::time::Instant::now(),
             reported_visible: None,
             outcome,
             context: None,
@@ -217,6 +232,9 @@ impl App {
             screenshot: std::env::var_os("DSH_QUORFLOAT_SCREENSHOT")
                 .map(std::path::PathBuf::from)
                 .filter(|path| !path.as_os_str().is_empty()),
+            animation_capture: std::env::var_os("DSH_QUORFLOAT_ANIMATION_CAPTURE")
+                .filter(|path| !path.is_empty()).map(std::path::PathBuf::from),
+            captured_appearance: None,
             screenshot_asked: false,
             screenshot_taken_at: None,
             screenshot_marked_at: None,
@@ -389,7 +407,7 @@ impl App {
 
         if let Some(image) = ctx.input(|input| {
             input.events.iter().find_map(|event| match event {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                egui::Event::Screenshot { user_data, image, .. } if user_data.data.is_none() => Some(image.clone()),
                 _ => None,
             })
         }) {
@@ -497,6 +515,7 @@ impl App {
         // window behind it.
         if self.settings.start_visible {
             self.startup_hidden = true;
+            self.set_visible(true);
             return;
         }
         self.startup_hidden = true;
@@ -533,12 +552,25 @@ impl App {
         self.hide_after_startup();
         self.verify_fonts();
         self.write_screenshot();
+        if let Some(ctx) = &self.context {
+            let frames = ctx.input(|input| input.events.iter().filter_map(|event| match event {
+                egui::Event::Screenshot { user_data, image, .. } => user_data.data.as_ref()
+                    .and_then(|data| data.downcast_ref::<std::path::PathBuf>()).map(|path| (path.clone(), image.clone())),
+                _ => None,
+            }).collect::<Vec<_>>());
+            for (path, image) in frames {
+                if let Err(error) = crate::ui::screenshot::write_ppm(&path, &image) {
+                    self.sink.mark(&format!("animation capture failed: {error}"));
+                }
+            }
+        }
         self.hide_when_the_user_leaves();
         self.ask_for_workspaces_once();
         self.forget_a_pin_the_host_refused();
         self.remember_window_position();
         self.pump();
         self.apply_window_commands();
+        self.advance_visibility();
         self.pump_follow();
         self.report_visibility();
     }
@@ -582,20 +614,54 @@ impl App {
     /// the host cannot drift apart in what they do — including the focus behaviour,
     /// which is easy to remember in one path and forget in the other.
     ///
-    /// @param visible - the state to move to. Setting the state the panel is
-    ///   already in still re-issues the command, which is deliberate: after startup
-    ///   the framework has shown the window against this object's wishes, so
-    ///   re-asserting "hidden" is how that gets corrected.
+    /// @param visible - the requested state. Hide is reported to the host immediately,
+    ///   but the native window remains drawable until its fade has finished.
     pub fn set_visible(&mut self, visible: bool) {
+        self.set_visible_at(visible, self.appearance_clock.elapsed().as_secs_f64());
+    }
+
+    fn set_visible_at(&mut self, visible: bool, now: f64) {
+        let changed = self.visible != visible;
+        if visible && !self.native_visible {
+            self.opening_first_paint = true;
+        } else if !visible && self.opening_first_paint {
+            self.opening_first_paint = false;
+            self.appearance = appearance::Appearance::default();
+        }
         self.visible = visible;
+        self.appearance.retarget(visible, now, self.settings.reduce_motion);
+        if changed {
+            self.captured_appearance = None;
+            self.focused_once = false;
+            self.sink.mark(if visible { "appearance opening" } else { "appearance closing" });
+        }
         if let Some(ctx) = &self.context {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(visible));
-            // Focusing on show is what makes the panel usable from the keyboard
-            // immediately; without it the user has to click into a window that
-            // already has their attention.
             if visible {
+                self.native_visible = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            } else {
+                egui::Popup::close_all(ctx);
             }
+            ctx.request_repaint();
+        }
+        self.advance_visibility_at(now);
+    }
+
+    /// Advance only while transitioning; a hidden or settled panel has no animation timer.
+    fn advance_visibility(&mut self) {
+        self.advance_visibility_at(self.appearance_clock.elapsed().as_secs_f64());
+    }
+
+    fn advance_visibility_at(&mut self, now: f64) {
+        let Some(ctx) = &self.context else { return };
+        self.appearance.retarget(self.visible, now, self.settings.reduce_motion);
+        if self.appearance.active(now) {
+            ctx.request_repaint();
+        } else if !self.visible && self.native_visible {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.native_visible = false;
+            self.sink.mark("appearance hidden");
         }
     }
 
@@ -1096,6 +1162,37 @@ impl App {
         Some(self.hotkey.reason().unwrap_or("unknown").to_owned())
     }
 
+    /// Present the native panel with the design's visibility transition.
+    /// Layout and window position stay untransformed; only the painted layer moves/scales.
+    /// @param ui - the native root UI, including transparent shadow margins.
+    pub fn present(&mut self, ui: &mut egui::Ui) {
+        self.present_at(ui, self.appearance_clock.elapsed().as_secs_f64());
+    }
+
+    fn present_at(&mut self, ui: &mut egui::Ui, now: f64) {
+        if self.opening_first_paint && self.visible {
+            self.opening_first_paint = false;
+            self.appearance = appearance::Appearance::default();
+            self.appearance.retarget(true, now, self.settings.reduce_motion);
+            ui.ctx().request_repaint();
+        }
+        let value = self.appearance.value(now);
+        let transform = appearance::Appearance::transform(value, ui.ctx().viewport_rect().width());
+        ui.ctx().set_transform_layer(ui.layer_id(), transform);
+        if !self.visible { ui.disable(); }
+        // Disable interaction without egui's extra disabled-color dimming.
+        ui.set_opacity(value);
+        self.draw(ui);
+        if let Some(directory) = &self.animation_capture {
+            if self.captured_appearance != Some(value) {
+                self.captured_appearance = Some(value);
+                let phase = if self.visible { "opening" } else { "closing" };
+                let path = directory.join(format!("{:06}-{phase}-{value:.3}.ppm", ui.ctx().cumulative_frame_nr()));
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(path)));
+            }
+        }
+    }
+
     /// Draw the panel's contents.
     ///
     /// Separate from [`App::logic`] because eframe only calls this when there is
@@ -1207,8 +1304,8 @@ impl App {
         let state = self.state();
         let mut action: Option<crate::ui::Action> = None;
         let layout = crate::ui::draw(ui, &state, &mut self.draft, &mut action, &mut self.markdown);
-        if let Some(action) = action {
-            self.apply_card_action(action);
+        if ui.is_enabled() {
+            if let Some(action) = action { self.apply_card_action(action); }
         }
         layout
     }
@@ -3861,6 +3958,120 @@ mod tests {
                 },
             })),
         }
+    }
+
+    /// Simulate real native passes at explicit times without sleeping or a window manager.
+    fn appearance_frame(app: &mut App, ctx: &egui::Context, time: f64, change: Option<bool>) -> egui::FullOutput {
+        let mut output = ctx.run_ui(egui::RawInput {
+            time: Some(time), screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(708.0, 620.0))),
+            ..Default::default()
+        }, |ui| {
+            app.set_context(ctx.clone());
+            if let Some(visible) = change { app.set_visible_at(visible, time); }
+            app.advance_visibility_at(time);
+            app.report_visibility();
+            app.present_at(ui, time);
+        });
+        output.textures_delta.clear();
+        output
+    }
+
+    fn hides_native(output: &egui::FullOutput) -> bool {
+        output.viewport_output.values().any(|viewport| viewport.commands.iter()
+            .any(|command| matches!(command, egui::ViewportCommand::Visible(false))))
+    }
+
+    #[test]
+    fn reopening_uses_monotonic_time_even_when_egui_keeps_a_stale_hidden_frame() {
+        let (mut app, _recorded, _tx) = app();
+        let ctx = egui::Context::default();
+        app.appearance_clock = std::time::Instant::now() - std::time::Duration::from_secs(100);
+        let mut output = ctx.run_ui(egui::RawInput { time: Some(1.0), ..Default::default() }, |ui| {
+            app.set_context(ctx.clone());
+            app.set_visible(true);
+            let now = app.appearance_clock.elapsed().as_secs_f64();
+            assert!(app.appearance.value(now) < 0.1, "stale egui time must not finish the fade on its first frame");
+            assert!(app.appearance.active(now));
+            app.present(ui);
+        });
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn closing_reports_inert_immediately_but_waits_for_animation_before_native_hide() {
+        let (mut app, recorded, _tx) = app();
+        let ctx = egui::Context::default();
+        appearance_frame(&mut app, &ctx, 1.0, Some(true));
+        appearance_frame(&mut app, &ctx, 1.2, None);
+        assert!(app.native_visible);
+        egui::Popup::open_id(&ctx, egui::Id::new("test-menu"));
+        let begin = appearance_frame(&mut app, &ctx, 2.0, Some(false));
+        assert!(!hides_native(&begin), "must draw the closing fade before hiding the OS window");
+        assert!(!app.is_visible(), "the host must stop routing interactions to the closing panel");
+        assert_eq!(recorded.frames().last().unwrap()["params"]["visible"], false);
+        assert!(!egui::Popup::is_any_open(&ctx));
+        assert!(!hides_native(&appearance_frame(&mut app, &ctx, 2.09, None)));
+        assert!(hides_native(&appearance_frame(&mut app, &ctx, 2.19, None)));
+        assert!(!app.native_visible);
+        assert!(!hides_native(&appearance_frame(&mut app, &ctx, 2.3, None)), "no repeated native hide commands");
+    }
+
+    #[test]
+    fn reopening_mid_close_cancels_the_hide_and_reduced_motion_settles_immediately() {
+        let (mut app, _recorded, _tx) = app();
+        let ctx = egui::Context::default();
+        appearance_frame(&mut app, &ctx, 1.0, Some(true));
+        appearance_frame(&mut app, &ctx, 1.2, Some(false));
+        let value = app.appearance.value(1.26);
+        appearance_frame(&mut app, &ctx, 1.26, Some(true));
+        assert_eq!(app.appearance.value(1.26), value, "reversal does not jump");
+        assert!(!hides_native(&appearance_frame(&mut app, &ctx, 1.6, None)));
+        assert!(app.native_visible);
+        app.settings.reduce_motion = true;
+        assert!(hides_native(&appearance_frame(&mut app, &ctx, 1.7, Some(false))));
+        assert_eq!(app.appearance.value(1.7), 0.0);
+        appearance_frame(&mut app, &ctx, 1.8, Some(true));
+        assert_eq!(app.appearance.value(1.8), 1.0);
+        assert!(!app.appearance.active(1.8));
+        appearance_frame(&mut app, &ctx, 2.0, Some(false));
+        app.settings.reduce_motion = false;
+        app.set_visible_at(true, 3.0);
+        appearance_frame(&mut app, &ctx, 3.4, None);
+        assert_eq!(app.appearance.value(3.4), 0.0, "native show latency cannot skip the first transparent frame");
+        appearance_frame(&mut app, &ctx, 3.6, None);
+        assert_eq!(app.appearance.value(3.6), 1.0);
+    }
+
+    #[test]
+    fn visibility_animation_transforms_and_fades_the_actual_panel_shapes() {
+        let (mut app, _recorded, _tx) = app();
+        let ctx = egui::Context::default();
+        appearance_frame(&mut app, &ctx, 1.0, Some(true));
+        let settled = appearance_frame(&mut app, &ctx, 1.2, None);
+        appearance_frame(&mut app, &ctx, 2.0, Some(false));
+        let halfway = appearance_frame(&mut app, &ctx, 2.09, None);
+        let brand = |output: &egui::FullOutput| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.text() == "DeepSeek" => {
+                    // Opacity is applied to the painted mesh, not the immutable layout job.
+                    let color = text.galley.rows.iter().flat_map(|row| &row.visuals.mesh.vertices)
+                        .map(|vertex| vertex.color).max_by_key(|color| color.a()).expect("glyph vertices");
+                    Some((text.galley.text().to_owned(), text.visual_bounding_rect(), color))
+                }
+                _ => None,
+            }).expect("painted brand")
+        };
+        let (_, full_rect, full_color) = brand(&settled);
+        let (_, faded_rect, faded_color) = brand(&halfway);
+        assert!(faded_color.a() < full_color.a() / 2, "actual text fades: {full_color:?} / {faded_color:?}");
+        assert!(faded_rect.top() < full_rect.top(), "actual text moves upward");
+        assert!(faded_rect.width() < full_rect.width(), "actual text shrinks");
+        let returned = appearance_frame(&mut app, &ctx, 3.0, Some(true));
+        assert!(!returned.shapes.is_empty());
+        let restored = appearance_frame(&mut app, &ctx, 3.2, None);
+        let (_, rect, color) = brand(&restored);
+        assert_eq!(rect, full_rect, "animation never changes saved geometry");
+        assert_eq!(color, full_color);
     }
 
     #[test]

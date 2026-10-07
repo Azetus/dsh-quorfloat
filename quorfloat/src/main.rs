@@ -258,7 +258,7 @@ impl eframe::App for EguiApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.inner.draw(ui);
+        self.inner.present(ui);
     }
 
     /// Clear to nothing, because there is nothing behind the panel to clear to.

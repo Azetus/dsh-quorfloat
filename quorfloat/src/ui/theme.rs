@@ -875,6 +875,12 @@ pub const SPEED: f32 = 0.18;
 
 /// How long the conversation takes to unfold (`220ms ease-out`).
 pub const SPEED_EXPAND: f32 = 0.22;
+/// Visibility transition from `.q-window` / `.q-away` in the design.
+pub const SPEED_VISIBILITY: f32 = 0.18;
+/// Upward translation at the hidden endpoint, in logical pixels.
+pub const AWAY_Y: f32 = -6.0;
+/// Scale at the hidden endpoint, around the panel's top center.
+pub const AWAY_SCALE: f32 = 0.985;
 
 #[cfg(test)]
 mod tests {
