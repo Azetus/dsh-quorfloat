@@ -423,6 +423,16 @@ pub fn markdown_style(base: &egui::Style) -> egui::Style {
     // Code draws on `extreme_bg_color`; without it, inline code is indistinguishable from the
     // words around it.
     style.visuals.extreme_bg_color = soft();
+    // Inline code draws on `code_bg_color`, which is `soft()` for the same reason — **and which has
+    // to be set explicitly.** egui's default for that field is a fixed grey chosen by *egui's* theme
+    // (230 light, 64 dark), and `markdown_style` is built from a base style: "the panel is dark"
+    // never reaches that default, so the light theme's near-white chip was being painted on the dark
+    // panel. A user reported it as inline code whose background and text "run together" — and the
+    // report is fair even though the contrast happened to survive, because a near-white box on a
+    // dark surface is a light-theme value showing through a dark-theme panel. It is the same failure
+    // as a hard-coded colour anywhere else: the panel's colours must come from the palette, never
+    // from a default that was chosen for a palette nobody is looking at.
+    style.visuals.code_bg_color = soft();
     style.visuals.hyperlink_color = accent();
     style.spacing.item_spacing = egui::vec2(0.0, 6.0);
     let body = egui::FontId::new(TEXT_BODY, egui::FontFamily::Proportional);
@@ -825,6 +835,81 @@ pub const SPEED_EXPAND: f32 = 0.22;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Relative luminance, for the contrast check below.
+    ///
+    /// The sRGB coefficients, on channels linearised the way the standard says: a contrast ratio
+    /// computed on raw 0-255 values would call two dark greys very different when they are not.
+    ///
+    /// @param colour - the colour to measure.
+    /// @returns its relative luminance, 0 for black and 1 for white.
+    fn luminance(colour: egui::Color32) -> f32 {
+        let channel = |value: u8| {
+            let value = f32::from(value) / 255.0;
+            if value <= 0.04045 { value / 12.92 } else { ((value + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * channel(colour.r()) + 0.7152 * channel(colour.g()) + 0.0722 * channel(colour.b())
+    }
+
+    /// How far apart two colours are, from 1 (identical) to 21 (black on white).
+    ///
+    /// @param left - one colour.
+    /// @param right - the other.
+    /// @returns the WCAG contrast ratio.
+    fn contrast(left: egui::Color32, right: egui::Color32) -> f32 {
+        let (a, b) = (luminance(left), luminance(right));
+        let (lighter, darker) = if a > b { (a, b) } else { (b, a) };
+        (lighter + 0.05) / (darker + 0.05)
+    }
+
+    #[test]
+    fn markdown_style_owns_every_colour_egui_would_otherwise_choose() {
+        // The bug this exists for: `RichText::code()` paints `visuals.code_bg_color`, and that field
+        // defaults to a **fixed grey chosen by egui's own theme** — 230, a near-white. The panel
+        // never set it, so the light theme's chip was painted on the dark panel: an inline-code box
+        // that belongs to a palette nobody is looking at (the user's report). The equality below is
+        // what catches that, because the leak is a *value* rather than a contrast failure; the
+        // contrast floor is the second half of the rule, and it is what catches the other direction
+        // — a future palette whose surface is too close to its own text for code to be readable.
+        for palette in [Palette::LIGHT, Palette::DARK] {
+            let base = match palette.bg.r() > 0x80 {
+                true => egui::Style { visuals: egui::Visuals::light(), ..Default::default() },
+                false => egui::Style { visuals: egui::Visuals::dark(), ..Default::default() },
+            };
+            // The style is a function of the *current* mode, which is process state: set it, or the
+            // palette under test is not the one being resolved.
+            set_mode(if palette.bg.r() > 0x80 { Mode::Light } else { Mode::Dark });
+            let style = markdown_style(&base);
+
+            assert_eq!(
+                style.visuals.code_bg_color,
+                palette.soft,
+                "inline code uses the panel's own surface, not egui's default",
+            );
+            assert_eq!(style.visuals.extreme_bg_color, palette.soft, "and so do fenced blocks");
+            assert_eq!(style.visuals.override_text_color, Some(palette.text));
+
+            // And the two are far enough apart to read. This is the assertion the user's screenshot
+            // would have failed: the default grey gives 1.07 against the dark palette's text.
+            let inline = contrast(palette.text, style.visuals.code_bg_color);
+            assert!(
+                inline >= 4.0,
+                "inline code is readable in this palette: text {:?} on {:?} is {inline:.2}:1",
+                palette.text,
+                style.visuals.code_bg_color,
+            );
+            let block = contrast(palette.text, style.visuals.extreme_bg_color);
+            assert!(block >= 4.0, "and so is a fenced block: {block:.2}:1");
+
+            // What egui would have chosen, to show the fix is load-bearing rather than incidental.
+            let leaked = if palette.bg.r() > 0x80 {
+                egui::Visuals::light().code_bg_color
+            } else {
+                egui::Visuals::dark().code_bg_color
+            };
+            assert_ne!(style.visuals.code_bg_color, leaked);
+        }
+    }
 
     #[test]
     fn the_designs_own_values_are_the_ones_in_this_file() {
