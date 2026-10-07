@@ -435,11 +435,29 @@ impl Transcript {
             // rule drawn between every turn would be noise in a panel this short.
             "turn/start" => self.turn_active = true,
             "turn/end" => self.turn_active = false,
-            // Machinery. Counted, never drawn: a panel that shows `request/header` has
-            // stopped being a conversation window.
+            // Machinery. Counted, never drawn: a panel that shows `request/header` has stopped
+            // being a conversation window.
+            //
+            // The list is the harness's own **known event vocabulary** (`known-event-types.ts`)
+            // minus what this file handles above. Naming every one of them is the point: the
+            // fallback below exists so a harness *upgrade* cannot look like silence, and it can only
+            // do that job if the vocabulary it already knows is spelled out here. `model/selection`
+            // is how this was found — it is the same kind of fact as `permission/preset` (a durable
+            // note about the session, not a line of the conversation), and it was reaching the
+            // transcript as `事件 · model/selection / 未识别的事件` every time the model changed.
             "step/start" | "step/end" | "command/run" | "command/done" | "workspace/changes"
             | "session/end-seed" | "permission/preset" | "sandbox/mode" | "approval/policy" | "agent/inbox/spliced"
-            | "request/header" | "request/context" | "session/title-llm-request" => {
+            | "request/header" | "request/context" | "session/title-llm-request"
+            | "model/selection" | "assistant/attempt" | "llm/retry" | "llm/retry-started"
+            | "plan/mode" | "goal/change" | "schedule/change"
+            | "compaction/start" | "compaction/end" | "compaction/summary" | "compaction/prune"
+            | "subagent/catalog" | "subagent/descriptor" | "subagent/model-selection-policy"
+            | "tool-workflow/agent-start" | "tool-workflow/agent-end"
+            | "tool-workflow/run-start" | "tool-workflow/run-end"
+            | "tool/ptc-dispatch" | "tool/ptc-dispatch-start"
+            | "hook/invoked" | "hook/result" | "image/offload"
+            | "agent-preset/selected"
+            | "web/deepseek-search-llm-request" => {
                 self.internal += 1;
             }
             // A generation step named in `data`, or something this build has never seen.
@@ -822,6 +840,61 @@ mod tests {
         ));
         assert!(transcript.entries().is_empty(), "{:?}", transcript.entries());
         assert_eq!(transcript.skipped().internal, 3);
+    }
+
+    #[test]
+    fn changing_the_model_does_not_write_a_line_into_the_conversation() {
+        // The bug this exists for: `model/selection` reached the transcript as
+        // `事件 · model/selection / 未识别的事件` — twice, once per switch — because the reducer's
+        // machinery list named only the types it happened to have met. A model change is a durable
+        // note *about* the session, exactly like `permission/preset`, and belongs in the footer's
+        // picker rather than in the conversation.
+        let mut transcript = Transcript::new();
+        transcript.apply_snapshot(&snapshot(
+            vec![
+                record(0, "model/selection", json!({"provider": "deepseek-official", "model": "deepseek-flash"})),
+                record(1, "model/selection", json!({"provider": "deepseek-official", "model": "deepseek-v41", "reasoningEffort": "max"})),
+            ],
+            1,
+            1,
+        ));
+        assert!(transcript.entries().is_empty(), "no line for a selection: {:?}", transcript.entries());
+        assert_eq!(transcript.skipped().internal, 2);
+        assert_eq!(transcript.skipped().unknown, 0, "and it is known, not merely unexplained");
+    }
+
+    #[test]
+    fn the_harnesss_machinery_vocabulary_is_not_drawn() {
+        // Every type the harness names in `known-event-types.ts` and this file does not handle.
+        // Named one by one on purpose: the fallback notice below exists so a harness *upgrade*
+        // cannot look like silence, and it can only do that if the vocabulary already known is
+        // listed. A new harness event therefore appears here as a failing list, which is the
+        // moment to decide whether it is a line of the conversation or machinery.
+        const MACHINERY: &[&str] = &[
+            "assistant/attempt", "llm/retry", "llm/retry-started", "model/selection",
+            "plan/mode", "goal/change", "schedule/change", "agent-preset/selected",
+            "compaction/start", "compaction/end", "compaction/summary", "compaction/prune",
+            "subagent/catalog", "subagent/descriptor", "subagent/model-selection-policy",
+            "tool-workflow/agent-start", "tool-workflow/agent-end",
+            "tool-workflow/run-start", "tool-workflow/run-end",
+            "tool/ptc-dispatch", "tool/ptc-dispatch-start",
+            "hook/invoked", "hook/result", "image/offload",
+            "web/deepseek-search-llm-request",
+        ];
+        let records: Vec<_> = MACHINERY
+            .iter()
+            .enumerate()
+            .map(|(seq, kind)| record(seq as i64, kind, json!({"text": "不该出现的正文"})))
+            .collect();
+        let mut transcript = Transcript::new();
+        transcript.apply_snapshot(&snapshot(records, MACHINERY.len() as i64 - 1, 1));
+        assert!(
+            transcript.entries().is_empty(),
+            "machinery must not be drawn: {:?}",
+            transcript.entries(),
+        );
+        assert_eq!(transcript.skipped().internal, MACHINERY.len());
+        assert_eq!(transcript.skipped().unknown, 0, "all of it is known");
     }
 
     #[test]
