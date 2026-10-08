@@ -179,7 +179,7 @@ async function main() {
     // claims an interaction only when the peer says it can render that kind, so a
     // mock that under-declared would silently exercise the deferral path instead of
     // the claim path it is standing in for.
-    capabilities: ['window', 'hotkey', 'egui', 'approval'],
+    capabilities: ['window', 'hotkey', 'tauri', 'approval'],
     hotkey: { requested: 'Alt+Space', registered: MODE !== 'no-hotkey' },
   })
   observed.helloAnswered = true

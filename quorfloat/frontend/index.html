@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>quorfloat</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="panel">
+    <div class="bar">quorfloat</div>
+    <div class="hint">Tauri shell</div>
+  </div>
+  <script>
+    // The shell emits this after every answered frame; the real frontend (M4)
+    // listens and re-renders from the session state. Nothing to do yet.
+    if (window.__TAURI__) {
+      window.__TAURI__.event.listen('quorfloat/nudge', () => {})
+    }
+  </script>
+</body>
+</html>

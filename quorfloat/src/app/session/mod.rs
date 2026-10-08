@@ -80,7 +80,6 @@ impl Delivery {
 }
 use crate::ipc::protocol::{CAPABILITIES, PROTOCOL_VERSION, error_code};
 use crate::ipc::rpc::{self, Inbound, Outcome, RpcError, Router};
-use crate::runtime::diag::dump::Dump;
 
 pub mod follow;
 pub mod interaction;
@@ -294,11 +293,6 @@ pub struct Session {
     /// Held here rather than in the panel because only this layer knows when the creation has
     /// finished: it finishes as an attach, and an attach is done when its answer arrives.
     pending_prompt: Option<String>,
-    /// Where raw conversation frames are captured, when a capture was asked for.
-    ///
-    /// Owned here rather than read from the environment in [`Session::new`] so tests
-    /// stay hermetic and the one place that reads the environment stays in `main`.
-    dump: Dump,
     /// The id and send time of the outstanding follow request, if any.
     follow_request: Option<(i64, i64)>,
     /// Requests the *user* caused, by their id: options, model changes, permission changes.
@@ -433,7 +427,6 @@ impl Session {
             cancel: Delivery::Idle,
             sends_in_flight: BTreeMap::new(),
             pending_prompt: None,
-            dump: Dump::default(),
             follow_request: None,
             setting_requests: BTreeMap::new(),
             options: None,
@@ -443,13 +436,6 @@ impl Session {
             handshake_sent: false,
             handshake_done: false,
         }
-    }
-
-    /// Install a raw-frame capture.
-    ///
-    /// @param dump - where conversation notifications are appended verbatim.
-    pub fn set_dump(&mut self, dump: Dump) {
-        self.dump = dump;
     }
 
     /// What the host sent in `ready`, once it has.
@@ -606,11 +592,10 @@ impl Session {
             // rendered — but counted on purpose: the status line is how a user tells
             // "following and receiving" from "following and getting nothing", and the
             // two are identical from every other angle.
-            // Dumped before it is interpreted, and for every session rather than only
-            // the followed one: the point is to see what the host sends, and filtering
-            // to what this build happens to understand would hide the kinds it does not.
+            // Applied for every session rather than only the followed one: the point
+            // is to count what the host sends, and filtering to what this build happens
+            // to understand would hide the kinds it does not.
             "session/snapshot" => {
-                self.dump.record(method, params.as_ref());
                 if let Some(params) = params.as_ref() {
                     self.transcript.apply_snapshot(params);
                 }
@@ -632,21 +617,18 @@ impl Session {
                 }
             }
             "session/event" => {
-                self.dump.record(method, params.as_ref());
                 if let Some(params) = params.as_ref() {
                     self.transcript.apply_event(params);
                 }
                 self.follow.record(method, params.as_ref(), sink);
             }
             "session/stream" => {
-                self.dump.record(method, params.as_ref());
                 if let Some(params) = params.as_ref() {
                     self.transcript.apply_stream(params);
                 }
                 self.follow.record(method, params.as_ref(), sink);
             }
             "session/resync" => {
-                self.dump.record(method, params.as_ref());
                 let detail = params
                     .as_ref()
                     .and_then(|params| self.transcript.apply_resync(params));
@@ -1877,7 +1859,7 @@ mod tests {
         assert_eq!(params["quorfloatVersion"], "0.0.1");
         assert_eq!(params["platform"], "darwin");
         assert_eq!(params["arch"], "arm64");
-        assert_eq!(params["capabilities"], json!(["window", "hotkey", "egui", "approval"]));
+        assert_eq!(params["capabilities"], json!(["window", "hotkey", "tauri", "approval"]));
         assert_eq!(params["hotkey"]["requested"], "Alt+Space");
         assert_eq!(params["hotkey"]["registered"], true);
     }

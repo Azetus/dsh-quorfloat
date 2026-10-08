@@ -4,7 +4,7 @@
 //! configuration: the theme arrived in the `ready` payload and the panel had no opinion. A setting
 //! the user changes *in the panel* is a different kind of fact — it has to take effect on the next
 //! frame, and it has to survive a restart — so it needs somewhere to live, and the rules are the
-//! ones `pinned.rs` and `ui/geometry.rs` already use for the same problem:
+//! ones `pinned.rs` and `geometry.rs` already use for the same problem:
 //!
 //! - **Nothing is load-bearing.** A missing, unreadable or unparseable file means "no local
 //!   preference", which leaves the host's configuration in charge — exactly the behaviour the
@@ -20,7 +20,7 @@
 
 use std::path::PathBuf;
 
-use crate::ui::theme::Preference;
+use crate::app::theme::Preference;
 
 /// What the user set in the settings view.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -35,7 +35,7 @@ pub struct Preferences {
     /// The design's `keepOpen`, and the inverse of the window setting the host sends: the design
     /// labels the switch by what it gives the user ("失焦时保持展开"), while the config names the
     /// behaviour the process implements (`hideOnBlur`). Both spellings are correct for their side;
-    /// the conversion happens once, in [`WindowSettings::with`](crate::ui::window::WindowSettings).
+    /// the conversion happens once, in [`WindowSettings::with_preferences`](crate::app::window_settings::WindowSettings).
     pub keep_open: Option<bool>,
     /// The accelerator the panel should register, when the user has changed it here.
     ///

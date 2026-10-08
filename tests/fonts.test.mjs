@@ -12,7 +12,6 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { test } from 'node:test'
 
-import { repoRoot } from './helpers.mjs'
 import { digestOf } from '../scripts/fetch-font.mjs'
 import {
   FONT_DIR,
@@ -43,16 +42,10 @@ test('the pin is a checksummed download, not a floating URL', () => {
   assert.match(FONT_SOURCE.license, /OFL/i)
 })
 
-test('the sidecar looks for the file the fetch script writes', () => {
-  // The two halves are coupled by a constant in Rust and a constant in this script.
-  // Renaming either side would not break the build — it would break the *panel*, at
-  // runtime, on a machine whose package was built from the other half.
-  const source = join(repoRoot, 'quorfloat/src/ui/fonts.rs')
-  assert.ok(existsSync(source), `${source} is missing — did the font module move?`)
-  const declared = /pub const FONT_FILE: &str = "([^"]+)"/.exec(readFileSync(source, 'utf8'))
-  assert.ok(declared !== null, 'fonts.rs names the file it looks for')
-  assert.equal(declared[1], FONT_FILE)
-})
+// The coupling test that compared FONT_FILE against `quorfloat/src/ui/fonts.rs` left
+// with the egui view (the migration dropped the module it guarded). Its replacement
+// lands with the web frontend (M4), when the font moves into `frontend/assets/` and a
+// new consumer-side constant exists to compare against.
 
 test('the licence is shipped beside the font it covers, unmodified', () => {
   // OFL 1.1 requires the notice to accompany every copy, and the copyright line lives in

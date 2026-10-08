@@ -1,7 +1,7 @@
-//! The bridge between the render loop and the thread that reads frames.
+//! The bridge between the frontend and the thread that reads frames.
 //!
 //! Three things live here because they are one mechanism: the channel that wakes the
-//! main thread ([`Wake`]), the sink that lets several threads write to one stdout
+//! shell's dispatcher ([`Wake`]), the sink that lets several threads write to one stdout
 //! ([`SharedSink`]), and the thread that turns stdin into both ([`Reader`]).
 //!
 //! The sink is shared rather than owned because the handshake is written by the main
@@ -12,8 +12,6 @@
 
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-
-use eframe::egui;
 
 use crate::app::session::{FrameSink, Session, SessionExit};
 use crate::ipc::transport::StdinSource;
@@ -117,28 +115,29 @@ pub struct Reader {
     /// Records why the session ended, so the window closing and the host closing
     /// the channel do not have to be told apart afterwards.
     outcome: Arc<Mutex<Option<SessionExit>>>,
-    /// Nudges the render loop. Filled in once the window exists; a wake delivered
-    /// before that is still queued on the channel and picked up by the first pass.
-    egui: Arc<Mutex<Option<egui::Context>>>,
+    /// Tells the frontend that the state changed. Provided by the shell: the reader
+    /// cannot reach the webview, so it emits the shell's event, which the frontend
+    /// listens to and re-renders from.
+    nudge: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl Reader {
     /// Assemble a reader.
     ///
-    /// @param session - the session state, shared with the main thread.
+    /// @param session - the session state, shared with the shell.
     /// @param sink - where answers go.
-    /// @param wake - how to notify the main thread.
+    /// @param wake - how to notify the dispatcher.
     /// @param outcome - where to record why the session ended.
-    /// @param egui - the render context slot, filled once the window exists.
+    /// @param nudge - how to tell the frontend the state changed.
     #[must_use]
     pub fn new(
         session: Arc<Mutex<Session>>,
         sink: Arc<SharedSink>,
         wake: Sender<Wake>,
         outcome: Arc<Mutex<Option<SessionExit>>>,
-        egui: Arc<Mutex<Option<egui::Context>>>,
+        nudge: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
-        Self { session, sink, wake, outcome, egui }
+        Self { session, sink, wake, outcome, nudge }
     }
 
     /// Read frames until the stream ends, answering each one.
@@ -181,22 +180,16 @@ impl Reader {
         self.notify(Wake::Exit(exit));
     }
 
-    /// Tell the main thread something happened, and ask for a redraw.
+    /// Tell the dispatcher something happened, and tell the frontend to refresh.
     ///
-    /// A send failure means the main thread is gone, which ends the process anyway;
+    /// A send failure means the shell is gone, which ends the process anyway;
     /// there is nothing to recover.
     fn notify(&self, wake: Wake) {
         let _ = self.wake.send(wake);
-        // Without this the panel would not redraw while hidden — and hidden is its
-        // normal state, so the configuration the host sends would never be
-        // reflected in what the user eventually sees.
-        let context = match self.egui.lock() {
-            Ok(slot) => slot.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        };
-        if let Some(ctx) = context {
-            ctx.request_repaint();
-        }
+        // Without this the frontend would not refresh while the window is hidden —
+        // and hidden is its normal state, so the configuration the host sends would
+        // never be reflected in what the user eventually sees.
+        (self.nudge)();
     }
 }
 

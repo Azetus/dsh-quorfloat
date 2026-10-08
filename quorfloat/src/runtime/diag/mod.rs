@@ -5,12 +5,11 @@
 //! actually send" are unanswerable from outside — and every one of those has been asked
 //! for real during this project.
 //!
-//! Both answers are the same mechanism ([`append`]) with different line formats:
+//! The answer is [`append`], with the marker's line format on top:
 //!
 //! - [`marker`] — short breadcrumbs about what this process decided. Safe to leave on.
-//! - [`dump`] — every conversation notification, verbatim, including whatever the
-//!   conversation said. A development switch, never set for a user.
+//!   (The raw-frame `dump` left with the egui view: there is no frame to dump anymore,
+//!   and the decision to abandon it is recorded in `docs/tauri-migration-plan.md` §1.)
 
 pub mod append;
-pub mod dump;
 pub mod marker;

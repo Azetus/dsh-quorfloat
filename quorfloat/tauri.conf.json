@@ -1,0 +1,36 @@
+{
+  "productName": "dsh-quorfloat",
+  "version": "0.0.1",
+  "identifier": "dev.dsh.quorfloat",
+  "build": {
+    "frontendDist": "frontend"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "quorfloat",
+        "width": 640,
+        "height": 400,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true,
+        "visible": false,
+        "focus": false,
+        "acceptFirstMouse": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "icon": ["icons/icon.png"]
+  }
+}

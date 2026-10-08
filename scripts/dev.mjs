@@ -72,7 +72,10 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 /** The executable name, matching what the host half resolves per platform. */
 const SIDECAR_NAME = process.platform === 'win32' ? 'dsh-quorfloat.exe' : 'dsh-quorfloat'
 
-/** The font the panel loads; keep in step with `quorfloat/src/fonts.rs`. */
+/** The font the panel loads. The egui-era lookup (`quorfloat/src/ui/fonts.rs`) is
+ *  gone with the view layer; the web frontend (M4) consumes it from the bundled
+ *  assets, and the staged `fonts/` directory stays so the shipped layout rule
+ *  keeps being exercised. */
 const FONT_NAME = 'NotoSansSC-VF.otf'
 
 /** The licence that must sit beside it. Same directory, so they travel together. */

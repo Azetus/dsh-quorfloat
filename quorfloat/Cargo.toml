@@ -22,20 +22,21 @@ path = "src/lib.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# The window. `default-features = false` drops the accessibility bridge (AccessKit)
-# and the default font set: neither is needed for a spotlight-style input panel,
-# and both are large. Features are re-added explicitly so an upstream default
-# change cannot silently pull them back in.
-eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+# The shell. Pinned at >=2.12.1 because `macOSPrivateApi` is a no-op there (the
+# transparent-background API is always enabled), which this panel needs for its
+# rounded corners — see docs/tauri-shell-spike.md §1. The frontend is embedded at
+# compile time through `tauri::generate_context!`, so the staged binary stays a
+# single self-contained executable for the host supervisor.
+tauri = { version = ">=2.12.1, <3" }
 
 # Global hotkey. This is the only way to summon the panel while Harness itself is
-# not focused, so it cannot be a window-local key binding.
+# not focused, so it cannot be a window-local key binding. Kept as a plain crate
+# rather than the Tauri plugin: the grab is taken *before* the window exists so
+# `hello` can report the real outcome, and the plugin needs an AppHandle first.
 global-hotkey = "0.8"
-egui-phosphor = { version = "0.14", features = ["fill"] }
-egui_commonmark = { version = "0.25", default-features = false }
-# The parser `egui_commonmark` itself uses: it reports the byte range of every table, so
-# nothing here re-implements Markdown to find them.
-pulldown-cmark = { version = "0.13", default-features = false }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
 
 [profile.release]
 strip = true

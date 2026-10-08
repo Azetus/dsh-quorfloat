@@ -1,12 +1,12 @@
-//! The viewport: how big the panel is, and how it sits among other windows.
+//! The window: how big the panel is, and how it sits among other windows.
 //!
 //! Settings arrive from the environment at startup and can be overridden by the host's
-//! `ready` payload; everything here is the translation of those numbers into the
-//! viewport egui creates. Nothing in this file decides *whether* the panel is visible —
-//! that is state, and it lives in `app`.
-
-use eframe::egui;
-
+//! `ready` payload; everything here is the translation of those numbers into what the
+//! shell asks of the platform. Nothing in this file decides *whether* the panel is
+//! visible — that is state, and it lives in the shell's dispatcher (`main.rs`).
+//!
+//! This is the pure half of the old `ui::window`: the viewport builder left with egui,
+//! the configuration contract did not.
 
 /// Window geometry and appearance, from the host's effective configuration.
 #[derive(Debug, Clone, PartialEq)]
@@ -21,7 +21,7 @@ pub struct WindowSettings {
     /// user preference, not a per-app choice.
     pub reduce_motion: bool,
     /// Which of the design's two palettes to draw in.
-    pub theme: crate::ui::theme::Preference,
+    pub theme: crate::app::theme::Preference,
     /// Put the panel away when the user moves to another window.
     ///
     /// The design's own semantics: the panel is a thing you summon, use, and leave — and a
@@ -32,7 +32,7 @@ pub struct WindowSettings {
     ///
     /// Off by default and meant for development: it is the difference between "look at the
     /// panel" and "press the hotkey and then describe what you saw", which is what makes a
-    /// screenshot scriptable.
+    /// scriptable run possible.
     pub start_visible: bool,
 }
 
@@ -49,7 +49,7 @@ impl Default for WindowSettings {
             reduce_motion: false,
             // A panel that floats over other applications should look like it belongs to
             // the desktop it is floating over, so the platform decides until told otherwise.
-            theme: crate::ui::theme::Preference::System,
+            theme: crate::app::theme::Preference::System,
             hide_on_blur: true,
             start_visible: false,
         }
@@ -71,7 +71,7 @@ impl WindowSettings {
             width: float_env("DSH_QUORFLOAT_WINDOW_WIDTH", defaults.width),
             max_height: float_env("DSH_QUORFLOAT_WINDOW_MAX_HEIGHT", defaults.max_height),
             always_on_top: bool_env("DSH_QUORFLOAT_WINDOW_ALWAYS_ON_TOP", defaults.always_on_top),
-            theme: crate::ui::theme::Preference::from_env(),
+            theme: crate::app::theme::Preference::from_env(),
             hide_on_blur: bool_env("DSH_QUORFLOAT_WINDOW_HIDE_ON_BLUR", defaults.hide_on_blur),
             start_visible: bool_env("DSH_QUORFLOAT_WINDOW_START_VISIBLE", defaults.start_visible),
             reduce_motion: bool_env("DSH_QUORFLOAT_WINDOW_REDUCE_MOTION", defaults.reduce_motion),
@@ -95,7 +95,7 @@ impl WindowSettings {
             self.hide_on_blur = hide;
         }
         if let Some(theme) = window.get("theme").and_then(serde_json::Value::as_str) {
-            self.theme = crate::ui::theme::Preference::from_name(Some(theme));
+            self.theme = crate::app::theme::Preference::from_name(Some(theme));
         }
         if let Some(always) = window.get("alwaysOnTop").and_then(serde_json::Value::as_bool) {
             self.always_on_top = always;
@@ -130,61 +130,6 @@ impl WindowSettings {
             effective.hide_on_blur = !keep_open;
         }
         effective
-    }
-}
-
-/// Build the viewport the panel is shown in.
-///
-/// @param settings - geometry and appearance.
-/// @returns the builder to hand to `NativeOptions`.
-#[must_use]
-///
-/// @param settings - size and layering, from the environment and the host's `ready`.
-/// @param remembered - where the window was last time, if anywhere.
-pub fn viewport(settings: &WindowSettings, remembered: Option<(f32, f32)>) -> egui::ViewportBuilder {
-    let builder = egui::ViewportBuilder::default()
-        // Undecorated: this is a panel that appears over the user's work, not a
-        // document window competing for space in the window list.
-        .with_decorations(false)
-        // `always_on_top` is a level, not a flag: there is no "not on top"
-        // variant to pass, so the default level is simply left alone.
-        .with_window_level(if settings.always_on_top {
-            egui::WindowLevel::AlwaysOnTop
-        } else {
-            egui::WindowLevel::Normal
-        })
-        .with_resizable(false)
-        // The panel draws its own rounded corners and its own shadow, which is only possible
-        // if the window behind them is not painted: an opaque window would show its square
-        // corners around the rounded panel.
-        .with_transparent(true)
-        // And without the platform's own shadow. egui's own note on this is the recipe we
-        // are following: for an overlay-like window on macOS, transparency wants
-        // `has_shadow = false`, or the system's square-cornered shadow ghosts the panel we
-        // are drawing ourselves.
-        .with_has_shadow(false)
-        // Hidden unless the environment says otherwise. The hotkey is what reveals it, and
-        // starting visible would flash a panel on every launch — including every automatic
-        // restart. The exception exists for development, where "look at the panel" should not
-        // require a keystroke (`DSH_QUORFLOAT_WINDOW_START_VISIBLE`).
-        .with_visible(settings.start_visible)
-        // The window is the panel *plus* the room the panel's shadow needs, so that the
-        // configured width and height keep meaning "how big the panel is".
-        .with_inner_size([
-            settings.width + f32::from(crate::ui::theme::SHADOW_ROOM_SIDE) * 2.0,
-            settings.max_height
-                + f32::from(crate::ui::theme::SHADOW_ROOM_TOP)
-                + f32::from(crate::ui::theme::SHADOW_ROOM_BOTTOM),
-        ])
-        .with_min_inner_size([settings.width.min(320.0), 80.0])
-        .with_title("quorfloat");
-    // Where the user left it — or nowhere, which is a real difference rather than a
-    // default: `ViewportBuilder` has to be *told* a position to place the window, so a
-    // panel that always opened at the origin would be one the user moves every launch.
-    // Unset means the platform chooses, which is what a first run should look like.
-    match remembered {
-        Some((x, y)) => builder.with_position(egui::Pos2::new(x, y)),
-        None => builder,
     }
 }
 
@@ -245,59 +190,5 @@ mod tests {
         assert_eq!(settings.max_height, 560.0, "the missing field kept its default");
         settings.apply_host(None);
         assert_eq!(settings.width, 500.0, "an absent payload changes nothing");
-    }
-
-    #[test]
-    fn the_viewport_starts_hidden_and_undecorated() {
-        // Both are load-bearing: visible would flash a panel on every launch and
-        // every automatic restart, and decorations would make it a document window
-        // that takes a slot in the window list and the taskbar.
-        let settings = WindowSettings::default();
-        let viewport = viewport(&settings, None);
-        assert_eq!(viewport.visible, Some(false));
-        assert_eq!(viewport.decorations, Some(false));
-        assert_eq!(viewport.window_level, Some(egui::WindowLevel::AlwaysOnTop));
-        assert_eq!(viewport.resizable, Some(false));
-    }
-
-    #[test]
-    fn the_window_is_the_panel_plus_the_room_its_shadow_needs() {
-        // The panel has rounded corners and a shadow of its own, which needs a transparent
-        // window and a margin to draw them in — so the window is bigger than the panel, and
-        // the configured numbers keep meaning "how big the panel is".
-        let settings = WindowSettings::default();
-        let viewport = viewport(&settings, None);
-        assert_eq!(viewport.transparent, Some(true), "the panel draws its own corners");
-        let expected = [
-            settings.width + f32::from(crate::ui::theme::SHADOW_ROOM_SIDE) * 2.0,
-            settings.max_height
-                + f32::from(crate::ui::theme::SHADOW_ROOM_TOP)
-                + f32::from(crate::ui::theme::SHADOW_ROOM_BOTTOM),
-        ];
-        assert_eq!(viewport.inner_size, Some(expected.into()));
-    }
-
-    #[test]
-    fn a_remembered_position_is_where_the_window_opens() {
-        let settings = WindowSettings::default();
-        assert_eq!(
-            viewport(&settings, Some((120.0, 64.0))).position,
-            Some(egui::Pos2::new(120.0, 64.0)),
-        );
-    }
-
-    #[test]
-    fn with_nothing_remembered_the_platform_chooses_where_to_open() {
-        // Not the origin: a panel that always appears in the top-left corner is a panel the
-        // user has to move every single time.
-        assert_eq!(viewport(&WindowSettings::default(), None).position, None);
-    }
-
-    #[test]
-    fn turning_always_on_top_off_selects_the_normal_level() {
-        // There is no "off" flag to clear, so the configured value has to pick the
-        // level — otherwise the setting would look accepted and do nothing.
-        let settings = WindowSettings { always_on_top: false, ..WindowSettings::default() };
-        assert_eq!(viewport(&settings, None).window_level, Some(egui::WindowLevel::Normal));
     }
 }

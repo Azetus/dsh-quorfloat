@@ -22,3 +22,6 @@ rust-analyzer.json
 # 字体与其许可证都由 `npm run fonts` 抓取（见 `scripts/fetch-font.mjs`）：
 # 打包时整个目录被复制进平台包，许可证因此与它覆盖的资产同行，不会被分开遗忘。
 assets/fonts/*
+
+# tauri-build 生成的 schema
+/gen/

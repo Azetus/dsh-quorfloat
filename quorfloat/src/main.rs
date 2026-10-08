@@ -1,8 +1,8 @@
-//! Entry point: handshake first, then hand the process to the window.
+//! Entry point: handshake first, then hand the process to the Tauri shell.
 //!
 //! The order is not cosmetic. The host's startup budget starts when the process
 //! does and it escalates on expiry, so the `hello` frame is written **before** any
-//! window, font, or GPU work begins. A peer that initialised its window first
+//! window, webview, font, or GPU work begins. A peer that initialised its window first
 //! would be killed mid-handshake on a slow machine, and the failure would look
 //! like a broken binary rather than a slow one.
 //!
@@ -10,20 +10,47 @@
 //! diagnostics go through the shared sink's `log`, which writes to stderr —
 //! including the panic hook installed below, because a panic message on stdout
 //! would corrupt the stream on the way out.
+//!
+//! The shape of the shell mirrors the old egui loop, one thread per duty:
+//!
+//! - **reader** — owns stdin and answers frames. It needs no window to be visible,
+//!   which is why the host keeps receiving answers while the panel is hidden.
+//! - **dispatcher** — the only thread that touches the native window: it applies the
+//!   host's `window/visibility` commands, toggles on the hotkey, reports visibility
+//!   back, and ends the process when the session does.
+//! - **clock** — asks the follow layer to keep its conversation current, once per
+//!   interval, so a hidden panel still notices the conversation started next to it.
+//! - **hotkey watcher** — blocks on the global hotkey channel and wakes the
+//!   dispatcher.
+//!
+//! The frontend (`frontend/`) receives a nudge event after every answered frame and
+//! re-renders from the session state; the bridge that carries real state is M3.
 
 use std::process::ExitCode;
-use std::sync::mpsc::channel;
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{channel, Receiver};
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use dsh_quorfloat::app::sink::{Reader, SharedSink};
-use dsh_quorfloat::app::{self, App};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+
+use dsh_quorfloat::app::geometry::WindowState;
+use dsh_quorfloat::app::session::{FrameSink, HotkeyReport, Identity, Session, SessionExit, WindowCommand};
+use dsh_quorfloat::app::sink::{Reader, SharedSink, Wake};
+use dsh_quorfloat::app::window_settings::WindowSettings;
+use dsh_quorfloat::ipc::rpc;
+use dsh_quorfloat::ipc::transport::StdioSink;
 use dsh_quorfloat::runtime::diag::marker::Marker;
-use dsh_quorfloat::app::session::{FrameSink, HotkeyReport, Identity, Session, SessionExit};
-use dsh_quorfloat::ipc::transport::{StdinSource, StdioSink};
 use dsh_quorfloat::runtime::hotkey::{self, Hotkey};
-use dsh_quorfloat::ui::window::{self, WindowSettings};
 use dsh_quorfloat::VERSION;
-use eframe::egui;
+
+/// How often the follow layer re-checks which conversation the panel is attached to.
+///
+/// The reader thread answers frames; this thread is what makes the *questions* keep
+/// flowing while the window is hidden, so a panel sitting idle still discovers the
+/// conversation that was just started next to it.
+const CLOCK_INTERVAL_MS: u64 = 1000;
+
+/// Height of the placeholder window until the frontend reports content heights (M3).
+const PLACEHOLDER_HEIGHT: f64 = 400.0;
 
 fn main() -> ExitCode {
     install_panic_hook();
@@ -50,9 +77,9 @@ fn install_panic_hook() {
 /// @returns why the session ended, or a message describing a startup failure.
 fn run() -> Result<SessionExit, String> {
     let settings = WindowSettings::from_env();
-    // Read before the window exists: the viewport is created with this, and the app keeps
-    // the same value so that what it writes back is what the window was opened with.
-    let window_state = dsh_quorfloat::ui::WindowState::load();
+    // Read before the window exists: the shell restores the position from this, and
+    // the same value is what it writes back at the end of the session.
+    let window_state = Arc::new(Mutex::new(WindowState::load()));
     // Registered before the window exists: a taken accelerator is a normal outcome
     // and must be known before `hello` reports it, so the host shows the real state
     // rather than a key that silently does nothing.
@@ -63,7 +90,7 @@ fn run() -> Result<SessionExit, String> {
     marker.write("start");
     // Where the panel opens, on the record: "the window came back somewhere odd" is a
     // question about this line and the file behind it.
-    marker.write(&match window_state.position() {
+    marker.write(&match lock(&window_state).position() {
         Some((x, y)) => format!("window restored at {x:.0},{y:.0}"),
         None => "window position not remembered".to_owned(),
     });
@@ -81,20 +108,14 @@ fn run() -> Result<SessionExit, String> {
             registered: hotkey.is_active(),
         },
     })));
-    // A capture is a development switch, not a product feature: it writes conversation
-    // text to disk, so nothing sets it for a user. Installed here rather than read
-    // inside `Session::new`, which keeps the constructor free of the environment.
-    if let Ok(mut session) = session.lock() {
-        session.set_dump(dsh_quorfloat::runtime::diag::dump::Dump::from_env());
-    }
 
     // Shared with the sink, so a breadcrumb written from inside the session (an
     // approval arriving, an answer being applied) lands in the same file as the
     // lifecycle lines written here. One file, one ordering, one story.
     let sink = Arc::new(SharedSink::new(Box::new(StdioSink::new(marker.clone()))));
 
-    // The handshake, before eframe starts and therefore before any window, font, or
-    // GPU initialisation can delay it.
+    // The handshake, before the Tauri app exists and therefore before any window,
+    // webview, font, or GPU initialisation can delay it.
     {
         let mut session = lock(&session);
         session.start(&mut Borrowed(&sink));
@@ -110,114 +131,285 @@ fn run() -> Result<SessionExit, String> {
     // happened, so it is recorded rather than inferred afterwards.
     let outcome: Arc<Mutex<Option<SessionExit>>> = Arc::new(Mutex::new(None));
 
-    // Where the reader thread and the window both look for the render context.
-    // The reader needs it to wake a hidden window; the window fills it in on its
-    // first pass. A wake delivered before that is still queued on the channel.
-    let egui_slot: Arc<Mutex<Option<egui::Context>>> = Arc::new(Mutex::new(None));
+    let shell_session = Arc::clone(&session);
+    let shell_sink = Arc::clone(&sink);
+    let shell_outcome = Arc::clone(&outcome);
+    let shell_marker = marker.clone();
+    let shell_state = Arc::clone(&window_state);
+    let shell_hotkey_wake = hotkey_wake.clone();
 
-    let reader = Reader::new(
-        Arc::clone(&session),
-        Arc::clone(&sink),
-        wake_tx,
-        Arc::clone(&outcome),
-        Arc::clone(&egui_slot),
-    );
-    std::thread::Builder::new()
-        .name("quorfloat-stdin".to_owned())
-        .spawn(move || reader.run())
-        .map_err(|error| format!("could not start the stdin reader: {error}"))?;
+    let app = tauri::Builder::default()
+        .setup(move |app| {
+            // A panel that floats over other applications is an accessory, not an
+            // application: it must not take the Dock slot or the activation that a
+            // document window would.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-    // The hotkey is watched on its own thread rather than polled in the render
-    // callback: eframe repaints on demand, so an idle hidden panel performs no pass
-    // and a poll would never run. See `window::watch_hotkey`.
-    if hotkey.is_active() {
-        hotkey::watch_hotkey(hotkey_wake, Arc::clone(&egui_slot), Arc::clone(&sink));
-    }
+            let handle = app.handle().clone();
+            // The reader thread answers frames while the panel is hidden; the frontend
+            // must know the state changed so it re-renders from the session.
+            let nudge: Arc<dyn Fn() + Send + Sync> = {
+                let handle = handle.clone();
+                Arc::new(move || {
+                    let _ = handle.emit("quorfloat/nudge", ());
+                })
+            };
 
-    // The same argument, for the other kind of idle work: the panel has to notice a
-    // conversation started next to it while it is hidden, and a hidden panel performs
-    // no pass of its own accord. This only wakes the loop; what is due is decided by
-    // the follow layer.
-    if let Err(error) = app::watch_clock(
-        std::time::Duration::from_millis(app::CLOCK_INTERVAL_MS),
-        Arc::clone(&egui_slot),
-        Arc::clone(&outcome),
-    ) {
-        sink.log(&format!("could not start the clock thread; the panel may miss new conversations: {error}"));
-    }
+            // The grab must outlive this closure: dropping the manager would release
+            // the accelerator. Leaking it is deliberate — the registration is
+            // process-lifetime by design, and the OS reclaims it on exit.
+            let _held_hotkey: &'static mut Hotkey = Box::leak(Box::new(hotkey));
 
-    let options = eframe::NativeOptions {
-        viewport: window::viewport(&settings, window_state.position()),
-        ..Default::default()
-    };
-    let app_session = Arc::clone(&session);
-    let app_sink = Arc::clone(&sink);
-    let app_outcome = Arc::clone(&outcome);
-    let app_slot = Arc::clone(&egui_slot);
-
-    eframe::run_native(
-        "quorfloat",
-        options,
-        Box::new(move |cc| {
-            // Publish the context before the first pass so the reader thread can
-            // wake the loop from the moment the window exists.
-            if let Ok(mut slot) = app_slot.lock() {
-                *slot = Some(cc.egui_ctx.clone());
-            }
-            // The remembered pin decides which conversation the first discovery answer
-            // attaches, so it is adopted before the session is handed over — not after the
-            // window appears, by which time the wrong conversation is already on screen.
-            {
-                let remembered = dsh_quorfloat::app::pinned::Pinned::load(
-                    dsh_quorfloat::app::pinned::path_from_env()
-                        .as_deref()
-                        .unwrap_or(std::path::Path::new("")),
-                );
-                if !remembered.is_empty() {
-                    let mut session = lock(&app_session);
-                    session.adopt_pinned(remembered.session.clone());
-                    app_sink.mark(&format!(
-                        "pinned conversation {}",
-                        remembered.session.as_deref().unwrap_or("none"),
-                    ));
+            let window = app.get_webview_window("main").expect("the main window is configured");
+            // Where the user left it — or nowhere, which is a real difference rather than
+            // a default: a panel that always opened at the origin would be one the user
+            // moves every launch.
+            if let Some((x, y)) = lock(&shell_state).position() {
+                if let Err(error) = window.set_position(tauri::Position::Physical(
+                    tauri::PhysicalPosition::new(x as i32, y as i32),
+                )) {
+                    shell_sink.log(&format!("could not restore the window position: {error}"));
                 }
             }
-            let mut app = App::new(
-                app_session,
-                app_sink,
-                hotkey,
-                settings,
-                wake_rx,
-                app_outcome,
-                hotkey_active,
-                window_state,
-                dsh_quorfloat::app::preferences::path_from_env(),
-            );
-            // Reaching this point *is* the measurement: eframe calls the creator
-            // only after the viewport exists, so `window` stops being a claim here.
-            // If creation fails, `run_native` returns an error and this is never
-            // reached — the host hears nothing rather than hearing a promise.
-            app.note_window_created();
-            // Before the first frame: a font set installed later would lay text out
-            // once with the old one and rebuild the atlas to correct it.
-            let fonts = dsh_quorfloat::ui::fonts::install(&cc.egui_ctx);
-            app.note_fonts(fonts);
-            Ok(Box::new(EguiApp { inner: app, context: cc.egui_ctx.clone() }))
-        }),
-    )
-    .map_err(|error| format!("could not start the window: {error}"))?;
+            if let Err(error) = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+                f64::from(shell_settings_width(&shell_session, &settings)),
+                PLACEHOLDER_HEIGHT,
+            ))) {
+                shell_sink.log(&format!("could not set the window size: {error}"));
+            }
+            if !settings.always_on_top {
+                let _ = window.set_always_on_top(false);
+            }
 
-    finish(&session, &outcome, &marker, &sink)
+            let reader = Reader::new(
+                Arc::clone(&shell_session),
+                Arc::clone(&shell_sink),
+                wake_tx.clone(),
+                Arc::clone(&shell_outcome),
+                nudge.clone(),
+            );
+            std::thread::Builder::new()
+                .name("quorfloat-stdin".to_owned())
+                .spawn(move || reader.run())
+                .map_err(|error| format!("could not start the stdin reader: {error}"))?;
+
+            spawn_dispatcher(
+                wake_rx,
+                Arc::clone(&shell_session),
+                Arc::clone(&shell_sink),
+                shell_marker,
+                handle,
+                settings.start_visible,
+                hotkey_active,
+                Arc::clone(&shell_state),
+            )
+            .map_err(|error| format!("could not start the window dispatcher: {error}"))?;
+
+            // The hotkey is watched on its own thread rather than polled: the watcher
+            // blocks until the user presses the key, then wakes the dispatcher.
+            if hotkey_active {
+                hotkey::watch_hotkey(shell_hotkey_wake, nudge.clone(), Arc::clone(&shell_sink));
+            }
+
+            spawn_clock(
+                Arc::clone(&shell_session),
+                Arc::clone(&shell_sink),
+                Arc::clone(&shell_outcome),
+                nudge,
+            )
+            .map_err(|error| format!("could not start the clock thread: {error}"))?;
+
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .map_err(|error| format!("could not build the shell: {error}"))?;
+
+    app.run(|_, _| {});
+    // The dispatcher exits the process with `AppHandle::exit` once the session ends;
+    // reaching here means the event loop stopped without a recorded exit.
+    let recorded = lock(&outcome).clone().unwrap_or(SessionExit::PeerClosed);
+    Ok(recorded)
 }
 
-/// Record the outcome and report why the session ended.
-fn finish(
+/// The width the window should open at: the environment's number, which the
+/// placeholder frontend does not override yet.
+///
+/// Kept as a tiny function rather than a field so the session is not consulted for
+/// what is, for now, a startup constant.
+///
+/// @param session - the session (unused until `ready`-driven resizing arrives in M3).
+/// @param settings - the environment's effective window configuration.
+/// @returns the width in logical pixels.
+fn shell_settings_width(session: &Arc<Mutex<Session>>, settings: &WindowSettings) -> f64 {
+    let _ = session;
+    f64::from(settings.width)
+}
+
+/// Applies window commands and the hotkey to the native window, reports visibility
+/// changes, and ends the process when the session does.
+///
+/// The one thread that touches the window: nothing else may show or hide it, so the
+/// reported visibility and the real one cannot drift apart.
+#[allow(clippy::too_many_arguments)]
+fn spawn_dispatcher(
+    wake: Receiver<Wake>,
+    session: Arc<Mutex<Session>>,
+    sink: Arc<SharedSink>,
+    marker: Marker,
+    handle: AppHandle,
+    start_visible: bool,
+    hotkey_active: bool,
+    window_state: Arc<Mutex<WindowState>>,
+) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("quorfloat-window".to_owned())
+        .spawn(move || {
+            let Some(window) = handle.get_webview_window("main") else {
+                sink.log("the main window does not exist; the panel cannot appear");
+                return;
+            };
+            // Measured capabilities: the shell is a fact of the binary, the hotkey
+            // was measured before the handshake, and the window is real by the time
+            // this thread runs. Nothing here is a claim.
+            let capabilities: Vec<&'static str> = if hotkey_active {
+                vec!["tauri", "hotkey", "window"]
+            } else {
+                vec!["tauri", "window"]
+            };
+            let mut visible = start_visible;
+            if start_visible {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+            // The first report is the measurement the host waits for: until it
+            // arrives, the host does not know whether a panel can appear at all.
+            report_visibility(&session, &sink, visible, &capabilities);
+
+            loop {
+                let wake = match wake.recv() {
+                    Ok(wake) => wake,
+                    Err(_) => {
+                        sink.log("the wake channel closed; exiting");
+                        record_end(&session, &sink, &marker, &SessionExit::PeerClosed);
+                        handle.exit(0);
+                        return;
+                    }
+                };
+                match wake {
+                    Wake::Frames => {
+                        let commands = {
+                            let mut session = lock(&session);
+                            session.take_window_commands()
+                        };
+                        let mut changed = false;
+                        for command in commands {
+                            changed = true;
+                            apply_window_command(&window, command, &mut visible);
+                        }
+                        if changed {
+                            report_visibility(&session, &sink, visible, &capabilities);
+                        }
+                    }
+                    Wake::Hotkey => {
+                        apply_window_command(&window, WindowCommand::Toggle, &mut visible);
+                        report_visibility(&session, &sink, visible, &capabilities);
+                    }
+                    Wake::Exit(exit) => {
+                        // Remember where the panel was — a drag that ends inside the
+                        // settle window is as real as any other move — then leave.
+                        if let Ok(position) = window.outer_position() {
+                            let now = rpc::now_millis();
+                            let mut state = lock(&window_state);
+                            state.observe((position.x as f32, position.y as f32), now);
+                            state.flush(now);
+                        }
+                        record_end(&session, &sink, &marker, &exit);
+                        handle.exit(0);
+                        return;
+                    }
+                }
+            }
+        })
+        .map(|_| ())
+}
+
+/// Apply one parsed command to the native window.
+///
+/// @param window - the panel's window.
+/// @param command - what the host or the hotkey asked for.
+/// @param visible - the dispatcher's record of the current state.
+fn apply_window_command(window: &WebviewWindow, command: WindowCommand, visible: &mut bool) {
+    match command {
+        WindowCommand::Show => {
+            let _ = window.show();
+            let _ = window.set_focus();
+            *visible = true;
+        }
+        WindowCommand::Hide => {
+            let _ = window.hide();
+            *visible = false;
+        }
+        WindowCommand::Toggle => {
+            *visible = !*visible;
+            if *visible {
+                let _ = window.show();
+                let _ = window.set_focus();
+            } else {
+                let _ = window.hide();
+            }
+        }
+    }
+}
+
+/// Wake the follow layer once per interval.
+///
+/// @param session - the session to pump.
+/// @param sink - where the follow requests go.
+/// @param outcome - set when the session ends; the thread stops seeing it.
+/// @param nudge - how to tell the frontend the state changed.
+fn spawn_clock(
+    session: Arc<Mutex<Session>>,
+    sink: Arc<SharedSink>,
+    outcome: Arc<Mutex<Option<SessionExit>>>,
+    nudge: Arc<dyn Fn() + Send + Sync>,
+) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name("quorfloat-clock".to_owned())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(CLOCK_INTERVAL_MS));
+            if lock(&outcome).is_some() {
+                return;
+            }
+            {
+                let mut session = lock(&session);
+                sink.with(|sink| session.pump_follow(sink));
+            }
+            nudge();
+        })
+        .map(|_| ())
+}
+
+/// Report the panel's measured visibility and capabilities to the host.
+fn report_visibility(
     session: &Arc<Mutex<Session>>,
-    outcome: &Arc<Mutex<Option<SessionExit>>>,
+    sink: &Arc<SharedSink>,
+    visible: bool,
+    capabilities: &[&str],
+) {
+    let session = lock(session);
+    session.report_visibility(visible, capabilities, &mut Borrowed(sink));
+}
+
+/// The same facts the old shell wrote when it finished: why the session ended, and
+/// whether the handshake completed. Written by the dispatcher before it exits the
+/// process, because `AppHandle::exit` does not come back.
+fn record_end(
+    session: &Arc<Mutex<Session>>,
+    sink: &Arc<SharedSink>,
     marker: &Marker,
-    sink: &SharedSink,
-) -> Result<SessionExit, String> {
-    let exit = lock(outcome).clone().unwrap_or(SessionExit::PeerClosed);
+    exit: &SessionExit,
+) {
     {
         let session = lock(session);
         if session.is_ready() {
@@ -233,45 +425,6 @@ fn finish(
     }
     sink.log(&format!("session ended: {exit:?}"));
     marker.write(&format!("end {exit:?}"));
-    Ok(exit)
-}
-
-/// Adapts [`App`] to eframe's trait, which needs the context handed back in.
-struct EguiApp {
-    inner: App,
-    context: egui::Context,
-}
-
-impl eframe::App for EguiApp {
-    /// Runs on every pass, **including while the window is hidden**: eframe calls
-    /// this through `run_logic` when there is nothing to draw. That is why every
-    /// host-facing duty lives here — the panel spends most of its life hidden, and
-    /// a hidden panel that stopped pumping would stop answering `ping` and be
-    /// declared dead while sitting idle.
-    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.context = ctx.clone();
-        self.inner.set_context(ctx.clone());
-        self.inner.logic();
-        // Closing from here keeps the command inside an egui pass, which is the
-        // only place a viewport command takes effect.
-        self.inner.close_if_finished();
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.inner.present(ui);
-    }
-
-    /// Clear to nothing, because there is nothing behind the panel to clear to.
-    ///
-    /// eframe's default is `rgba(12, 12, 12, 180)` — a near-black that is *almost*
-    /// transparent, chosen so that turning on transparency gives "immediate results". Those
-    /// results were a dark, square-cornered rectangle covering the whole window: the panel's
-    /// rounded corners and its own shadow sat inside it, which reads as a black shadow and
-    /// two square bottom corners. A window that is only ever a rounded panel has to clear to
-    /// zero, so that the desktop shows through everywhere the panel is not.
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0]
-    }
 }
 
 /// The accelerator to register, from the host's spawn environment.
@@ -305,7 +458,7 @@ fn hotkey_to_attempt() -> String {
 ///
 /// @param mutex - the mutex to lock.
 /// @returns the guard.
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -323,11 +476,4 @@ impl FrameSink for Borrowed<'_> {
     fn log(&mut self, line: &str) {
         self.0.log(line);
     }
-}
-
-/// Keeps [`StdinSource`] referenced so its frame counters stay part of the crate's
-/// public surface for the tests that assert on malformed input.
-#[allow(dead_code)]
-fn _source_is_used() -> Option<StdinSource> {
-    None
 }

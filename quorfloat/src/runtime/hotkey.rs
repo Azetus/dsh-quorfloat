@@ -11,7 +11,6 @@
 //! key they did not ask for, and a hotkey that steals a combination it was not given is
 //! worse than one that refuses to start.
 
-use eframe::egui;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
@@ -284,23 +283,21 @@ pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 
 /// Watch the global hotkey on its own thread.
 ///
-/// Polling is not an option here, and this is the subtlest part of the window
-/// layer. eframe repaints **on demand** — its own task module says it "only
-/// repaints when there are events or `request_repaint` is called" — so an idle
-/// panel performs no pass at all, and a `try_recv` inside the render callback
-/// would never run while the user is doing nothing. The hotkey would then appear
-/// to do nothing at all, which is exactly what it did before this existed.
+/// Polling is not an option here: the event loop is busy with the window, and a
+/// `try_recv` buried in a per-frame path would run only while something else asks
+/// for frames. The hotkey would then appear to do nothing at all, which is exactly
+/// what it did before this existed.
 ///
 /// Blocking on the hotkey channel from a dedicated thread fixes the direction of
 /// the wait: the thread sleeps until the user presses the key, then wakes the
-/// render loop. `request_repaint` is safe to call from any thread.
+/// shell's dispatcher and nudges the frontend.
 ///
-/// @param wake - the app's wake channel.
-/// @param egui - the render context slot, filled once the window exists.
+/// @param wake - the shell's wake channel.
+/// @param nudge - how to tell the frontend the state changed.
 /// @param log - where to report a watcher that ends unexpectedly.
 pub fn watch_hotkey(
     wake: std::sync::mpsc::Sender<crate::app::sink::Wake>,
-    egui: std::sync::Arc<std::sync::Mutex<Option<egui::Context>>>,
+    nudge: std::sync::Arc<dyn Fn() + Send + Sync>,
     log: std::sync::Arc<crate::app::sink::SharedSink>,
 ) {
     let _ = std::thread::Builder::new()
@@ -308,8 +305,8 @@ pub fn watch_hotkey(
         .spawn(move || {
             let receiver = GlobalHotKeyEvent::receiver();
             loop {
-                // `recv` blocks until the next event; a send error means egui has
-                // shut down and there is nothing left to wake.
+                // `recv` blocks until the next event; a send error means the shell
+                // has shut down and there is nothing left to wake.
                 let Ok(event) = receiver.recv() else {
                     log.log("hotkey watcher stopped: the event channel closed");
                     return;
@@ -322,161 +319,9 @@ pub fn watch_hotkey(
                 if wake.send(crate::app::sink::Wake::Hotkey).is_err() {
                     return;
                 }
-                let context = match egui.lock() {
-                    Ok(slot) => slot.clone(),
-                    Err(poisoned) => poisoned.into_inner().clone(),
-                };
-                if let Some(ctx) = context {
-                    ctx.request_repaint();
-                }
+                nudge();
             }
         });
-}
-
-/// The accelerator a key press stands for, in the host's spelling.
-///
-/// **The reverse of [`parse_accelerator`], and the half that makes a shortcut recorder possible.**
-/// egui reports every key press with the modifiers held at that moment — including the function keys
-/// and the punctuation keys — so "press the combination you want" needs nothing from the platform
-/// layer. What it needs is this: a mapping from a key and its modifiers to the same string the host
-/// writes in its configuration and [`parse_accelerator`] reads back.
-///
-/// The names are chosen to round-trip: `parse_accelerator(accelerator_from_press(k, m))` must give the
-/// same key back, which `a_recorded_chord_is_the_accelerator_the_parser_reads` checks for every key in
-/// the table below.
-///
-/// Modifier keys pressed **alone** are their own accelerator (`Ctrl+Shift` is a legal global hotkey),
-/// so they are not filtered out here — but a recorder is free to wait for a non-modifier key instead,
-/// which `ui::settings` chooses to do because a chord is what a user means by "a shortcut".
-///
-/// @param key - the key egui reported.
-/// @param modifiers - the modifiers held when it was pressed.
-/// @returns the accelerator, or `None` for a key that cannot be one.
-#[must_use]
-pub fn accelerator_from_press(key: egui::Key, modifiers: egui::Modifiers) -> Option<String> {
-    let name = key_name(key)?;
-    let mut parts: Vec<&str> = Vec::new();
-    // A fixed order, so two spellings of one chord cannot exist. It is also the order the host's own
-    // configuration uses, which is what makes a recorded accelerator read like a written one.
-    if modifiers.ctrl || modifiers.command {
-        // The primary modifier: `Cmd` on macOS, `Ctrl` elsewhere. **They are different modifiers, not
-        // two spellings of one** — on macOS `Ctrl` and `Cmd` are separate keys, and the parser maps
-        // them to `CONTROL` and `SUPER`. So a chord recorded as `Cmd+K` is not the same chord as one
-        // written `Ctrl+K`, and the recorder must not pretend otherwise.
-        parts.push(if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" });
-    }
-    if modifiers.alt {
-        parts.push("Alt");
-    }
-    if modifiers.shift {
-        parts.push("Shift");
-    }
-    // On macOS `command` is the primary modifier and is already spent above; on other platforms a
-    // real Super/Meta key is a modifier of its own.
-    if !cfg!(target_os = "macos") && modifiers.mac_cmd {
-        parts.push("Super");
-    }
-    parts.push(name);
-    Some(parts.join("+"))
-}
-
-/// The name [`parse_accelerator`] knows for one key.
-///
-/// @param key - the key egui reported.
-/// @returns the name, or `None` for a key that is not an accelerator.
-#[must_use]
-pub fn key_name(key: egui::Key) -> Option<&'static str> {
-    use egui::Key as K;
-    Some(match key {
-        K::Space => "Space",
-        K::Enter => "Enter",
-        K::Tab => "Tab",
-        K::Backspace => "Backspace",
-        K::Delete => "Delete",
-        K::Insert => "Insert",
-        K::Home => "Home",
-        K::End => "End",
-        K::PageUp => "PageUp",
-        K::PageDown => "PageDown",
-        K::ArrowUp => "Up",
-        K::ArrowDown => "Down",
-        K::ArrowLeft => "Left",
-        K::ArrowRight => "Right",
-        K::Backtick => "`",
-        K::Minus => "-",
-        K::Equals => "=",
-        K::OpenBracket => "[",
-        K::CloseBracket => "]",
-        K::Backslash => "\\",
-        K::Semicolon => ";",
-        K::Quote => "'",
-        K::Comma => ",",
-        K::Period => ".",
-        K::Slash => "/",
-        K::A => "A",
-        K::B => "B",
-        K::C => "C",
-        K::D => "D",
-        K::E => "E",
-        K::F => "F",
-        K::G => "G",
-        K::H => "H",
-        K::I => "I",
-        K::J => "J",
-        K::K => "K",
-        K::L => "L",
-        K::M => "M",
-        K::N => "N",
-        K::O => "O",
-        K::P => "P",
-        K::Q => "Q",
-        K::R => "R",
-        K::S => "S",
-        K::T => "T",
-        K::U => "U",
-        K::V => "V",
-        K::W => "W",
-        K::X => "X",
-        K::Y => "Y",
-        K::Z => "Z",
-        K::Num0 => "0",
-        K::Num1 => "1",
-        K::Num2 => "2",
-        K::Num3 => "3",
-        K::Num4 => "4",
-        K::Num5 => "5",
-        K::Num6 => "6",
-        K::Num7 => "7",
-        K::Num8 => "8",
-        K::Num9 => "9",
-        K::F1 => "F1",
-        K::F2 => "F2",
-        K::F3 => "F3",
-        K::F4 => "F4",
-        K::F5 => "F5",
-        K::F6 => "F6",
-        K::F7 => "F7",
-        K::F8 => "F8",
-        K::F9 => "F9",
-        K::F10 => "F10",
-        K::F11 => "F11",
-        K::F12 => "F12",
-        K::F13 => "F13",
-        K::F14 => "F14",
-        K::F15 => "F15",
-        K::F16 => "F16",
-        K::F17 => "F17",
-        K::F18 => "F18",
-        K::F19 => "F19",
-        K::F20 => "F20",
-        K::F21 => "F21",
-        K::F22 => "F22",
-        K::F23 => "F23",
-        K::F24 => "F24",
-        // Deliberately absent: `Escape` is how a recorder is cancelled, and the command keys
-        // (`Copy`/`Cut`/`Paste`) are not keys anybody can hold down as a shortcut.
-        _ => return None,
-    })
 }
 
 /// Parse an accelerator in the host's spelling.
@@ -678,78 +523,6 @@ mod tests {
         // Not the stale reason: the user has moved on from it, and an explanation of a previous
         // failure sitting under a working shortcut is worse than none.
         assert_eq!(rebound.reason(), None);
-    }
-
-    #[test]
-    fn every_supported_key_has_a_name_the_parser_reads_back() {
-        // **The property that makes a shortcut recorder work.** Recording produces a string from a
-        // key press; registration parses that string back into a key code. If the two tables disagree
-        // by so much as a spelling, the panel would accept a chord the user pressed and then fail to
-        // register it — the worst kind of failure, because the input looked fine.
-        //
-        // Every key the mapping claims to support is listed here, so a key added to the table without
-        // a passing round trip fails this test rather than shipping.
-        use egui::Key as K;
-        let keys = [
-            K::Space, K::Enter, K::Tab, K::Backspace, K::Delete, K::Insert, K::Home, K::End,
-            K::PageUp, K::PageDown, K::ArrowUp, K::ArrowDown, K::ArrowLeft, K::ArrowRight,
-            K::Backtick, K::Minus, K::Equals, K::OpenBracket, K::CloseBracket, K::Backslash,
-            K::Semicolon, K::Quote, K::Comma, K::Period, K::Slash,
-            K::A, K::B, K::C, K::D, K::E, K::F, K::G, K::H, K::I, K::J, K::K, K::L, K::M,
-            K::N, K::O, K::P, K::Q, K::R, K::S, K::T, K::U, K::V, K::W, K::X, K::Y, K::Z,
-            K::Num0, K::Num1, K::Num2, K::Num3, K::Num4, K::Num5, K::Num6, K::Num7, K::Num8,
-            K::Num9,
-            K::F1, K::F2, K::F3, K::F4, K::F5, K::F6, K::F7, K::F8, K::F9, K::F10, K::F11,
-            K::F12, K::F13, K::F14, K::F15, K::F16, K::F17, K::F18, K::F19, K::F20, K::F21,
-            K::F22, K::F23, K::F24,
-        ];
-        let bare = egui::Modifiers::NONE;
-        for key in keys {
-            let accelerator = accelerator_from_press(key, bare)
-                .unwrap_or_else(|| panic!("{key:?} has no accelerator"));
-            assert!(
-                parse_accelerator(&accelerator).is_some(),
-                "{key:?} recorded as {accelerator:?}, which this build cannot register",
-            );
-        }
-
-        // The keys that are deliberately not accelerators, each for a reason.
-        for key in [K::Escape, K::Copy, K::Cut, K::Paste] {
-            assert_eq!(key_name(key), None, "{key:?} must not be recordable");
-        }
-    }
-
-    #[test]
-    fn a_recorded_chord_is_spelled_the_way_the_host_writes_it() {
-        let all = egui::Modifiers {
-            alt: true,
-            ctrl: true,
-            shift: true,
-            mac_cmd: false,
-            command: false,
-        };
-        // One fixed order, so one chord has one spelling: primary, then Alt, then Shift.
-        let spelled = accelerator_from_press(egui::Key::K, all).expect("K is recordable");
-        let expected = if cfg!(target_os = "macos") { "Cmd+Alt+Shift+K" } else { "Ctrl+Alt+Shift+K" };
-        assert_eq!(spelled, expected);
-        assert!(parse_accelerator(&spelled).is_some(), "and the parser reads it");
-
-        // The parser is order-independent on the way back in, so a hand-written chord and a recorded
-        // one mean the same thing when they name the same keys. (The spelling the *recorder* emits is
-        // fixed, so one chord cannot have two recorded forms; this is about what it will accept.)
-        let written = if cfg!(target_os = "macos") {
-            "Shift+Alt+Cmd+K"
-        } else {
-            "Shift+Alt+Ctrl+K"
-        };
-        assert_eq!(parse_accelerator(written), parse_accelerator(&spelled));
-
-        // A modifier on its own is its own accelerator: `Ctrl+Shift` really is a global hotkey.
-        let modifiers_only = egui::Modifiers { shift: true, alt: true, ..egui::Modifiers::NONE };
-        assert_eq!(
-            accelerator_from_press(egui::Key::F13, modifiers_only).as_deref(),
-            Some("Alt+Shift+F13"),
-        );
     }
 
     #[test]
