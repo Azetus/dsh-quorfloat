@@ -3019,6 +3019,73 @@ mod tests {
         assert!(!after.is_empty(), "and it still draws with a frame it cannot interpret");
     }
 
+    /// The scroll bar gets a gutter of its own, so it cannot lie on the text.
+    ///
+    /// The report: while the user scrolls, the bar covers the rightmost characters of the
+    /// conversation. egui's floating bar allocates no space and is drawn *over* the content
+    /// (`ScrollStyle::floating()`: `floating_allocated_width: 0.0`), so the scrolling content has to
+    /// keep the bar's own width clear — `theme::scroll_gutter`, read from the style rather than guessed.
+    /// The answer here is one long run that fills the line, which is the case that shows it.
+    #[test]
+    fn the_scroll_bar_has_a_gutter_of_its_own() {
+        use crate::ui::theme;
+        let (mut app, recorded, session, _wake) = app_and_session();
+        deliver(&session, &recorded, Inbound::Notification {
+            method: "session/snapshot".to_owned(),
+            params: Some(serde_json::json!({
+                "sessionId": "session-1", "generation": 1, "cursor": 1, "hasMore": false,
+                "records": [
+                    {"type": "event", "event": {"type": "user/message", "seq": 0, "time": 1,
+                     "data": {"role": "user", "content": [{"type": "text", "text": "看看这个"}],
+                              "source": {"kind": "user"}}}},
+                    {"type": "event", "event": {"type": "assistant/message", "seq": 1, "time": 2,
+                     "data": {"message": {"role": "assistant", "content": [{"type": "text",
+                        "text": format!("```json\n{}\n```\n", "{\"key\":\"a-long-value-here\"}".repeat(4))}]}}}},
+                ],
+            })),
+        });
+
+        // The gutter the panel uses: the bar's widest width, from the style both this test and the panel
+        // start from (nothing in this project changes `spacing.scroll`).
+        let gutter = f32::from(theme::scroll_gutter(&egui::Style::default()));
+        assert_eq!(gutter, egui::Style::default().spacing.scroll.bar_width.round(), "egui's own number");
+        assert!(gutter > 0.0, "a floating bar needs room: {gutter}");
+
+        // The panel is 640 wide with room for its shadow on both sides, which is what the other layout
+        // tests use; a narrower window would clip the panel and there would be no edge to measure.
+        let shapes = panel_shapes(&mut app, "", egui::vec2(708.0, 620.0));
+        let mut texts = Vec::new();
+        for shape in &shapes {
+            collect_text(shape, &mut texts);
+        }
+        let content_right = panel_rect(&shapes).right() - f32::from(theme::PAD_THREAD.right);
+        let bar_starts = content_right - gutter;
+        let at = |needle: &str| {
+            texts
+                .iter()
+                .find(|(text, _)| text.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle:?} in {texts:?}"))
+                .1
+        };
+
+        // The copy control is laid out against that edge, so it is the thing that says where the edge
+        // is: it must sit *in* the gutter's shadow, not on the bar. (Without the gutter it would right
+        // align at `content_right` itself, which is where the bar is.)
+        let copy = at("复制回答");
+        assert!(
+            (copy.right() - bar_starts).abs() <= 4.0,
+            "the copy control right-aligns at {} — the bar starts at {bar_starts}",
+            copy.right(),
+        );
+        // And the long run stays clear of the bar as well.
+        let run = at("{\"key\"");
+        assert!(
+            run.right() <= bar_starts + 4.0,
+            "the long run reaches {} — the bar starts at {bar_starts}",
+            run.right(),
+        );
+    }
+
     #[test]
     fn the_conversation_is_drawn_inside_the_panel() {
         // The regression this exists for: an empty `auto_shrink([false, false])` area
@@ -3150,10 +3217,10 @@ mod tests {
     /// the strip the design reserved for its clipboard row.
     ///
     /// @param app - the panel.
-    /// @param draft - what to put in the input box.
+    /// @param draft - what to put in the input box, which is where the composer's own layout is read.
     /// @param size - the window.
-    /// @returns the shapes the pass painted.
-    fn composer_shapes(app: &mut App, draft: &str, size: egui::Vec2) -> Vec<egui::Shape> {
+    /// @returns the shapes the last pass painted.
+    fn panel_shapes(app: &mut App, draft: &str, size: egui::Vec2) -> Vec<egui::Shape> {
         let ctx = egui::Context::default();
         crate::ui::fonts::ensure_icons(&ctx);
         app.draft = draft.to_owned();
@@ -3211,6 +3278,35 @@ mod tests {
             .expect("a hairline under the composer")
     }
 
+    /// The panel's own rounded rectangle: what "inside the panel" is measured against.
+    ///
+    /// @param shapes - one pass's shapes.
+    /// @returns the panel's rectangle.
+    fn panel_rect(shapes: &[egui::Shape]) -> egui::Rect {
+        /// The recursive half.
+        fn walk(shape: &egui::Shape, out: &mut Option<egui::Rect>) {
+            match shape {
+                egui::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, out);
+                    }
+                }
+                egui::Shape::Rect(rect)
+                    if rect.corner_radius == egui::CornerRadius::same(crate::ui::theme::RADIUS_WINDOW)
+                        && rect.stroke.width == crate::ui::theme::BORDER =>
+                {
+                    *out = Some(rect.rect);
+                }
+                _ => {}
+            }
+        }
+        let mut found = None;
+        for shape in shapes {
+            walk(shape, &mut found);
+        }
+        found.expect("the panel paints its rounded rectangle")
+    }
+
     /// The one filled square of a given size in a pass — the send button, in this file's use of it.
     ///
     /// @param shapes - one pass's shapes.
@@ -3252,7 +3348,7 @@ mod tests {
 
         let mark_glyph = crate::ui::icons::Icon::Search.chars();
         let mut draw = |draft: &str| {
-            let shapes = composer_shapes(&mut app, draft, egui::vec2(708.0, 620.0));
+            let shapes = panel_shapes(&mut app, draft, egui::vec2(708.0, 620.0));
             let mut texts = Vec::new();
             for shape in &shapes {
                 collect_text(shape, &mut texts);

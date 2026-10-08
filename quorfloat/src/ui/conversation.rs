@@ -48,6 +48,11 @@ pub(super) fn conversation(
         // must not take that space back while the native window is still growing.
         .min_scrolled_height(0.0)
         .max_height(height)
+        // **A gutter for the scroll bar**, which floats over the content by default: without it the bar
+        // lies on the rightmost characters of a long line while the user scrolls (the report), and the
+        // copy control under an answer is clipped by it too. The width is egui's own
+        // (`theme::scroll_gutter`).
+        .content_margin(egui::Margin { right: theme::scroll_gutter(ui.style()), ..egui::Margin::ZERO })
         .show(ui, |ui| {
             if state.entries.is_empty() && state.live.is_none() {
                 ui.label(theme::meta(ui.ctx(), "尚无对话内容"));

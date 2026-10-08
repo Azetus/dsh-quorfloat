@@ -547,6 +547,29 @@ pub const PAD_COMPOSER: egui::Margin = egui::Margin { left: 22, right: 22, top: 
 /// Space inside the conversation: `padding:20px 24px 22px`.
 pub const PAD_THREAD: egui::Margin = egui::Margin { left: 24, right: 24, top: 20, bottom: 22 };
 
+/// The gutter a floating scroll bar needs so that it never lies on the text.
+///
+/// egui's scroll bars float **over** the content by default and allocate no space at all
+/// (`ScrollStyle::floating()`: `floating_allocated_width: 0.0`), which is fine for a list of buttons
+/// and wrong for the conversation: it is one long, wrapped column of prose, and while the user scrolls
+/// the bar widens to `bar_width` and sits on the rightmost characters (the user's report).
+///
+/// The number is read from the style in effect rather than repeated here, so this follows egui's own
+/// geometry — and a *solid* bar already takes its space from the content, so it needs nothing.
+///
+/// @param style - the style in effect.
+/// @returns the right margin to give the scrolling content, in logical pixels.
+#[must_use]
+pub fn scroll_gutter(style: &egui::Style) -> i8 {
+    let scroll = style.spacing.scroll;
+    if scroll.floating {
+        // The widest the bar ever gets, which is while the user is scrolling or hovering it.
+        scroll.bar_width.round() as i8
+    } else {
+        0
+    }
+}
+
 /// Bottom hints and statistics: `padding:9px 22px`.
 pub const PAD_FOOTER: egui::Margin = egui::Margin { left: 22, right: 22, top: 9, bottom: 9 };
 /// Settings strip: `.q-runtime { padding:0 15px 10px }`.
