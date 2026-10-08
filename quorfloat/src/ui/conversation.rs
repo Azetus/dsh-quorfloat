@@ -36,6 +36,7 @@ pub(super) fn conversation(
     // thing to lose.
     let height = height.max(CONVERSATION_MIN_HEIGHT.min(height.max(0.0))).max(0.0);
     let output = egui::ScrollArea::vertical()
+        .id_salt(("quorfloat-conversation", &state.transcript_id))
         // Shrink to the content vertically, fill horizontally. This is what keeps the drawn
         // panel the same height as the height the window was asked for: with
         // `auto_shrink([false, false])` the area *fills* whatever it is offered, so a short
@@ -97,7 +98,7 @@ pub(super) fn conversation(
                 // report). (`live` alone counts as working: a turn whose stream is still arriving is
                 // being worked on even if its `turn/end` has already been folded in.)
                 let working = is_last && (state.turn_active || live.is_some());
-                turn_ui(ui, index, &state.entries[index..turn_end], live, working, markdown);
+                turn_ui(ui, index, &state.entries[index..turn_end], live, working, markdown, state.transcript_id.as_deref());
                 index = turn_end;
                 if index >= total {
                     break;
@@ -163,6 +164,7 @@ fn turn_ui(
     live: Option<&Entry>,
     working: bool,
     markdown: &mut egui_commonmark::CommonMarkCache,
+    session_id: Option<&str>,
 ) {
     let split = split_turn(turn);
     if let Some(question) = split.question {
@@ -180,7 +182,7 @@ fn turn_ui(
     if !held.is_empty() {
         // The disclosure's identity: what the turn *is*, not what it currently holds — the held rows
         // change every frame while the model works (see [`process_id`]).
-        let id = process_id(at, split.question, &held);
+        let id = process_id(at, split.question, &held).with(session_id);
         process_fold(ui, id, &held, working, markdown);
     }
     for entry in &split.answer {

@@ -24,6 +24,8 @@ use std::sync::{Arc, Mutex};
 use eframe::egui;
 
 mod appearance;
+mod perf;
+mod height;
 pub mod pinned;
 pub mod preferences;
 pub mod session;
@@ -88,6 +90,11 @@ pub struct App {
     pinned_path: Option<std::path::PathBuf>,
     /// The last layout line written, so the record changes only when the numbers do.
     last_layout: Option<String>,
+    performance: perf::Performance,
+    state_timing: std::cell::Cell<perf::StateTiming>,
+    layout_ms: f64,
+    height: height::Height,
+    presented_height: Option<f32>,
     /// Whether the workspace list has been asked for in this run.
     workspaces_asked: bool,
     /// Whether the panel has held focus at least once since it was shown.
@@ -232,6 +239,11 @@ impl App {
             focused_once: false,
             workspaces_asked: false,
             last_layout: None,
+            performance: perf::Performance::new(std::env::var("DSH_QUORFLOAT_PERF").is_ok_and(|value| value == "1")),
+            state_timing: std::cell::Cell::new(perf::StateTiming::default()),
+            layout_ms: 0.0,
+            height: height::Height::default(),
+            presented_height: None,
             pinned: crate::app::pinned::Pinned::load(
                 crate::app::pinned::path_from_env().as_deref().unwrap_or(std::path::Path::new("")),
             ),
@@ -780,10 +792,12 @@ impl App {
     /// @returns what the window renders this pass.
     #[must_use]
     fn state(&self) -> PanelState {
+        let started = self.performance.enabled().then(std::time::Instant::now);
         let session = match self.session.lock() {
             Ok(session) => session,
             Err(poisoned) => poisoned.into_inner(),
         };
+        let wait_ms = started.map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
         let follow = session.follow();
         let transcript = session.transcript();
         let conversations = session.conversations().to_vec();
@@ -794,7 +808,7 @@ impl App {
         // without a tick, in the first screenshot of the picker.
         let attached = follow.session_id().map(str::to_owned);
         let current_workspace = current_workspace(&session);
-        PanelState {
+        let state = PanelState {
             hotkey: self.hotkey_spec(),
             hotkey_reason: self.hotkey_reason(),
             keep_open: !self.settings.hide_on_blur,
@@ -812,6 +826,7 @@ impl App {
             interactions: session.interactions().to_vec(),
             handoff: session.handoff().cloned(),
             entries: transcript.shared_entries(),
+            transcript_id: transcript.session_id().map(str::to_owned),
             live: transcript.live_entry(),
             title: transcript.title().map(str::to_owned),
             conversations,
@@ -830,7 +845,12 @@ impl App {
                 events: follow.events(),
                 resyncs: follow.resyncs(),
             },
+        };
+        if let Some(start) = started {
+            self.state_timing.set(perf::StateTiming { wait_ms,
+                copy_ms: (start.elapsed().as_secs_f64() * 1000.0 - wait_ms).max(0.0) });
         }
+        state
     }
 
     /// Answer one approval, or drop a card the user has finished with.
@@ -1086,6 +1106,8 @@ pub(crate) struct PanelState {
     ///
     /// Shared, not cloned: this is read on every repaint and may hold megabytes.
     pub(crate) entries: std::sync::Arc<Vec<crate::app::session::transcript::Entry>>,
+    /// Identity of the displayed snapshot, which can lag the attach acknowledgment.
+    pub(crate) transcript_id: Option<String>,
     /// The assistant message being generated, when one is.
     pub(crate) live: Option<crate::app::session::transcript::Entry>,
     /// The harness's name for this conversation, when it has chosen one.
@@ -1246,39 +1268,40 @@ impl App {
     ///
     /// @param ui - the root area, with no margin or background of its own.
     pub fn draw(&mut self, ui: &mut egui::Ui) {
+        let started = self.performance.enabled().then(std::time::Instant::now);
+        let now = self.appearance_clock.elapsed().as_secs_f64();
+        let shadow = f32::from(crate::ui::theme::SHADOW_ROOM_TOP + crate::ui::theme::SHADOW_ROOM_BOTTOM);
+        let available = (ui.ctx().viewport_rect().height() - shadow).max(0.0);
+        self.presented_height = Some(self.height.present(now, available, self.settings.reduce_motion));
         let layout = self.draw_panel(ui);
         self.follow_content_height(ui.ctx(), layout);
+        if let Some(start) = started {
+            let now = self.appearance_clock.elapsed().as_secs_f64();
+            let active = ui.input(|input| input.is_scrolling()) || self.appearance.active(now)
+                || self.height.active();
+            let sample = perf::Sample { cpu_ms: start.elapsed().as_secs_f64() * 1000.0,
+                layout_ms: self.layout_ms, state: self.state_timing.get() };
+            if let Some(report) = self.performance.record(now, ui.ctx().cumulative_frame_nr(), active, sample) {
+                self.sink.mark(&format!("{report} viewport={:?} target={} shown={:?} height_motion={} build={} captures={}",
+                    ui.ctx().viewport_rect().size(), layout.desired_height, self.presented_height, self.height.active(),
+                    if cfg!(debug_assertions) { "debug" } else { "release" },
+                    self.screenshot.is_some() || self.animation_capture.is_some()));
+            }
+        }
     }
 
-    /// Give the window the height the content asked for, one animation step at a time.
-    ///
-    /// The panel's height *is* its content now: compact while there is nothing to read,
-    /// growing as an answer arrives, and capped where a long one starts to scroll. The
-    /// animation is not decoration — a window that jumps two hundred pixels when a reply
-    /// lands is a window that looks like it crashed and came back.
-    ///
-    /// @param ctx - the context to send the resize through.
-    /// @param desired - the panel height the drawing layer measured.
+    /// Reserve native room before growth; release it after the painted panel finishes shrinking.
     fn follow_content_height(&mut self, ctx: &egui::Context, layout: crate::ui::PanelLayout) {
         self.record_layout(ctx, layout);
-        let desired = layout.desired_height;
-        let outer = desired
-            + f32::from(crate::ui::theme::SHADOW_ROOM_TOP)
-            + f32::from(crate::ui::theme::SHADOW_ROOM_BOTTOM);
-        let animated = if self.settings.reduce_motion {
-            outer
-        } else {
-            let id = egui::Id::new("quorfloat-panel-height");
-            ctx.animate_value_with_time(id, outer, crate::ui::theme::SPEED_EXPAND)
-        };
-        // Only when it differs: a resize command every frame is a window manager working
-        // every frame, and `inner_rect` already says what the platform settled on.
-        let current = ctx.input(|input| input.viewport().inner_rect.map(|rect| rect.height()));
-        if current.is_some_and(|current| (current - animated).abs() < 0.5) {
-            return;
-        }
+        let now = self.appearance_clock.elapsed().as_secs_f64();
+        self.height.retarget(layout.desired_height, now, ctx.pixels_per_point());
+        if self.height.active() { ctx.request_repaint(); }
+        let shadow = f32::from(crate::ui::theme::SHADOW_ROOM_TOP + crate::ui::theme::SHADOW_ROOM_BOTTOM);
         let width = self.settings.width + f32::from(crate::ui::theme::SHADOW_ROOM_SIDE) * 2.0;
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(width, animated)));
+        if let Some(size) = self.height.resize(ctx.viewport_rect().size(), width, shadow) {
+            self.performance.resize();
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+        }
     }
 
     /// Put the panel's own arithmetic on the record, when it changes.
@@ -1289,6 +1312,7 @@ impl App {
     /// @param ctx - the context, for the window's actual size.
     /// @param layout - what the drawing layer measured.
     fn record_layout(&mut self, ctx: &egui::Context, layout: crate::ui::PanelLayout) {
+        if self.performance.enabled() { return; }
         let size = ctx.input(|input| input.viewport().inner_rect.map(|rect| rect.size()));
         let rounded = |value: f32| (value * 10.0).round() / 10.0;
         let line = format!(
@@ -1345,7 +1369,9 @@ impl App {
         }
         let state = self.state();
         let mut action: Option<crate::ui::Action> = None;
-        let layout = crate::ui::draw(ui, &state, &mut self.draft, &mut action, &mut self.markdown);
+        let layout_start = self.performance.enabled().then(std::time::Instant::now);
+        let layout = crate::ui::draw_at_height(ui, &state, &mut self.draft, &mut action, &mut self.markdown, self.presented_height);
+        if let Some(start) = layout_start { self.layout_ms = start.elapsed().as_secs_f64() * 1000.0; }
         if ui.is_enabled() {
             if let Some(action) = action { self.apply_card_action(action); }
         }
@@ -3644,8 +3670,9 @@ mod tests {
         let ctx = egui::Context::default();
         crate::ui::fonts::ensure_icons(&ctx);
         let mut height = 0.0;
-        // Several passes: the height is animated, so the first pass only starts it.
+        // Drive the monotonic clock as well as egui; real elapsed time governs native transitions.
         for _ in 0..8 {
+            app.appearance_clock -= std::time::Duration::from_millis(100);
             let mut output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
@@ -5283,4 +5310,90 @@ mod tests {
         app.apply_card_action(Action::DismissHandoff);
         assert!(app.state().handoff.is_none());
     }
+    #[test]
+    fn presented_height_keeps_footer_and_rounded_panel_on_one_edge() {
+        use crate::app::session::transcript::{Entry, Block};
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let font = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/NotoSansSC-VF.otf");
+        assert!(matches!(crate::ui::fonts::install_from(&ctx, &font), crate::ui::fonts::FontStatus::Loaded { .. }));
+        let mut state = footer_state_for_layout();
+        let mut cache = egui_commonmark::CommonMarkCache::default();
+        for page in 0..3 {
+            state.settings_open = page == 0;
+            state.entries = Arc::new(if page == 2 { vec![Entry::Assistant {
+                blocks: vec![Block::Text("A long answer with many lines.\n\n".repeat(40))], streaming: false,
+            }] } else { vec![] });
+            let mut natural = None::<f32>;
+            for height in [560.0, 440.0, 300.0, 220.0, 168.0, 200.0, 300.0, 440.0, 560.0] {
+                let mut desired = 0.0;
+                let mut output = ctx.run_ui(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(708.0, 620.0))),
+                    ..Default::default()
+                }, |ui| {
+                    desired = crate::ui::draw_at_height(ui, &state, &mut String::new(), &mut None, &mut cache, Some(height)).desired_height;
+                });
+                output.textures_delta.clear();
+                let shapes: Vec<_> = output.shapes.iter().map(|s| s.shape.clone()).collect();
+                let panel = panel_rect(&shapes);
+                assert!((panel.height() - height).abs() < 1.1, "page={page} presented={height} painted={panel:?}");
+                let mut texts = Vec::new();
+                for shape in &shapes { collect_text(shape, &mut texts); }
+                let (_, hint) = texts.iter().find(|(s, _)| s == "关闭").expect("footer close hint");
+                assert!(panel.contains_rect(*hint), "footer={hint:?} panel={panel:?}");
+                assert!(panel.bottom() - hint.bottom() < 20.0, "footer follows panel bottom during transition");
+                if let Some(natural) = natural { assert!((desired - natural).abs() < 1.1, "natural target changed with animated height: {natural}->{desired}"); }
+                natural = Some(desired);
+            }
+        }
+    }
+
+    #[test]
+    fn conversation_scroll_position_survives_session_switch_and_settings_visit() {
+        use crate::app::session::transcript::{Entry, Block};
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let font = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/NotoSansSC-VF.otf");
+        assert!(matches!(crate::ui::fonts::install_from(&ctx, &font), crate::ui::fonts::FontStatus::Loaded { .. }));
+        let mut state = footer_state_for_layout();
+        state.entries = Arc::new((0..30).flat_map(|n| [
+            Entry::User { text: format!("question-{n:02}") },
+            Entry::Assistant { blocks: vec![Block::Text("Answer paragraph.".into())], streaming: false },
+        ]).collect());
+        let mut cache = egui_commonmark::CommonMarkCache::default();
+        let mut time = 0.0;
+        let mut run = |state: &PanelState, wheel: f32| {
+            let mut texts = Vec::new();
+            for pass in 0..30 {
+                time += 1.0 / 60.0;
+                let mut events = vec![egui::Event::PointerMoved(egui::pos2(300.0, 300.0))];
+                if pass == 0 && wheel != 0.0 { events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, wheel), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move }); }
+                let mut output = ctx.run_ui(egui::RawInput {
+                    time: Some(time), events,
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(708.0, 620.0))),
+                    ..Default::default()
+                }, |ui| { crate::ui::draw_at_height(ui, state, &mut String::new(), &mut None, &mut cache, Some(560.0)); });
+                output.textures_delta.clear();
+                texts.clear();
+                for shape in &output.shapes { collect_text(&shape.shape, &mut texts); }
+            }
+            texts.into_iter().filter(|(text, rect)| text.contains("question-") && rect.top() > 150.0 && rect.bottom() < 490.0).collect::<Vec<_>>()
+        };
+        state.transcript_id = Some("session-a".into());
+        let bottom = run(&state, 0.0);
+        let a = run(&state, 700.0);
+        assert_ne!(a, bottom, "wheel must actually scroll");
+        assert!(!a.is_empty());
+        state.transcript_id = Some("session-b".into());
+        let b = run(&state, 0.0);
+        assert_eq!(b, bottom, "new session starts at its own bottom");
+        run(&state, 250.0);
+        state.transcript_id = Some("session-a".into());
+        assert_eq!(run(&state, 0.0), a, "A does not inherit B's offset");
+        state.settings_open = true;
+        run(&state, 0.0);
+        state.settings_open = false;
+        assert_eq!(run(&state, 0.0), a, "settings do not reset the conversation");
+    }
+
 }

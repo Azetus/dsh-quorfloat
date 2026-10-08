@@ -191,6 +191,7 @@ pub(crate) struct PanelLayout {
 /// @param draft - the composer's text, owned by the caller so it survives a frame.
 /// @param action - where a click is reported, if the user makes one.
 /// @returns how tall the panel wants to be, for the window to follow.
+#[cfg(test)]
 pub(crate) fn draw(
     ui: &mut egui::Ui,
     state: &PanelState,
@@ -198,6 +199,21 @@ pub(crate) fn draw(
     action: &mut Option<Action>,
     markdown: &mut egui_commonmark::CommonMarkCache,
 ) -> PanelLayout {
+    draw_at_height(ui, state, draft, action, markdown, None)
+}
+
+/// Draw within the currently presented height while measuring the unclipped natural target.
+pub(crate) fn draw_at_height(
+    ui: &mut egui::Ui,
+    state: &PanelState,
+    draft: &mut String,
+    action: &mut Option<Action>,
+    markdown: &mut egui_commonmark::CommonMarkCache,
+    presented: Option<f32>,
+) -> PanelLayout {
+    if let Some(height) = presented {
+        ui.set_max_height(height + f32::from(theme::SHADOW_ROOM_TOP + theme::SHADOW_ROOM_BOTTOM));
+    }
     open_picker_from_env(ui.ctx());
     // The window is transparent so that the panel can have rounded corners and a shadow of
     // its own; this is the room it leaves for both.
@@ -218,100 +234,126 @@ pub(crate) fn draw(
                 .stroke(egui::Stroke::new(theme::BORDER, line()))
                 .shadow(theme::shadow_near())
                 .show(ui, |ui| {
-                    let panel_top = ui.min_rect().top();
-                    top_bar(ui, state, action);
-                    // The settings page **replaces** the conversation rather than covering it, which
-                    // is what the design does and the only arrangement that fits a panel this size:
-                    // a dialog would have to be smaller than the thing it hides. The top bar stays,
-                    // so the user can still see which conversation they are about to go back to.
-                    if state.settings_open {
-                        let top = ui.cursor().min.y - panel_top;
-                        // The session's strip is not part of this page, so it is neither drawn nor
-                        // reserved for — the page gets that height back.
-                        let footer = footer_height(ui, state, Page::Settings);
-                        let spacing = ui.spacing().item_spacing.y;
-                        let border = theme::BORDER * 2.0;
-                        let available = (ui.available_height() - footer - spacing)
-                            .min(state.max_height - border - top - footer - spacing)
-                            .max(0.0);
-                        let (outcome, back, content) = settings::settings(ui, state, available);
-                        if back {
-                            *action = Some(Action::CloseSettings);
+                    let mut contents = |ui: &mut egui::Ui| {
+                        let panel_top = ui.min_rect().top();
+                        top_bar(ui, state, action);
+                        // The settings page **replaces** the conversation rather than covering it, which
+                        // is what the design does and the only arrangement that fits a panel this size:
+                        // a dialog would have to be smaller than the thing it hides. The top bar stays,
+                        // so the user can still see which conversation they are about to go back to.
+                        if state.settings_open {
+                            let top = ui.cursor().min.y - panel_top;
+                            // The session's strip is not part of this page, so it is neither drawn nor
+                            // reserved for — the page gets that height back.
+                            let footer = footer_height(ui, state, Page::Settings);
+                            let spacing = ui.spacing().item_spacing.y;
+                            let border = theme::BORDER * 2.0;
+                            let available = (ui.available_height() - footer - spacing)
+                                .min(state.max_height - border - top - footer - spacing)
+                                .max(0.0);
+                            let (outcome, back, content) = settings::settings(ui, state, available);
+                            if back {
+                                *action = Some(Action::CloseSettings);
+                            }
+                            if let Some(chosen) = outcome.action() {
+                                *action = Some(chosen);
+                            }
+                            footer_at_height(ui, state, action, Page::Settings, panel_top, presented);
+                            let chrome_above = top + content + spacing;
+                            return PanelLayout {
+                                desired_height: (border + chrome_above + footer)
+                                    .clamp(MIN_PANEL_HEIGHT, state.max_height),
+                                chrome_above,
+                                thread_padding: 0.0,
+                                thread_content: 0.0,
+                                footer,
+                            };
+                        } else {
+                            composer(ui, state, draft, action);
+                            if let Some(handoff) = &state.handoff {
+                                handoff_banner(ui, handoff, action);
+                            }
+                            cards(ui, state, action);
                         }
-                        if let Some(chosen) = outcome.action() {
-                            *action = Some(chosen);
+                        // Everything above the conversation, measured rather than predicted:
+                        // this is the distance from the panel's top edge to where the thread
+                        // starts, and it is what makes "how tall does the panel want to be" a
+                        // question with an answer instead of an estimate.
+                        let chrome_above = ui.cursor().min.y - panel_top;
+                        let footer = footer_height(ui, state, Page::Conversation);
+                        if state.entries.is_empty() && state.live.is_none() {
+                            footer_at_height(ui, state, action, Page::Conversation, panel_top, presented);
+                            return PanelLayout {
+                                desired_height: (theme::BORDER * 2.0 + chrome_above + footer)
+                                    .clamp(MIN_PANEL_HEIGHT, state.max_height),
+                                chrome_above,
+                                thread_padding: 0.0,
+                                thread_content: 0.0,
+                                footer,
+                            };
                         }
-                        footer_bar(ui, state, action, Page::Settings);
-                        let chrome_above = top + content + spacing;
-                        return PanelLayout {
-                            desired_height: (border + chrome_above + footer)
+                        // The composer claimed its share by being drawn first; the footer is
+                        // below the conversation and has to be predicted, or a long
+                        // conversation pushes the panel's own hints off the bottom. The thread's
+                        // own padding is part of that arithmetic — forgetting it is how the
+                        // first version drew prose against the panel's border.
+                        // The rule above the thread is drawn inside this frame too, so its one pixel
+                        // is part of the height being counted, and so is the space the design puts
+                        // under it (see below).
+                        let thread_padding = f32::from(theme::PAD_THREAD.bottom) + theme::BORDER
+                            + f32::from(theme::PAD_THREAD.top) + ui.spacing().item_spacing.y;
+                        let thread = (ui.available_height() - footer - thread_padding).max(0.0);
+                        let mut draw_thread = |ui: &mut egui::Ui| egui::Frame::NONE
+                            .inner_margin(egui::Margin { top: 0, ..theme::PAD_THREAD })
+                            .show(ui, |ui| {
+                                // **The hairline is the thread's own top border**, which is how the design
+                                // draws it: `.q-thread { border-top:1px solid var(--q-line); padding:20px 24px
+                                // 22px }` — the padding is *under* the line. Drawing it above the line instead
+                                // left the composer's reserved strip in place (the space the design keeps for
+                                // its clipboard row, which this panel does not have): 34px of empty panel
+                                // between the input and the line that is supposed to divide it from the thread.
+                                //
+                                // The 20px is spent here rather than inside the scrolling thread, so the first
+                                // line never ends up pressed against the line while the user reads upwards.
+                                rule(ui);
+                                ui.add_space(f32::from(theme::PAD_THREAD.top));
+                                conversation(ui, state, thread, markdown)
+                            })
+                            .inner;
+                        let content = if presented.is_some() {
+                            // At the start of growth, even the thread's padding may not fit yet.
+                            // Reserve a bounded rectangle first: the child may measure full content,
+                            // but cannot enlarge the parent or paint over the footer.
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), (ui.available_height() - footer).max(0.0)),
+                                egui::Sense::hover());
+                            let mut child = ui.new_child(egui::UiBuilder::new()
+                                .id_salt("conversation-region").max_rect(rect));
+                            child.set_clip_rect(child.clip_rect().intersect(rect));
+                            draw_thread(&mut child)
+                        } else { draw_thread(ui) };
+                        footer_at_height(ui, state, action, Page::Conversation, panel_top, presented);
+                        PanelLayout {
+                            desired_height: (theme::BORDER * 2.0 + chrome_above + thread_padding + content + footer)
                                 .clamp(MIN_PANEL_HEIGHT, state.max_height),
                             chrome_above,
-                            thread_padding: 0.0,
-                            thread_content: 0.0,
+                            thread_padding,
+                            thread_content: content,
                             footer,
-                        };
-                    } else {
-                        composer(ui, state, draft, action);
-                        if let Some(handoff) = &state.handoff {
-                            handoff_banner(ui, handoff, action);
                         }
-                        cards(ui, state, action);
-                    }
-                    // Everything above the conversation, measured rather than predicted:
-                    // this is the distance from the panel's top edge to where the thread
-                    // starts, and it is what makes "how tall does the panel want to be" a
-                    // question with an answer instead of an estimate.
-                    let chrome_above = ui.cursor().min.y - panel_top;
-                    let footer = footer_height(ui, state, Page::Conversation);
-                    if state.entries.is_empty() && state.live.is_none() {
-                        footer_bar(ui, state, action, Page::Conversation);
-                        return PanelLayout {
-                            desired_height: (chrome_above + footer)
-                                .clamp(MIN_PANEL_HEIGHT, state.max_height),
-                            chrome_above,
-                            thread_padding: 0.0,
-                            thread_content: 0.0,
-                            footer,
-                        };
-                    }
-                    // The composer claimed its share by being drawn first; the footer is
-                    // below the conversation and has to be predicted, or a long
-                    // conversation pushes the panel's own hints off the bottom. The thread's
-                    // own padding is part of that arithmetic — forgetting it is how the
-                    // first version drew prose against the panel's border.
-                    // The rule above the thread is drawn inside this frame too, so its one pixel
-                    // is part of the height being counted, and so is the space the design puts
-                    // under it (see below).
-                    let thread_padding = f32::from(theme::PAD_THREAD.bottom) + theme::BORDER
-                        + f32::from(theme::PAD_THREAD.top);
-                    let thread = (ui.available_height() - footer - thread_padding).max(0.0);
-                    let content = egui::Frame::NONE
-                        .inner_margin(egui::Margin { top: 0, ..theme::PAD_THREAD })
-                        .show(ui, |ui| {
-                            // **The hairline is the thread's own top border**, which is how the design
-                            // draws it: `.q-thread { border-top:1px solid var(--q-line); padding:20px 24px
-                            // 22px }` — the padding is *under* the line. Drawing it above the line instead
-                            // left the composer's reserved strip in place (the space the design keeps for
-                            // its clipboard row, which this panel does not have): 34px of empty panel
-                            // between the input and the line that is supposed to divide it from the thread.
-                            //
-                            // The 20px is spent here rather than inside the scrolling thread, so the first
-                            // line never ends up pressed against the line while the user reads upwards.
-                            rule(ui);
-                            ui.add_space(f32::from(theme::PAD_THREAD.top));
-                            conversation(ui, state, thread, markdown)
-                        })
-                        .inner;
-                    footer_bar(ui, state, action, Page::Conversation);
-                    PanelLayout {
-                        desired_height: (chrome_above + thread_padding + content + footer)
-                            .clamp(MIN_PANEL_HEIGHT, state.max_height),
-                        chrome_above,
-                        thread_padding,
-                        thread_content: content,
-                        footer,
-                    }
+                    };
+                    if let Some(height) = presented {
+                        // Allocate the complete panel before laying out children. During growth,
+                        // new chrome can be taller than the old panel; it must not grow its background.
+                        let inner = (height - theme::BORDER * 2.0).max(0.0);
+                        let page = if state.settings_open { Page::Settings } else { Page::Conversation };
+                        let footer = footer_height(ui, state, page);
+                        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), inner), egui::Sense::hover());
+                        let mut child = ui.new_child(egui::UiBuilder::new().id_salt("panel-content").max_rect(rect));
+                        let body = egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), (rect.bottom() - footer).max(rect.top())));
+                        child.set_clip_rect(child.clip_rect().intersect(body));
+                        contents(&mut child)
+                    } else { contents(ui) }
                 });
             // The window can still be shrinking toward its content. Both shadows must follow the
             // actual rounded panel, not the old viewport's available rectangle.
@@ -829,4 +871,19 @@ mod drag_tests {
 /// @param text - the text.
 pub(super) fn wrapped(ui: &mut egui::Ui, text: egui::RichText) {
     ui.add(egui::Label::new(text).wrap());
+}
+
+/// Keep footer controls on the presented bottom edge even while new content is being revealed.
+fn footer_at_height(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>, page: Page,
+    top: f32, presented: Option<f32>) {
+    if let Some(height) = presented {
+        let bottom = top + height - theme::BORDER * 2.0;
+        let rect = egui::Rect::from_min_max(
+            egui::pos2(ui.max_rect().left(), bottom - footer_height(ui, state, page)),
+            egui::pos2(ui.max_rect().right(), bottom));
+        // The body was clipped above this rectangle; restore only this footer's own clip.
+        let mut child = ui.new_child(egui::UiBuilder::new().id_salt("panel-footer").max_rect(rect));
+        child.set_clip_rect(rect.intersect(ui.ctx().viewport_rect()));
+        footer_bar(&mut child, state, action, page);
+    } else { footer_bar(ui, state, action, page); }
 }

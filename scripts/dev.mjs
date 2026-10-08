@@ -125,11 +125,13 @@ const CORE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
 const DEV_WORKSPACE_ID = '00000000-0000-4000-8000-000000000001'
 
 /** Parse the options this script owns; anything else is passed through to dsh. */
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const options = {
     profile: DEFAULT_PROFILE,
     port: '0',
     build: true,
+    rustProfile: 'debug',
+    perf: false,
     open: false,
     dshHome: undefined,
     passthrough: [],
@@ -146,6 +148,12 @@ function parseArgs(argv) {
         break
       case '--port':
         options.port = argv[++index]
+        break
+      case '--release':
+        options.rustProfile = 'release'
+        break
+      case '--perf':
+        options.perf = true
         break
       case '--no-build':
         options.build = false
@@ -174,7 +182,9 @@ Options:
   --port <port>      listen port; 0 lets the OS pick a free one (default: 0)
   --dsh-home <path>  where to read model credentials from
                      (default: ${join(homedir(), '.dsh')})
-  --no-build         skip the pre-flight build
+  --release          build and run the release Rust sidecar (default: debug)
+  --perf             record CPU/active-frame timing; disable screenshot capture
+  --no-build         skip both JS and Rust builds; require the chosen Rust binary
   --open             let dsh open a browser (default: do not)
   -h, --help         this text
 
@@ -280,26 +290,19 @@ function stagePackage() {
   return { destination, entryPoints }
 }
 
-/**
- * Copy the Rust sidecar next to the staged package.
- *
- * Copied rather than referenced, because the host pins whatever path it is given:
- * pointing at `quorfloat/target/debug` would tie the running sidecar to a directory
- * another `cargo` invocation may be rewriting.
- *
- * A failed refresh is tolerated rather than fatal: Windows refuses to replace a
- * running executable, and the JavaScript half is what changes most of the time.
- *
- * @returns the staged executable's path, or `undefined` when none is built.
- */
-function stageSidecar() {
-  const candidates = [
-    join(ROOT, 'quorfloat', 'target', 'debug', SIDECAR_NAME),
-    join(ROOT, 'quorfloat', 'target', 'release', SIDECAR_NAME),
-  ]
-  const source = candidates.find(candidate => existsSync(candidate))
-  if (source === undefined) return undefined
+/** Resolve exactly one profile; a missing release build is never a debug run. */
+export function sidecarSource(root, profile) {
+  if (!['debug', 'release'].includes(profile)) throw new Error(`unknown Rust profile: ${profile}`)
+  const source = join(root, 'quorfloat', 'target', profile, SIDECAR_NAME)
+  if (!existsSync(source)) {
+    throw new Error(`missing ${profile} sidecar; run cargo build --manifest-path quorfloat/Cargo.toml${profile === 'release' ? ' --release' : ''}`)
+  }
+  return source
+}
 
+/** Copy the chosen build; fail rather than retaining a stale executable. */
+function stageSidecar(profile) {
+  const source = sidecarSource(ROOT, profile)
   const directory = join(DEV_HOME, 'sidecar')
   mkdirSync(directory, { recursive: true })
   const destination = join(directory, SIDECAR_NAME)
@@ -307,8 +310,7 @@ function stageSidecar() {
     try {
       rmSync(destination, { force: true })
     } catch {
-      process.stdout.write('dev: keeping the previous sidecar copy (it is in use)\n')
-      return destination
+      throw new Error('cannot replace the staged sidecar; stop the existing dev instance and retry')
     }
   }
   cpSync(source, destination, { force: true })
@@ -592,6 +594,11 @@ function start(options, home, sidecar, staged) {
     // shows it nowhere, so without this file "did the approval reach the panel, and
     // did the click leave it" has no answer after the fact.
     DSH_QUORFLOAT_RUST_MARKER: MARKER_PATH,
+    ...(options.perf ? {
+      DSH_QUORFLOAT_PERF: '1',
+      DSH_QUORFLOAT_SCREENSHOT: '',
+      DSH_QUORFLOAT_ANIMATION_CAPTURE: '',
+    } : {}),
     // Where the panel remembers where the user put it. Pointed at the throwaway home so
     // that developing never edits the real user's remembered position.
     DSH_QUORFLOAT_WINDOW_STATE: WINDOW_STATE_PATH,
@@ -610,6 +617,7 @@ function start(options, home, sidecar, staged) {
     + `     DSH_HOME=${home}\n`
     + `     staged=${staged.destination} (${countFiles(staged.destination)} files,`
     + ` entry points checked: ${staged.entryPoints.join(', ')})\n`
+    + `     Rust profile=${options.rustProfile} source=${sidecarSource(ROOT, options.rustProfile)} perf=${options.perf}\n`
     + `     sidecar=${sidecar ?? '(not built — no panel)'}\n`
     + `     panel log=${sidecar === undefined ? '(no panel)' : MARKER_PATH}\n`
     + `     window state=${sidecar === undefined ? '(no panel)' : WINDOW_STATE_PATH}\n`
@@ -659,18 +667,19 @@ function main() {
     process.exit(1)
   }
 
+  if (options.build && !run('cargo', ['build', '--manifest-path', 'quorfloat/Cargo.toml',
+    ...(options.rustProfile === 'release' ? ['--release'] : [])])) {
+    throw new Error('the Rust build failed; not starting')
+  }
+  // Fail before staging any profile if --no-build selected a missing binary.
+  sidecarSource(ROOT, options.rustProfile)
+
   const credentialsHome = options.dshHome ?? join(homedir(), '.dsh')
   // Inside the throwaway home so the whole environment stays one deletable
   // directory and session data cannot land in a real project.
   const workspacePath = join(DEV_HOME, 'workspace')
   const { home, staged } = stageHome(credentialsHome, options.profile, workspacePath)
-  const sidecar = stageSidecar()
-  if (sidecar === undefined) {
-    process.stdout.write(
-      'dev: the Rust sidecar is not built; the plugin will start without a panel\n'
-      + '     build it with: cargo build --manifest-path quorfloat/Cargo.toml\n',
-    )
-  }
+  const sidecar = stageSidecar(options.rustProfile)
   start(options, home, sidecar, staged)
 }
 
