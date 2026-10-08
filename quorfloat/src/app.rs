@@ -3086,6 +3086,61 @@ mod tests {
         );
     }
 
+    /// The settings page keeps the same gutter, for the same reason.
+    ///
+    /// Its controls live at its right edge — the theme chips, the switch, the hotkey box — and a floating
+    /// scroll bar would lie on them. The user accepted the price when asking for this: a row's 1px
+    /// separator ends that much short of the page's margin too, because a separator belongs to its row.
+    #[test]
+    fn the_settings_controls_keep_clear_of_the_scroll_bar_too() {
+        use crate::ui::theme;
+        let gutter = f32::from(theme::scroll_gutter(&egui::Style::default()));
+        let mut state = footer_state_for_layout();
+        state.settings_open = true;
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let font = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/NotoSansSC-VF.otf");
+        assert!(matches!(crate::ui::fonts::install_from(&ctx, &font), crate::ui::fonts::FontStatus::Loaded { .. }));
+
+        // Two passes, so the atlas exists for whatever the page paints as text.
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    focused: true,
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(708.0, 620.0))),
+                    ..Default::default()
+                },
+                |ui| {
+                    crate::ui::draw(ui, &state, &mut String::new(), &mut None, &mut egui_commonmark::CommonMarkCache::default());
+                },
+            );
+            output.textures_delta.clear();
+            shapes = output.shapes.into_iter().map(|clipped| clipped.shape).collect();
+        }
+        let mut texts = Vec::new();
+        for shape in &shapes {
+            collect_text(shape, &mut texts);
+        }
+
+        let content_right = panel_rect(&shapes).right() - f32::from(theme::PAD_SETTINGS.right);
+        let bar_starts = content_right - gutter;
+        // The two right-hand controls that are text: the chip the theme is chosen with, and the hotkey
+        // box. Both are laid out against the row's right edge.
+        for needle in ["跟随系统", "Alt+Space"] {
+            let rect = texts
+                .iter()
+                .find(|(text, _)| text.contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle:?} in {texts:?}"))
+                .1;
+            assert!(
+                rect.right() <= bar_starts + 4.0,
+                "{needle:?} reaches {} — the bar starts at {bar_starts}",
+                rect.right(),
+            );
+        }
+    }
+
     #[test]
     fn the_conversation_is_drawn_inside_the_panel() {
         // The regression this exists for: an empty `auto_shrink([false, false])` area

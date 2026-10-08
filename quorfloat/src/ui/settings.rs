@@ -88,6 +88,12 @@ pub(super) fn settings(ui: &mut egui::Ui, state: &PanelState, max_height: f32) -
         .auto_shrink([false, true])
         .min_scrolled_height(0.0)
         .max_height(max_height)
+        // **The same gutter the conversation keeps** (`theme::scroll_gutter`): this page's controls live
+        // at its right edge — the theme chips, the switch, the hotkey box — and a floating scroll bar
+        // would lie on them while the user scrolls. The price is stated where it is paid: every row's
+        // 1px separator also ends this much short of the page's margin, because a separator belongs to
+        // its row (the user's call, 2026-10-08).
+        .content_margin(egui::Margin { right: theme::scroll_gutter(ui.style()), ..egui::Margin::ZERO })
         .show(ui, |ui| {
             egui::Frame::NONE
                 .inner_margin(theme::PAD_SETTINGS)
