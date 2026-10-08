@@ -207,12 +207,8 @@ pub(crate) fn draw(
         .show(ui, |ui| {
             // The far shadow is painted before the panel and the near one by the panel's own
             // frame: the design stacks two layers, and one `Frame` carries one.
-            let rect = ui.available_rect_before_wrap();
-            ui.painter().add(theme::shadow_far().as_shape(
-                rect,
-                egui::CornerRadius::same(theme::RADIUS_WINDOW),
-            ));
-            egui::Frame::NONE
+            let far_shadow = ui.painter().add(egui::Shape::Noop);
+            let panel = egui::Frame::NONE
                 .fill(bg())
                 .corner_radius(egui::CornerRadius::same(theme::RADIUS_WINDOW))
                 .stroke(egui::Stroke::new(theme::BORDER, line()))
@@ -224,15 +220,31 @@ pub(crate) fn draw(
                     // is what the design does and the only arrangement that fits a panel this size:
                     // a dialog would have to be smaller than the thing it hides. The top bar stays,
                     // so the user can still see which conversation they are about to go back to.
-                    let settings_view = state.settings_open;
-                    if settings_view {
-                        let (outcome, back) = settings::settings(ui, state);
+                    if state.settings_open {
+                        let top = ui.cursor().min.y - panel_top;
+                        let footer = footer_height(ui, state);
+                        let spacing = ui.spacing().item_spacing.y;
+                        let border = theme::BORDER * 2.0;
+                        let available = (ui.available_height() - footer - spacing)
+                            .min(state.max_height - border - top - footer - spacing)
+                            .max(0.0);
+                        let (outcome, back, content) = settings::settings(ui, state, available);
                         if back {
                             *action = Some(Action::CloseSettings);
                         }
                         if let Some(chosen) = outcome.action() {
                             *action = Some(chosen);
                         }
+                        footer_bar(ui, state, action);
+                        let chrome_above = top + content + spacing;
+                        return PanelLayout {
+                            desired_height: (border + chrome_above + footer)
+                                .clamp(MIN_PANEL_HEIGHT, state.max_height),
+                            chrome_above,
+                            thread_padding: 0.0,
+                            thread_content: 0.0,
+                            footer,
+                        };
                     } else {
                         composer(ui, state, draft, action);
                         if let Some(handoff) = &state.handoff {
@@ -243,11 +255,10 @@ pub(crate) fn draw(
                     // Everything above the conversation, measured rather than predicted:
                     // this is the distance from the panel's top edge to where the thread
                     // starts, and it is what makes "how tall does the panel want to be" a
-                    // question with an answer instead of an estimate. In the settings view there is
-                    // no thread, so the same measurement is what the page itself occupies.
+                    // question with an answer instead of an estimate.
                     let chrome_above = ui.cursor().min.y - panel_top;
                     let footer = footer_height(ui, state);
-                    if settings_view || (state.entries.is_empty() && state.live.is_none()) {
+                    if state.entries.is_empty() && state.live.is_none() {
                         footer_bar(ui, state, action);
                         return PanelLayout {
                             desired_height: (chrome_above + footer)
@@ -290,8 +301,14 @@ pub(crate) fn draw(
                         thread_content: content,
                         footer,
                     }
-                })
-                .inner
+                });
+            // The window can still be shrinking toward its content. Both shadows must follow the
+            // actual rounded panel, not the old viewport's available rectangle.
+            ui.painter().set(far_shadow, theme::shadow_far().as_shape(
+                panel.response.rect,
+                egui::CornerRadius::same(theme::RADIUS_WINDOW),
+            ));
+            panel.inner
         })
         .inner
 }

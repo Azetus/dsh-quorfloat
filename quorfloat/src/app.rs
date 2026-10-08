@@ -1744,6 +1744,76 @@ mod tests {
     }
 
     #[test]
+    fn settings_height_follows_content_caps_and_keeps_the_rounded_footer_inside() {
+        use crate::ui::theme;
+        fn panel_rect(shape: &egui::Shape) -> Option<egui::Rect> {
+            match shape {
+                egui::Shape::Vec(shapes) => shapes.iter().find_map(panel_rect),
+                egui::Shape::Rect(rect) if rect.corner_radius == egui::CornerRadius::same(theme::RADIUS_WINDOW)
+                    && rect.stroke.width == theme::BORDER => Some(rect.rect),
+                _ => None,
+            }
+        }
+        let mut state = footer_state_for_layout();
+        state.settings_open = true;
+        state.max_height = 560.0;
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let font = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/NotoSansSC-VF.otf");
+        assert!(matches!(crate::ui::fonts::install_from(&ctx, &font), crate::ui::fonts::FontStatus::Loaded { .. }));
+        let shadow = f32::from(theme::SHADOW_ROOM_TOP + theme::SHADOW_ROOM_BOTTOM);
+        let mut natural = 0.0;
+        for lines in [0, 5, 40] {
+            state.recording = lines > 0;
+            state.recording_hint = (lines > 0).then(|| "请按住修饰键\n".repeat(lines));
+            // Both entering from a short conversation and returning from a full-height one.
+            for initial in [228.0, 620.0] {
+                let mut height = initial;
+                for pass in 0..4 {
+                    let mut desired = 0.0;
+                    let mut output = ctx.run_ui(egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(708.0, height))),
+                        ..Default::default()
+                    }, |ui| {
+                        desired = crate::ui::draw(ui, &state, &mut String::new(), &mut None,
+                            &mut egui_commonmark::CommonMarkCache::default()).desired_height;
+                    });
+                    let mut texts = Vec::new();
+                    for shape in &output.shapes { collect_text(&shape.shape, &mut texts); }
+                    let panel = output.shapes.iter().find_map(|shape| panel_rect(&shape.shape));
+                    output.textures_delta.clear();
+                    let panel = panel.expect("the panel paints all four rounded corners");
+                    assert!(panel.bottom() <= height - f32::from(theme::SHADOW_ROOM_BOTTOM) + 1.0,
+                        "rounded bottom {panel:?} is outside window height {height}");
+                    for label in ["工作区修改", "DeepSeek-V41-Flash", "发送", "关闭", "缓存命中"] {
+                        let rect = texts.iter().find(|(text, _)| text.contains(label))
+                            .unwrap_or_else(|| panic!("missing footer {label}: {texts:?}")).1;
+                        assert!(panel.contains_rect(rect), "footer {label} {rect:?} outside {panel:?}");
+                    }
+                    if pass == 3 {
+                        assert!(panel.height() <= desired + 1.0, "painted panel exceeds requested height");
+                        if lines == 0 {
+                            assert!(desired < 500.0, "three settings must not fill the height limit: {desired}");
+                            if natural == 0.0 { natural = desired; }
+                            assert!((desired - natural).abs() < 1.0, "current window size must not determine content height");
+                            for label in ["悬浮窗设置", "呼出快捷键", "外观"] {
+                                let rect = texts.iter().find(|(text, _)| text == label).expect("setting").1;
+                                assert!(panel.contains_rect(rect), "setting {label} outside panel");
+                            }
+                        } else if lines == 5 {
+                            assert!(desired > natural + 20.0 && desired < state.max_height,
+                                "additional content grows the panel before the cap: {natural} -> {desired}");
+                        } else {
+                            assert_eq!(desired, state.max_height, "long settings stop at the configured limit");
+                        }
+                    }
+                    height = desired + shadow;
+                }
+            }
+        }
+    }
+
+    #[test]
     fn recording_starts_on_a_click_and_a_chord_becomes_the_accelerator() {
         // The whole flow the design's chip drives, from a real click to a real chord: the box *is* the
         // control, so clicking it must start listening and a key press while it listens must become the

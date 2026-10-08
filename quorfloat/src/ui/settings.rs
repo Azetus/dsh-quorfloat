@@ -76,16 +76,18 @@ impl Outcome {
 ///
 /// @param ui - the panel's own area, below the top bar.
 /// @param state - everything the view is allowed to know.
-/// @returns what the user changed this frame, and whether they asked to go back.
-pub(super) fn settings(ui: &mut egui::Ui, state: &PanelState) -> (Outcome, bool) {
+/// @param max_height - the space left after reserving the top bar and footer.
+/// @returns the changes, whether to go back, and the full content height before scrolling.
+pub(super) fn settings(ui: &mut egui::Ui, state: &PanelState, max_height: f32) -> (Outcome, bool, f32) {
     let mut outcome = Outcome::default();
     let mut back = false;
-    // The view fills the room the conversation would have had, so the footer stays where it is: the
-    // settings are a page of this panel, not a second window with a footer of its own.
-    let height = ui.available_height();
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .max_height(height)
+    // Measure the full content even in a short viewport: using the clipped height would prevent
+    // the native window from growing. Only this section scrolls; the footer stays outside it.
+    let scroll = egui::ScrollArea::vertical()
+        .id_salt("quorfloat-settings")
+        .auto_shrink([false, true])
+        .min_scrolled_height(0.0)
+        .max_height(max_height)
         .show(ui, |ui| {
             egui::Frame::NONE
                 .inner_margin(theme::PAD_SETTINGS)
@@ -99,7 +101,7 @@ pub(super) fn settings(ui: &mut egui::Ui, state: &PanelState) -> (Outcome, bool)
                     hotkey_row(ui, state, &mut outcome);
                 });
         });
-    (outcome, back)
+    (outcome, back, scroll.content_size.y)
 }
 
 /// The heading: what this page is, and the way back.
