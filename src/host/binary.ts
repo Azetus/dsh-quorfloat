@@ -8,7 +8,10 @@
  * 2. the `DSH_QUORFLOAT_PATH` environment variable, for scripted runs and CI;
  * 3. the platform package convention `dsh-quorfloat-<platform>-<arch>/bin/...`,
  *    resolved through Node's module resolver from this package, which is what
- *    makes `optionalDependencies` + `os`/`cpu` work without code changes;
+ *    makes `optionalDependencies` + `os`/`cpu` work without code changes.
+ *    On macOS the payload may also be the shipping `.app` bundle
+ *    (`bin/<name>.app/Contents/MacOS/<name>`); a bare executable next to it
+ *    still wins, because that is the developer's override hatch;
  * 4. well-known development locations inside this repository.
  *
  * A miss is never silent: the diagnostic names every candidate that was tried,
@@ -158,17 +161,41 @@ function resolvePath(value: string, packageRoot: string): string {
 /**
  * Locate the executable inside the platform package, if that package is installed.
  *
+ * The shipping form on macOS is a Tauri `.app` bundle, whose real executable is
+ * `bin/<name>.app/Contents/MacOS/<name>`; the bare `bin/<name>` layout is the
+ * legacy and developer-override form. The bare path is tried first so an
+ * override never loses to the shipped bundle, and the first candidate that
+ * exists wins so a package carrying only one form resolves without noise.
+ *
  * @param packageRoot - this package's root, used as the resolution base.
  * @returns the candidate path, or `undefined` when the package is absent.
  */
 function resolvePlatformPackage(packageRoot: string): string | undefined {
   const require = createRequire(join(packageRoot, 'package.json'))
+  let manifest
   try {
-    const manifest = require.resolve(`${PLATFORM_PACKAGE}/package.json`)
-    return join(dirname(manifest), 'bin', EXECUTABLE_NAME)
+    manifest = require.resolve(`${PLATFORM_PACKAGE}/package.json`)
   } catch {
     return undefined
   }
+  const binDir = join(dirname(manifest), 'bin')
+  const bare = join(binDir, EXECUTABLE_NAME)
+  const bundled =
+    process.platform === 'darwin'
+      ? join(binDir, `${EXECUTABLE_NAME}.app`, 'Contents', 'MacOS', EXECUTABLE_NAME)
+      : undefined
+  const candidates = bundled === undefined ? [bare] : [bare, bundled]
+  const existing = candidates.find(candidate => {
+    try {
+      statSync(candidate)
+      return true
+    } catch {
+      return false
+    }
+  })
+  // When neither form exists, report the bare path so the diagnostic names the
+  // convention the package is expected to follow.
+  return existing ?? bare
 }
 
 /**

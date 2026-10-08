@@ -161,7 +161,40 @@ fn run() -> Result<SessionExit, String> {
             // process-lifetime by design, and the OS reclaims it on exit.
             let _held_hotkey: &'static mut Hotkey = Box::leak(Box::new(hotkey));
 
-            let window = app.get_webview_window("main").expect("the main window is configured");
+            let window = {
+                // The window is created here rather than by the configuration so the
+                // development hook can point the webview at a Vite dev server:
+                // `DSH_QUORFLOAT_DEV_URL` selects an external page (hot reload while
+                // the host spawns this binary), otherwise the embedded assets load.
+                let url = match std::env::var("DSH_QUORFLOAT_DEV_URL") {
+                    Ok(raw) if !raw.trim().is_empty() => match raw.trim().parse::<tauri::Url>() {
+                        Ok(url) => tauri::WebviewUrl::External(url),
+                        Err(error) => {
+                            shell_sink.log(&format!(
+                                "DSH_QUORFLOAT_DEV_URL is not a URL ({error}); using the embedded frontend",
+                            ));
+                            tauri::WebviewUrl::App("index.html".into())
+                        }
+                    },
+                    _ => tauri::WebviewUrl::App("index.html".into()),
+                };
+                tauri::WebviewWindowBuilder::new(app, "main", url)
+                    .title("quorfloat")
+                    .inner_size(f64::from(settings.width), PLACEHOLDER_HEIGHT)
+                    .resizable(false)
+                    .maximizable(false)
+                    .minimizable(false)
+                    .decorations(false)
+                    .transparent(true)
+                    .shadow(false)
+                    .skip_taskbar(true)
+                    .always_on_top(settings.always_on_top)
+                    .visible(false)
+                    .focused(false)
+                    .accept_first_mouse(true)
+                    .build()
+                    .map_err(|error| format!("could not create the main window: {error}"))?
+            };
             // Where the user left it — or nowhere, which is a real difference rather than
             // a default: a panel that always opened at the origin would be one the user
             // moves every launch.
@@ -171,15 +204,6 @@ fn run() -> Result<SessionExit, String> {
                 )) {
                     shell_sink.log(&format!("could not restore the window position: {error}"));
                 }
-            }
-            if let Err(error) = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
-                f64::from(shell_settings_width(&shell_session, &settings)),
-                PLACEHOLDER_HEIGHT,
-            ))) {
-                shell_sink.log(&format!("could not set the window size: {error}"));
-            }
-            if !settings.always_on_top {
-                let _ = window.set_always_on_top(false);
             }
 
             let reader = Reader::new(
@@ -230,20 +254,6 @@ fn run() -> Result<SessionExit, String> {
     // reaching here means the event loop stopped without a recorded exit.
     let recorded = lock(&outcome).clone().unwrap_or(SessionExit::PeerClosed);
     Ok(recorded)
-}
-
-/// The width the window should open at: the environment's number, which the
-/// placeholder frontend does not override yet.
-///
-/// Kept as a tiny function rather than a field so the session is not consulted for
-/// what is, for now, a startup constant.
-///
-/// @param session - the session (unused until `ready`-driven resizing arrives in M3).
-/// @param settings - the environment's effective window configuration.
-/// @returns the width in logical pixels.
-fn shell_settings_width(session: &Arc<Mutex<Session>>, settings: &WindowSettings) -> f64 {
-    let _ = session;
-    f64::from(settings.width)
 }
 
 /// Applies window commands and the hotkey to the native window, reports visibility
