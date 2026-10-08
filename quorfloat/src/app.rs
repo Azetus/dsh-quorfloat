@@ -1273,6 +1273,13 @@ impl App {
         let shadow = f32::from(crate::ui::theme::SHADOW_ROOM_TOP + crate::ui::theme::SHADOW_ROOM_BOTTOM);
         let available = (ui.ctx().viewport_rect().height() - shadow).max(0.0);
         self.presented_height = Some(self.height.present(now, available, self.settings.reduce_motion));
+        // A platform that never made room leaves the panel at a height its content does not fit in,
+        // which on screen looks like any other short panel: this is the only trace of why.
+        if let Some(target) = self.height.unreachable_target() {
+            self.sink.mark(&format!(
+                "height capped at {available:.0}: asked {target:.0}, the window never made room",
+            ));
+        }
         let layout = self.draw_panel(ui);
         self.follow_content_height(ui.ctx(), layout);
         if let Some(start) = started {
@@ -1598,6 +1605,27 @@ mod tests {
                         "content": [{"type": "reasoning", "text": "想一下"},
                                     {"type": "text",
                                      "text": "看到了，**重点**是这一行：\n\n```rust\nlet name = String::from(\"Quorvox\");\n```\n"}]}}}},
+                ],
+            })),
+        }
+    }
+
+    /// The same snapshot, with an answer long enough that the panel wants its full height.
+    ///
+    /// The window in the tests below is deliberately shorter than the cap, which is what makes the
+    /// panel wait for room the platform may never give it.
+    fn long_conversation_frame() -> Inbound {
+        Inbound::Notification {
+            method: "session/snapshot".to_owned(),
+            params: Some(serde_json::json!({
+                "sessionId": "session-1", "generation": 1, "cursor": 1, "hasMore": false,
+                "records": [
+                    {"type": "event", "event": {"type": "user/message", "seq": 0, "time": 1,
+                     "data": {"role": "user", "content": [{"type": "text", "text": "写一段长回答"}]}}},
+                    {"type": "event", "event": {"type": "assistant/message", "seq": 1, "time": 2,
+                     "data": {"message": {"role": "assistant",
+                        "content": [{"type": "text",
+                                     "text": "一段足够长的回答，用来让面板想要比窗口更多的高度。\n\n".repeat(60)}]}}}},
                 ],
             })),
         }
@@ -3663,6 +3691,83 @@ mod tests {
             + f32::from(crate::ui::theme::SHADOW_ROOM_TOP)
             + f32::from(crate::ui::theme::SHADOW_ROOM_BOTTOM);
         assert!(full <= ceiling + 1.0, "{full} is not more than {ceiling}");
+    }
+
+    /// A platform that ignores `InnerSize` must not leave the panel held — and repainting — forever.
+    #[test]
+    fn a_window_that_never_grows_is_given_up_on_rather_than_held_forever() {
+        // The window keeps the size it was created with: 340px of panel plus the shadow's room,
+        // smaller than the height cap a conversation asks for.
+        let size = egui::vec2(708.0, 400.0);
+        let room = size.y - f32::from(crate::ui::theme::SHADOW_ROOM_TOP + crate::ui::theme::SHADOW_ROOM_BOTTOM);
+        let (mut app, recorded, session, _wake) = app_and_session();
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        // Nothing to read yet: the panel settles smaller than the window that holds it.
+        let mut frame = 0;
+        for _ in 0..5 {
+            frame += 1;
+            paint_at(&mut app, &ctx, size, f64::from(frame) / 10.0);
+        }
+        frame += 1;
+        let (small, _) = paint_at(&mut app, &ctx, size, f64::from(frame) / 10.0);
+        assert!(small.height() < room - 20.0, "the panel starts smaller than its window: {small:?}");
+        // A conversation arrives that wants more height than the window will ever have. Twenty
+        // frames is 2s of virtual time: past the wait for room and past the growth that follows it.
+        deliver(&session, &recorded, long_conversation_frame());
+        let mut last = (small, true);
+        for _ in 0..20 {
+            frame += 1;
+            last = paint_at(&mut app, &ctx, size, f64::from(frame) / 10.0);
+        }
+        let (panel, wants_another_frame) = last;
+        assert!(!wants_another_frame, "a window that cannot grow must not keep the render loop awake");
+        assert!(
+            (panel.height() - room).abs() < 1.1,
+            "the panel uses the room the window does have: {panel:?} against {room}",
+        );
+        assert!(panel.bottom() <= size.y + 1.1, "and stays inside it: {panel:?}");
+        let marks = recorded.marks();
+        assert_eq!(
+            marks.iter().filter(|line| line.starts_with("height capped")).count(),
+            1,
+            "the give-up is on the record, once: {marks:?}",
+        );
+    }
+
+    /// Draw one real pass at a window size the platform never changes.
+    ///
+    /// Both clocks are driven: the app's own, because real elapsed time is what governs the panel's
+    /// transitions and its wait for native room, and egui's, because its animations (the scroll bar
+    /// fading in, for one) would otherwise still be running when the assertions are made.
+    ///
+    /// @param app - the panel.
+    /// @param ctx - the context to run the pass in.
+    /// @param size - the window's inner size, which this never changes.
+    /// @param time - egui's clock for this pass, in seconds.
+    /// @returns the painted panel rectangle, and whether the app asked for another frame.
+    fn paint_at(app: &mut App, ctx: &egui::Context, size: egui::Vec2, time: f64) -> (egui::Rect, bool) {
+        app.appearance_clock -= std::time::Duration::from_millis(100);
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                time: Some(time),
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                focused: true,
+                ..Default::default()
+            },
+            |ui| app.draw(ui),
+        );
+        output.textures_delta.clear();
+        let shapes: Vec<_> = output.shapes.iter().map(|s| s.shape.clone()).collect();
+        let panel = panel_rect(&shapes);
+        let mut texts = Vec::new();
+        for shape in &shapes {
+            collect_text(shape, &mut texts);
+        }
+        let (_, hint) = texts.iter().find(|(text, _)| text == "关闭").expect("the footer is still drawn");
+        assert!(panel.contains_rect(*hint), "footer {hint:?} outside panel {panel:?}");
+        let delay = output.viewport_output.values().map(|viewport| viewport.repaint_delay).max();
+        (panel, delay != Some(std::time::Duration::MAX))
     }
 
     /// Run passes until the height settles, and answer what the panel asked for.
