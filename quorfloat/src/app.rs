@@ -5396,4 +5396,67 @@ mod tests {
         assert_eq!(run(&state, 0.0), a, "settings do not reset the conversation");
     }
 
+    #[test]
+    fn returning_from_settings_keeps_the_bottom_answer_anchored_during_growth() {
+        use crate::app::session::transcript::{Entry, Block};
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let font = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/NotoSansSC-VF.otf");
+        assert!(matches!(crate::ui::fonts::install_from(&ctx, &font), crate::ui::fonts::FontStatus::Loaded { .. }));
+        let mut state = footer_state_for_layout();
+        state.transcript_id = Some("anchored-session".into());
+        state.entries = Arc::new(vec![Entry::Assistant {
+            blocks: vec![Block::Text("一段足够长的回复，用来验证返回对话时的底部位置。\n\n".repeat(40))],
+            streaming: false,
+        }]);
+        let mut cache = egui_commonmark::CommonMarkCache::default();
+        let mut time = 0.0;
+        let mut draw = |state: &PanelState, height: f32| {
+            time += 1.0 / 60.0;
+            let mut passes = 0;
+            let mut output = ctx.run_ui(egui::RawInput {
+                time: Some(time),
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(708.0, 620.0))),
+                ..Default::default()
+            }, |ui| {
+                passes += 1;
+                crate::ui::draw_at_height(ui, state, &mut String::new(), &mut None, &mut cache, Some(height));
+            });
+            output.textures_delta.clear();
+            let shapes: Vec<_> = output.shapes.iter().map(|s| s.shape.clone()).collect();
+            let panel = panel_rect(&shapes);
+            let mut texts = Vec::new();
+            for shape in &shapes { collect_text(shape, &mut texts); }
+            let answer = texts.iter().find(|(s, _)| s == "回答完成").map(|(_, rect)| *rect);
+            eprintln!("anchor settings={} height={height} panel_bottom={} answer={answer:?}", state.settings_open, panel.bottom());
+            (panel, answer, passes)
+        };
+        for _ in 0..3 { draw(&state, 560.0); }
+        let (panel, answer, _) = draw(&state, 560.0);
+        let distance = panel.bottom() - answer.unwrap().bottom();
+        state.settings_open = true;
+        for height in [560.0, 450.0, 347.0] { draw(&state, height); }
+        state.settings_open = false;
+        for height in [347.0, 347.0, 370.0, 420.0, 485.0, 535.0, 560.0, 560.0] {
+            let (panel, answer, passes) = draw(&state, height);
+            assert_eq!(passes, 1, "ordinary height changes must not double Markdown layout work");
+            let answer = answer.expect("the bottom answer must be visible on the first returning frame");
+            assert!(panel.contains_rect(answer), "answer {answer:?} outside panel {panel:?}");
+            assert!((panel.bottom() - answer.bottom() - distance).abs() < 1.1,
+                "bottom anchor jumped: expected gap {distance}, got {} at height {height}", panel.bottom() - answer.bottom());
+        }
+        // Content can grow while settings hides the transcript. The old geometry is only an
+        // estimate in this case: resolve it before presenting, using egui's bounded second pass.
+        state.settings_open = true;
+        draw(&state, 347.0);
+        state.entries = Arc::new(vec![Entry::Assistant {
+            blocks: vec![Block::Text("设置页打开期间新增的回复。\n\n".repeat(80))], streaming: false,
+        }]);
+        state.settings_open = false;
+        let (panel, answer, passes) = draw(&state, 347.0);
+        assert_eq!(passes, 2);
+        let answer = answer.expect("new content is anchored before the frame is presented");
+        assert!((panel.bottom() - answer.bottom() - distance).abs() < 1.1);
+    }
+
 }

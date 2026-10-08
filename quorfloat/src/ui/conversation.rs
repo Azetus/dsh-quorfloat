@@ -35,8 +35,33 @@ pub(super) fn conversation(
     // the conversation is clipped at the bottom — above the composer, which is the right
     // thing to lose.
     let height = height.max(CONVERSATION_MIN_HEIGHT.min(height.max(0.0))).max(0.0);
-    let output = egui::ScrollArea::vertical()
-        .id_salt(("quorfloat-conversation", &state.transcript_id))
+    let salt = ("quorfloat-conversation", &state.transcript_id);
+    // ScrollArea wraps its source in IdSalt before deriving its persistent ID.
+    let id = ui.make_persistent_id(egui::IdSalt::new(salt));
+    let geometry_id = id.with("measured-geometry");
+    let previous = ui.ctx().data(|data| data.get_temp::<ScrollGeometry>(geometry_id));
+    let stored = egui::scroll_area::State::load(ui.ctx(), id).unwrap_or_default();
+    let viewport_height = height.min(ui.available_height()).max(0.0);
+    let width = ui.available_width();
+    let tolerance = 0.5 / ui.ctx().pixels_per_point();
+    let changed = previous.is_none_or(|old| (old.viewport - viewport_height).abs() > tolerance
+        || (old.width - width).abs() > tolerance);
+    let mut painted_offset = stored.offset.y;
+    let mut scroll = egui::ScrollArea::vertical().id_salt(salt);
+    if let Some(old) = previous.filter(|old| (old.width - width).abs() <= tolerance) {
+        if changed {
+            let old_end = (old.content - old.viewport).max(0.0);
+            let new_end = (old.content - viewport_height).max(0.0);
+            // egui 0.36 adjusts stick_to_bottom in ScrollArea::end, AFTER painting. Pre-position
+            // from measured geometry so returning from settings does not paint one stale offset.
+            // Readers above the bottom retain their offset, only clamped if the new view needs it.
+            painted_offset = if (stored.offset.y - old_end).abs() <= tolerance {
+                new_end
+            } else { stored.offset.y.min(new_end) };
+            scroll = scroll.vertical_scroll_offset(painted_offset);
+        }
+    }
+    let output = scroll
         // Shrink to the content vertically, fill horizontally. This is what keeps the drawn
         // panel the same height as the height the window was asked for: with
         // `auto_shrink([false, false])` the area *fills* whatever it is offered, so a short
@@ -105,7 +130,26 @@ pub(super) fn conversation(
                 }
             }
         });
+    debug_assert_eq!(output.id, id, "geometry must follow the actual scroll area identity");
+    ui.ctx().data_mut(|data| data.insert_temp(geometry_id, ScrollGeometry {
+        content: output.content_size.y, viewport: output.inner_rect.height(), width,
+    }));
+    // Reflow or content received while settings was open can invalidate the estimate. Resolve that
+    // exceptional case in THIS frame rather than presenting a wrong anchor. Ordinary height animation
+    // needs one pass; explicit scrolling retains egui's normal input handling.
+    if previous.is_some() && changed && (output.state.offset.y - painted_offset).abs() > tolerance
+        && !ui.input(|input| input.is_scrolling() || input.pointer.any_down()) {
+        ui.ctx().request_discard("conversation viewport changed its bottom anchor");
+    }
     output.content_size.y
+}
+
+/// Only geometry is cached, under the same per-session identity as the scroll area.
+#[derive(Clone, Copy)]
+struct ScrollGeometry {
+    content: f32,
+    viewport: f32,
+    width: f32,
 }
 
 /// Where the next turn starts, so one turn's lines can be drawn together.
