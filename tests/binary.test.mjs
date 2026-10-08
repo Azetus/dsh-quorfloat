@@ -196,3 +196,51 @@ test('a non-executable file that is not a node script is still refused', () => {
     cleanupDir(root)
   }
 })
+
+test('the platform package may carry the macOS .app bundle instead of a bare executable', { skip: process.platform !== 'darwin' ? 'the .app layout is a macOS convention' : false }, () => {
+  // The shipping form is a Tauri .app bundle; the resolver must find the real
+  // executable inside it, or a packaged install would report "not found" for a
+  // payload that is sitting right there.
+  const root = scratchDir()
+  try {
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'dsh-quorfloat', version: '0.0.1', type: 'module' }))
+    const packageDir = join(root, 'node_modules', PLATFORM_PACKAGE)
+    const macosDir = join(packageDir, 'bin', `${EXECUTABLE_NAME}.app`, 'Contents', 'MacOS')
+    mkdirSync(macosDir, { recursive: true })
+    writeFileSync(join(packageDir, 'package.json'), JSON.stringify({ name: PLATFORM_PACKAGE, version: '0.0.1', os: [process.platform], cpu: [process.arch] }))
+    const payload = join(macosDir, EXECUTABLE_NAME)
+    writeFileSync(payload, '#!/bin/sh\nexit 0\n')
+    chmodSync(payload, 0o755)
+    const resolved = resolveQuorfloatBinary({ configuredPath: '', envPath: undefined, packageRoot: root })
+    // Compared through realpath for the same reason the bare-layout test does:
+    // macOS canonicalises the scratch path through /private.
+    assert.equal(realpathSync(resolved.path), realpathSync(payload))
+    assert.equal(resolved.source, 'platform-package')
+    assert.deepEqual(resolved.args, [], 'a bundled executable is launched directly')
+  } finally {
+    cleanupDir(root)
+  }
+})
+
+test('a bare executable in the platform package wins over a bundled .app', { skip: process.platform !== 'darwin' ? 'the .app layout is a macOS convention' : false }, () => {
+  // A developer who drops a bare executable next to the shipped bundle is
+  // overriding the payload; the escape hatch must stay reachable.
+  const root = scratchDir()
+  try {
+    writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'dsh-quorfloat', version: '0.0.1', type: 'module' }))
+    const packageDir = join(root, 'node_modules', PLATFORM_PACKAGE)
+    mkdirSync(join(packageDir, 'bin'), { recursive: true })
+    writeFileSync(join(packageDir, 'package.json'), JSON.stringify({ name: PLATFORM_PACKAGE, version: '0.0.1', os: [process.platform], cpu: [process.arch] }))
+    const bare = join(packageDir, 'bin', EXECUTABLE_NAME)
+    writeFileSync(bare, '#!/bin/sh\nexit 0\n')
+    chmodSync(bare, 0o755)
+    const macosDir = join(packageDir, 'bin', `${EXECUTABLE_NAME}.app`, 'Contents', 'MacOS')
+    mkdirSync(macosDir, { recursive: true })
+    writeFileSync(join(macosDir, EXECUTABLE_NAME), '#!/bin/sh\nexit 0\n')
+    chmodSync(join(macosDir, EXECUTABLE_NAME), 0o755)
+    const resolved = resolveQuorfloatBinary({ configuredPath: '', envPath: undefined, packageRoot: root })
+    assert.equal(realpathSync(resolved.path), realpathSync(bare))
+  } finally {
+    cleanupDir(root)
+  }
+})
