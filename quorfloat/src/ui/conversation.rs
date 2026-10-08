@@ -90,13 +90,14 @@ pub(super) fn conversation(
                 // The answer being written belongs to the last turn, and is drawn as part of it: its
                 // reasoning joins that turn's working, its text is that turn's answer.
                 let live = if is_last { state.live.as_ref() } else { None };
-                // **A turn still being worked on keeps its disclosure open**: while the model works,
-                // the working is the only thing happening, so there is nothing to fold it behind. The
-                // moment the answer lands and the turn ends it folds — the other half of the rule, and
-                // the default the reader sees. (`live` alone counts: a turn whose stream is still
-                // arriving is being worked on even if its `turn/end` has already been folded in.)
-                let running = is_last && (state.turn_active || live.is_some());
-                turn_ui(ui, &state.entries[index..turn_end], live, running.then_some(true), markdown);
+                // **A turn still being worked on says so, and stays folded.** While the model works, its
+                // disclosure carries "正在工作" and a turning mark — it is *not* opened for the reader:
+                // what is inside is exactly what is about to be folded anyway, so streaming it in full
+                // and then collapsing it is the panel jumping for no reason the reader can see (the
+                // report). (`live` alone counts as working: a turn whose stream is still arriving is
+                // being worked on even if its `turn/end` has already been folded in.)
+                let working = is_last && (state.turn_active || live.is_some());
+                turn_ui(ui, index, &state.entries[index..turn_end], live, working, markdown);
                 index = turn_end;
                 if index >= total {
                     break;
@@ -148,16 +149,19 @@ fn answer_index(turn: &[Entry]) -> Option<usize> {
 /// One turn: its working behind a disclosure, then its answer.
 ///
 /// @param ui - where to draw.
+/// @param at - where this turn starts among the transcript's lines. Part of the disclosure's identity
+///   (see [`process_id`]) and nothing else.
 /// @param turn - the turn's lines.
 /// @param live - the answer still being written, when this is the turn writing it.
-/// @param open_override - force the disclosure open (the turn is being worked on); `None` leaves it
-///   to what the reader chose, which for a settled turn is closed.
+/// @param working - whether the turn is still being worked on. It labels the disclosure and turns its
+///   mark; it does **not** open it (see [`process_fold`]).
 /// @param markdown - the viewer's cache.
 fn turn_ui(
     ui: &mut egui::Ui,
+    at: usize,
     turn: &[Entry],
     live: Option<&Entry>,
-    open_override: Option<bool>,
+    working: bool,
     markdown: &mut egui_commonmark::CommonMarkCache,
 ) {
     let split = split_turn(turn);
@@ -174,7 +178,10 @@ fn turn_ui(
     // control that does nothing; a second fold — the answer folding its own reasoning — is the same
     // fact asked twice, and closed, so opening the first would appear to reveal nothing.
     if !held.is_empty() {
-        process_fold(ui, &held, open_override, markdown);
+        // The disclosure's identity: what the turn *is*, not what it currently holds — the held rows
+        // change every frame while the model works (see [`process_id`]).
+        let id = process_id(at, split.question, &held);
+        process_fold(ui, id, &held, working, markdown);
     }
     for entry in &split.answer {
         entry_ui(ui, entry, markdown);
@@ -268,43 +275,68 @@ fn has_reasoning(entry: &Entry) -> bool {
     }
 }
 
-/// The folded working: a header that says the turn worked, and the rows behind it.
+/// The folded working: a header that says what the turn is doing, and the rows behind it.
+///
+/// **The program never opens it.** A turn's working is folded from its first frame — while the model
+/// thinks as much as after it answers — because the alternative is what the reader reported: the working
+/// streams in full, visibly, and then collapses the moment the answer lands, so the panel jumps for no
+/// reason they can see. The reader may open it whenever they like, mid-stream included, and what they
+/// open stays open (which is why the identity comes from [`process_id`] rather than from the rows).
 ///
 /// @param ui - where to draw.
+/// @param id - the disclosure's identity, from [`process_id`].
 /// @param held - the rows the disclosure holds.
-/// @param open_override - force the state, for a turn that is still being worked on.
+/// @param working - whether the turn is still being worked on.
 /// @param markdown - the viewer's cache.
 fn process_fold(
     ui: &mut egui::Ui,
+    id: egui::Id,
     held: &[Held<'_>],
-    open_override: Option<bool>,
+    working: bool,
     markdown: &mut egui_commonmark::CommonMarkCache,
 ) {
-    let id = process_id(held);
-    let remembered = ui.memory(|memory| memory.data.get_temp::<bool>(id));
-    // **Collapsed by default, once the turn has settled**: the working is not what the user came to
-    // read, and a turn's worth of it buries the answer. While the turn runs it is open and cannot be
-    // closed, because it is the only thing happening.
-    let open = open_override.unwrap_or_else(|| remembered.unwrap_or(false));
+    // **Closed unless the reader opened it** — the default is not a phase of the turn, it is the state
+    // of the control.
+    let open = ui.memory(|memory| memory.data.get_temp::<bool>(id)).unwrap_or(false);
     let content = ui
         .horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            let mark = if open { icons::Icon::CaretDown } else { icons::Icon::CaretRight };
             let (rect, _) = ui.allocate_exact_size(
                 egui::vec2(theme::ICON_CHEVRON, theme::ICON_CHEVRON),
                 egui::Sense::hover(),
             );
+            // **The caret keeps its place in both states** — it is the row's affordance, and the row is
+            // clickable while the model works too. The turning mark is an *addition after the words*
+            // (`▸ 正在工作 ◌`), not a swap for the caret: a different glyph in the caret's box put a
+            // mark with different metrics where the caret had been, which reads as misaligned, and the
+            // whole row twitched when the turn ended.
+            let mark = if open { icons::Icon::CaretDown } else { icons::Icon::CaretRight };
             icons::paint(ui, rect.center(), mark, theme::ICON_CHEVRON, theme::muted());
-            let label = if open_override == Some(true) { "正在工作" } else { "已完成" };
-            // **Not selectable**, unlike the prose around it. A selectable label is a
-            // `click_and_drag` widget — that is how egui implements drag-to-select text — and it sits
-            // on top of the row that contains it, so it takes the click the row was waiting for. The
-            // header is a control, not text to copy: the words are three characters the reader
-            // already knows, and the click is the whole point of the row.
+            let label = if working { "正在工作" } else { "已完成" };
             // Not selectable, unlike the prose around it: the header is the row's control, and a
             // selectable label is a `click_and_drag` widget (that is how egui implements
             // drag-to-select text) sitting on top of the row that owns it.
             ui.add(egui::Label::new(egui::RichText::new(label).size(theme::TEXT_SMALL).color(theme::muted())).selectable(false));
+            if working {
+                // One of the panel's own glyphs (the design draws no such mark), turned by the painter.
+                // It asks for the next frame itself, because a turn that is thinking has nothing else to
+                // render.
+                let angle = std::f32::consts::TAU
+                    * (ui.input(|input| input.time) as f32 / theme::SPINNER_TURN_SECONDS).fract();
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(theme::ICON_CHEVRON, theme::ICON_CHEVRON),
+                    egui::Sense::hover(),
+                );
+                icons::paint_turned(
+                    ui,
+                    rect.center(),
+                    icons::Icon::CircleNotch,
+                    theme::ICON_CHEVRON,
+                    theme::muted(),
+                    angle,
+                );
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(theme::SPINNER_FRAME_MS));
+            }
         })
         .response;
     // The header is **a widget of its own**, not the layout's response made clickable. Measured, after
@@ -314,10 +346,12 @@ fn process_fold(
     // The row therefore highlighted under the pointer and **no click ever arrived**: a disclosure that
     // could be seen and not opened. Every other clickable row in this panel is registered this way.
     let row = ui.interact(content.rect, ui.id().with(("quorfloat-process", id)), egui::Sense::click());
-    if row.clicked() && open_override.is_none() {
+    // The reader's click works at any time, including while the model is still working: that is the
+    // whole point of folding it by default rather than by phase.
+    if row.clicked() {
         ui.memory_mut(|memory| memory.data.insert_temp(id, !open));
     }
-    if row.hovered() && open_override.is_none() {
+    if row.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     if open {
@@ -383,20 +417,35 @@ fn reasoning_ui(ui: &mut egui::Ui, reasoning: &str) {
     );
 }
 
-/// The identity a working disclosure's open/closed state is remembered under.
+/// The identity a turn's disclosure is remembered under.
 ///
-/// Keyed by the working's own text, like every other remembered state here: the transcript drops its
-/// oldest lines as it grows, and a fold that jumped to another turn when the buffer trimmed would be
-/// worse than one that forgot.
+/// **What the turn is, not what it currently holds.** While the model works, the held rows change every
+/// frame — the live reasoning grows a token at a time — so a key over their text would be a new id every
+/// frame, and a reader who opened the disclosure mid-stream would watch it snap shut under the pointer.
+/// The question is what identifies a turn and does not change while it is being answered; a group with
+/// no question (the transcript trims its oldest lines) falls back to its first row.
 ///
+/// **The turn's position goes in as well, and it is not decoration.** Asking the same question twice —
+/// retrying a prompt, which is ordinary — gives two turns with the same question, and a key of the
+/// question alone therefore gave two disclosures *one widget id at two rectangles*: egui drew its red
+/// `🔥 First use of widget ID … / Second use …` over the conversation (measured). The position is what
+/// tells those two turns apart.
+///
+/// A position alone would be the wrong key, and so is the pair when the buffer trims: dropping the
+/// oldest lines shifts every later turn, so a disclosure whose identity shifted no longer matches
+/// anything and **forgets** its state — which is the tolerable failure. What must never happen is a
+/// disclosure that jumps to another turn, and the question in the key is what prevents it.
+///
+/// @param at - where the turn starts among the transcript's lines.
+/// @param question - the turn's question, when it has one.
 /// @param held - the rows the disclosure holds.
 /// @returns the egui id for its fold.
-fn process_id(held: &[Held<'_>]) -> egui::Id {
-    let mut seed = String::new();
-    for row in held {
-        seed.push_str(&format!("{row:?}"));
-    }
-    egui::Id::new(("quorfloat-process", text_hash(&seed)))
+fn process_id(at: usize, question: Option<&Entry>, held: &[Held<'_>]) -> egui::Id {
+    let seed = question
+        .map(|entry| format!("{entry:?}"))
+        .or_else(|| held.first().map(|row| format!("{row:?}")))
+        .unwrap_or_default();
+    egui::Id::new(("quorfloat-process", at, text_hash(&seed)))
 }
 
 /// The line under an answer: what happened to it, and the copy control.

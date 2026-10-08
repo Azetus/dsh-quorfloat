@@ -829,6 +829,19 @@ pub const GAP_CLOSE: f32 = 3.0;
 /// The composer's spacing around the input (`gap:14px`).
 pub const GAP_COMPOSER: f32 = 14.0;
 
+/// How long the "still working" mark takes to go round once, in seconds.
+///
+/// A loading mark that is not turning is a picture of a spinner, and one that turns at 60Hz is a panel
+/// burning a core while a model thinks. This is slow enough to read as motion and cheap enough to leave
+/// running (`SPINNER_FRAME_MS` is the frame budget it asks for).
+pub const SPINNER_TURN_SECONDS: f32 = 1.4;
+
+/// How often the turning mark asks for a repaint, in milliseconds.
+///
+/// A bit under 20 frames a second: smooth at this size, and it only runs while a turn is being worked
+/// on — the state in which the panel is repainting for the stream's own reasons anyway.
+pub const SPINNER_FRAME_MS: u64 = 55;
+
 /// How far the composer's leading mark sits below the row's top, from the design's own
 /// `.q-search { padding-top:6px }`.
 ///

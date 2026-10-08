@@ -48,6 +48,8 @@ pub enum Icon {
     ArrowUp,
     /// Stop: the answer being generated right now.
     Stop,
+    /// A turn is being worked on: this mark turns while the model thinks.
+    CircleNotch,
     /// Reasoning effort.
     Brain,
     /// Permission, granted after a check.
@@ -73,7 +75,7 @@ pub enum Icon {
 }
 
 /// Every icon this build knows, for the checks that have to consider all of them.
-pub const ALL: [Icon; 23] = [
+pub const ALL: [Icon; 24] = [
     Icon::Folder,
     Icon::FolderSimple,
     Icon::Chat,
@@ -85,6 +87,7 @@ pub const ALL: [Icon; 23] = [
     Icon::Search,
     Icon::ArrowUp,
     Icon::Stop,
+    Icon::CircleNotch,
     Icon::Brain,
     Icon::ShieldCheck,
     Icon::Shield,
@@ -143,6 +146,7 @@ impl Icon {
             Self::Search => "magnifying-glass",
             Self::ArrowUp => "arrow-up",
             Self::Stop => "square",
+            Self::CircleNotch => "circle-notch",
             Self::Brain => "brain",
             Self::ShieldCheck => "shield-check",
             Self::Shield => "shield",
@@ -173,6 +177,7 @@ impl Icon {
             Self::Search => egui_phosphor::regular::MAGNIFYING_GLASS,
             Self::ArrowUp => egui_phosphor::regular::ARROW_UP,
             Self::Stop => egui_phosphor::regular::SQUARE,
+            Self::CircleNotch => egui_phosphor::regular::CIRCLE_NOTCH,
             Self::Brain => egui_phosphor::regular::BRAIN,
             Self::ShieldCheck => egui_phosphor::regular::SHIELD_CHECK,
             Self::Shield => egui_phosphor::regular::SHIELD,
@@ -240,6 +245,40 @@ pub fn paint(ui: &egui::Ui, center: egui::Pos2, icon: Icon, size: f32, colour: e
         font(icon, size),
         colour,
     );
+}
+
+/// Paint one icon turned about its own centre.
+///
+/// The companion to [`paint`] for the one mark that moves: the spinner a working turn shows. egui's text
+/// shapes carry an angle (`TextShape::with_angle_and_anchor`), so a font glyph can turn without a second
+/// drawing route — the vocabulary stays "pictures are glyphs from the icon font" (and keeps its guard).
+///
+/// @param ui - where to paint.
+/// @param center - the middle of the icon's box, and the point it turns about.
+/// @param icon - which picture.
+/// @param size - the box's size, in points.
+/// @param colour - the colour to draw it in.
+/// @param angle - how far it has turned, in radians, clockwise.
+pub fn paint_turned(
+    ui: &egui::Ui,
+    center: egui::Pos2,
+    icon: Icon,
+    size: f32,
+    colour: egui::Color32,
+    angle: f32,
+) {
+    if !crate::ui::fonts::icons_ready(ui.ctx()) {
+        return;
+    }
+    let galley = ui.painter().layout_no_wrap(icon.chars().to_owned(), font(icon, size), colour);
+    // **`center` is a centre, not a corner.** A `TextShape` is positioned by its top-left, and
+    // `with_angle_and_anchor` only moves it so that the *anchor point* stays put — so passing the centre
+    // as the position put the glyph half a box down and to the right of where it belongs (the reader saw
+    // exactly that, and a frame at this size does not show it). [`paint`] gets this from
+    // `Align2::CENTER_CENTER`; this route has to do it by hand.
+    let corner = center - galley.size() / 2.0;
+    ui.painter().add(egui::epaint::TextShape::new(corner, galley, colour)
+        .with_angle_and_anchor(angle, egui::Align2::CENTER_CENTER));
 }
 
 #[cfg(test)]

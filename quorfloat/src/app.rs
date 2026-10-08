@@ -3141,6 +3141,40 @@ mod tests {
         }
     }
 
+    /// Asking the same question twice must not put two disclosures on one widget id.
+    ///
+    /// Measured after the fold's identity was keyed on the question alone: the reader retried a prompt,
+    /// and egui drew its red `🔥 First use of widget ID …` / `Second use …` over the conversation — two
+    /// rows registering one id at two rectangles. The turn's position is what tells them apart, and this
+    /// is the test that keeps it in the key.
+    #[test]
+    fn asking_the_same_question_twice_draws_no_clash_warning() {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        let mut records = one_working_turn();
+        // The same turn again, with its sequences shifted above the first copy's.
+        for record in one_working_turn().as_array().expect("records") {
+            let mut shifted = record.clone();
+            if let Some(seq) = shifted["event"]["seq"].as_i64() {
+                shifted["event"]["seq"] = serde_json::json!(seq + 100);
+            }
+            records.as_array_mut().expect("records").push(shifted);
+        }
+        deliver(&session, &recorded, snapshot_with(records));
+
+        let all = painted(&drawn_text(&mut app, egui::vec2(708.0, 620.0)));
+        assert!(!all.contains("🔥"), "no widget id clash is announced: {all}");
+        assert!(!all.contains("use of widget ID"), "and no second line of it: {all}");
+        assert!(!all.contains("ID clashes"), "nor its explanation: {all}");
+        // Both turns are there, each with its own disclosure and its own answer.
+        assert_eq!(all.matches("已完成").count(), 2, "one disclosure per turn: {all}");
+        assert_eq!(
+            all.matches("这个仓库只有 README 和 src。").count(),
+            2,
+            "and both answers are on screen: {all}",
+        );
+    }
+
     #[test]
     fn the_conversation_is_drawn_inside_the_panel() {
         // The regression this exists for: an empty `auto_shrink([false, false])` area
@@ -3276,6 +3310,17 @@ mod tests {
     /// @param size - the window.
     /// @returns the shapes the last pass painted.
     fn panel_shapes(app: &mut App, draft: &str, size: egui::Vec2) -> Vec<egui::Shape> {
+        panel_shapes_at(app, draft, size, 0.0)
+    }
+
+    /// The same, at a named moment on egui's clock — which is what a turning mark is measured against.
+    ///
+    /// @param app - the panel.
+    /// @param draft - what to put in the input box.
+    /// @param size - the window.
+    /// @param time - seconds since the panel started, as egui's `input.time` reports it.
+    /// @returns the shapes the last pass painted.
+    fn panel_shapes_at(app: &mut App, draft: &str, size: egui::Vec2, time: f64) -> Vec<egui::Shape> {
         let ctx = egui::Context::default();
         crate::ui::fonts::ensure_icons(&ctx);
         app.draft = draft.to_owned();
@@ -3287,6 +3332,7 @@ mod tests {
             let mut output = ctx.run_ui(
                 egui::RawInput {
                     focused: true,
+                    time: Some(time),
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                     ..Default::default()
                 },
@@ -3860,22 +3906,164 @@ mod tests {
     }
 
     #[test]
-    fn an_unfinished_turn_keeps_its_process_open() {
-        // While the model is still working there is nothing else to look at, so the disclosure is
-        // shown and cannot be folded.
+    fn a_turn_being_worked_on_is_folded_but_says_so() {
+        // The report that started this: while the model worked, its disclosure was **open**, so the
+        // reasoning streamed in full and then collapsed the moment the answer landed. The panel jumped
+        // under the reader for no reason they could see. What is inside is what is about to be folded
+        // anyway, so it is folded from the first frame — and the label is where "work is happening"
+        // lives now.
         let (mut app, recorded, session, _wake) = app_and_session();
         attach_one(&mut app, &recorded, &session);
-        // The same turn with its ending removed, and the panel told it is still running.
         let mut records = one_working_turn();
         records.as_array_mut().expect("records").pop();
         deliver(&session, &recorded, snapshot_with(records));
         deliver(&session, &recorded, running_now());
 
         let size = egui::vec2(708.0, 620.0);
-        let drawn = drawn_text(&mut app, size);
-        let all = painted(&drawn);
-        assert!(all.contains("先看看目录结构"), "the working is visible while it works: {all}");
-        assert!(!all.contains("已完成"), "and is not announced as finished: {all}");
+        let all = painted(&drawn_text(&mut app, size));
+        assert!(all.contains("正在工作"), "the turn says it is working: {all}");
+        assert!(!all.contains("已完成"), "and does not claim to be done: {all}");
+        for hidden in ["先看看目录结构", "我先列一下目录。", "README.md src"] {
+            assert!(!all.contains(hidden), "the working is folded away: {hidden:?} in {all}");
+        }
+        assert!(all.contains("这个仓库只有 README 和 src。"), "the answer so far is not: {all}");
+    }
+
+    #[test]
+    fn the_disclosure_never_moves_on_its_own() {
+        // Both halves of the rule, in one context because the disclosure's state lives there: it is
+        // closed from the first frame of a turn, and nothing the turn does later opens or closes it —
+        // not the stream growing, not the answer landing. What moves it is only the reader.
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        deliver(&session, &recorded, snapshot_of_a_thinking_turn());
+        deliver(
+            &session,
+            &recorded,
+            stream_frame(serde_json::json!({"type": "chunk", "revision": 2, "index": 0,
+                "chunk": {"type": "reasoning-delta", "index": 0, "text": "先看看目录结构"}})),
+        );
+
+        let size = egui::vec2(708.0, 620.0);
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+
+        let running = painted(&draw_with(&ctx, &mut app, size, vec![]));
+        assert!(running.contains("正在工作"), "the turn is being worked on: {running}");
+        assert!(!running.contains("先看看目录结构"), "and its working starts folded: {running}");
+
+        // The reader opens it mid-stream…
+        let opened = painted(&click_painted(&ctx, &mut app, size, "正在工作"));
+        assert!(opened.contains("先看看目录结构"), "the reader can open it while it works: {opened}");
+
+        // …the stream grows (the held rows change under it)…
+        deliver(
+            &session,
+            &recorded,
+            stream_frame(serde_json::json!({"type": "chunk", "revision": 3, "index": 1,
+                "chunk": {"type": "reasoning-delta", "index": 0, "text": "，顺便看看测试"}})),
+        );
+        let grown = painted(&draw_with(&ctx, &mut app, size, vec![]));
+        assert!(
+            grown.contains("先看看目录结构"),
+            "and it stays open while the working grows: {grown}",
+        );
+
+        // …and the answer lands: the label changes, the disclosure does not.
+        deliver(&session, &recorded, event_at(2, "assistant/message", serde_json::json!({
+            "message": {"role": "assistant", "content": [
+                {"type": "reasoning", "text": "先看看目录结构，顺便看看测试"},
+                {"type": "text", "text": "这个仓库只有 README 和 src。"}]},
+        })));
+        deliver(&session, &recorded, event_at(3, "turn/end", serde_json::json!({
+            "turn": 1, "reason": {"kind": "completed"},
+        })));
+        let settled = painted(&draw_with(&ctx, &mut app, size, vec![]));
+        assert!(settled.contains("已完成"), "the turn is done: {settled}");
+        assert!(
+            settled.contains("先看看目录结构"),
+            "and the disclosure the reader opened is still open: {settled}",
+        );
+        assert!(settled.contains("这个仓库只有 README 和 src。"), "with the answer below it: {settled}");
+    }
+
+    #[test]
+    fn the_mark_turns_while_the_turn_is_being_worked_on() {
+        // The loading mark: the panel's own glyph (the design has none), turned by the painter, and gone
+        // the moment the turn is done — where the caret takes its place, because then the row's job is
+        // to say "there is something behind me" rather than "something is happening".
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        let mut records = one_working_turn();
+        records.as_array_mut().expect("records").pop();
+        deliver(&session, &recorded, snapshot_with(records));
+        deliver(&session, &recorded, running_now());
+
+        /// The painted text shape of one glyph: where it landed, and how far it is turned.
+        fn glyph_of(shapes: &[egui::Shape], glyph: &str) -> Option<(egui::Rect, f32)> {
+            fn walk(shape: &egui::Shape, glyph: &str, out: &mut Option<(egui::Rect, f32)>) {
+                match shape {
+                    egui::Shape::Vec(inner) => {
+                        for shape in inner {
+                            walk(shape, glyph, out);
+                        }
+                    }
+                    egui::Shape::Text(text) if text.galley.job.text == glyph => {
+                        *out = Some((egui::Rect::from_min_size(text.pos, text.galley.size()), text.angle));
+                    }
+                    _ => {}
+                }
+            }
+            let mut found = None;
+            for shape in shapes {
+                walk(shape, glyph, &mut found);
+            }
+            found
+        }
+        let angle_of = |shapes: &[egui::Shape], glyph: &str| glyph_of(shapes, glyph).map(|(_, angle)| angle);
+
+        let size = egui::vec2(708.0, 620.0);
+        let spinner = crate::ui::icons::Icon::CircleNotch.chars();
+        let caret = crate::ui::icons::Icon::CaretRight.chars();
+
+        let first = angle_of(&panel_shapes_at(&mut app, "", size, 0.0), spinner);
+        let first = first.unwrap_or_else(|| panic!("the working turn shows a turning mark"));
+        let later = angle_of(&panel_shapes_at(&mut app, "", size, 0.3), spinner)
+            .unwrap_or_else(|| panic!("and keeps showing it"));
+        assert!(
+            (later - first).abs() > 0.2,
+            "the mark turns: {first} -> {later} (a still glyph is not a loading mark)",
+        );
+        // **And the caret keeps its place while the turn works** — the loading mark is added after the
+        // words (`▸ 正在工作 ◌`), not swapped in for it, so the row reads the same way in both states and
+        // nothing twitches when the turn ends.
+        // **Centred in its box, like every other glyph.** Drawn at the box's top-left instead — which is
+        // how this went wrong — the mark sat half a box down and to the right of the caret beside it, and
+        // the reader saw a row that did not line up. The two share a row, so their centres must agree.
+        let running = panel_shapes(&mut app, "", size);
+        let (mark_rect, _) = glyph_of(&running, spinner).expect("the turning mark is on screen");
+        let (caret_rect, _) = glyph_of(&running, caret).expect("the caret is drawn while the turn works too");
+        assert!(
+            (mark_rect.center().y - caret_rect.center().y).abs() <= 0.5
+                && (mark_rect.height() - caret_rect.height()).abs() <= 1.0,
+            "the mark is centred like the caret: {mark_rect:?} vs {caret_rect:?}",
+        );
+
+        // The answer lands: the loading mark goes, the caret stays. (The sequences are above
+        // `running_now`'s, or the transcript folds them away as records it has already seen.)
+        deliver(&session, &recorded, event_at(100, "assistant/message", serde_json::json!({
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "这个仓库只有 README 和 src。"}]},
+        })));
+        deliver(&session, &recorded, event_at(101, "turn/end", serde_json::json!({
+            "turn": 2, "reason": {"kind": "completed"},
+        })));
+        let settled = panel_shapes(&mut app, "", size);
+        assert!(
+            angle_of(&settled, spinner).is_none(),
+            "the loading mark is gone once the turn is done",
+        );
+        assert!(angle_of(&settled, caret).is_some(), "and the caret is what is left");
     }
 
     /// One `session/stream` notification, as the host sends it.
@@ -3916,48 +4104,6 @@ mod tests {
              "data": {"role": "user", "content": [{"type": "text", "text": "看看这个仓库"}]}}},
             {"type": "event", "event": {"type": "turn/start", "seq": 1, "time": 2, "data": {"turn": 1}}},
         ]))
-    }
-
-    #[test]
-    fn the_working_is_open_while_it_runs_and_folds_when_the_answer_lands() {
-        // Both halves of the rule, asserted together because the fold's default only means anything
-        // next to the run that precedes it: while the model works its thinking is the only thing
-        // happening, and the moment the answer lands the disclosure folds itself away, with no click
-        // from anyone.
-        let (mut app, recorded, session, _wake) = app_and_session();
-        attach_one(&mut app, &recorded, &session);
-        deliver(&session, &recorded, snapshot_of_a_thinking_turn());
-        deliver(
-            &session,
-            &recorded,
-            stream_frame(serde_json::json!({"type": "chunk", "revision": 2, "index": 0,
-                "chunk": {"type": "reasoning-delta", "index": 0, "text": "先看看目录结构"}})),
-        );
-
-        let size = egui::vec2(708.0, 620.0);
-        // One context for both halves: the fold's state lives in the context, so a fresh one would
-        // forget whatever the first half had done — and "it folded by itself" is exactly that memory.
-        let ctx = egui::Context::default();
-        crate::ui::fonts::ensure_icons(&ctx);
-
-        let running = painted(&draw_with(&ctx, &mut app, size, vec![]));
-        assert!(running.contains("正在工作"), "the turn is being worked on: {running}");
-        assert!(running.contains("先看看目录结构"), "so its thinking is what there is to watch: {running}");
-
-        // The answer lands, and the turn ends.
-        deliver(&session, &recorded, event_at(2, "assistant/message", serde_json::json!({
-            "message": {"role": "assistant", "content": [
-                {"type": "reasoning", "text": "先看看目录结构"},
-                {"type": "text", "text": "这个仓库只有 README 和 src。"}]},
-        })));
-        deliver(&session, &recorded, event_at(3, "turn/end", serde_json::json!({
-            "turn": 1, "reason": {"kind": "completed"},
-        })));
-
-        let settled = painted(&draw_with(&ctx, &mut app, size, vec![]));
-        assert!(settled.contains("已完成"), "the turn is done: {settled}");
-        assert!(!settled.contains("先看看目录结构"), "and its thinking folded itself away: {settled}");
-        assert!(settled.contains("这个仓库只有 README 和 src。"), "leaving the answer: {settled}");
     }
 
     #[test]
