@@ -1785,10 +1785,18 @@ mod tests {
                     let panel = panel.expect("the panel paints all four rounded corners");
                     assert!(panel.bottom() <= height - f32::from(theme::SHADOW_ROOM_BOTTOM) + 1.0,
                         "rounded bottom {panel:?} is outside window height {height}");
-                    for label in ["工作区修改", "DeepSeek-V41-Flash", "发送", "关闭", "缓存命中"] {
+                    // The panel's own row is on this page: the key hints.
+                    for label in ["发送", "关闭"] {
                         let rect = texts.iter().find(|(text, _)| text.contains(label))
-                            .unwrap_or_else(|| panic!("missing footer {label}: {texts:?}")).1;
-                        assert!(panel.contains_rect(rect), "footer {label} {rect:?} outside {panel:?}");
+                            .unwrap_or_else(|| panic!("missing hint {label}: {texts:?}")).1;
+                        assert!(panel.contains_rect(rect), "hint {label} {rect:?} outside {panel:?}");
+                    }
+                    // **The session's controls are not** (2026-10-07): the permission, the model and the
+                    // statistics belong to the conversation page, so neither strip is drawn here — and
+                    // neither is reserved for, which is what this test's heights are about.
+                    for absent in ["工作区修改", "DeepSeek-V41-Flash", "缓存命中", "轮"] {
+                        assert!(!texts.iter().any(|(text, _)| text.contains(absent)),
+                            "the settings page must not offer {absent}: {texts:?}");
                     }
                     if pass == 3 {
                         assert!(panel.height() <= desired + 1.0, "painted panel exceeds requested height");
@@ -2388,6 +2396,72 @@ mod tests {
             context_tokens: Some(10870), context_limit: None,
         });
         state
+    }
+
+    #[test]
+    fn the_session_controls_belong_to_the_conversation_page() {
+        // The request (2026-10-07): the permission, the model and the session's statistics are the
+        // **conversation's** furniture — in web-UI terms they sit at the bottom of the conversation's own
+        // `div`, a sibling of its scrolling thread rather than part of it. The settings page is about the
+        // panel, so it shows the panel's own row (the key hints, and anything the panel has to say) and
+        // none of the session's three groups. The design draws them outside `q-main`, which is why they
+        // used to follow the settings page onto the screen.
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let font = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/NotoSansSC-VF.otf");
+        assert!(matches!(crate::ui::fonts::install_from(&ctx, &font), crate::ui::fonts::FontStatus::Loaded { .. }));
+        let mut state = footer_state_for_layout();
+        state.entries = std::sync::Arc::new(vec![
+            crate::app::session::transcript::Entry::User { text: "看看这个仓库".to_owned() },
+            crate::app::session::transcript::Entry::Assistant {
+                blocks: vec![crate::app::session::transcript::Block::Text(
+                    "这个仓库只有 README 和 src。".to_owned(),
+                )],
+                streaming: false,
+            },
+        ]);
+        let draw = |state: &PanelState| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(708.0, 620.0))),
+                    ..Default::default()
+                },
+                |ui| { crate::ui::draw(ui, state, &mut String::new(), &mut None, &mut egui_commonmark::CommonMarkCache::default()); },
+            );
+            let mut texts = Vec::new();
+            for shape in &output.shapes { collect_text(&shape.shape, &mut texts); }
+            output.textures_delta.clear();
+            texts
+        };
+        let at = |texts: &[(String, egui::Rect)], needle: &str| {
+            texts.iter().find(|(text, _)| text.contains(needle)).map(|(_, rect)| *rect)
+        };
+
+        // The conversation page: all three groups, and all of them under the answer — pinned below the
+        // thread rather than drawn inside it.
+        let conversation = draw(&state);
+        let answer = at(&conversation, "这个仓库只有 README 和 src。").expect("the answer is on screen");
+        for label in ["工作区修改", "DeepSeek-V41-Flash", "缓存命中", "发送"] {
+            let rect = at(&conversation, label)
+                .unwrap_or_else(|| panic!("the conversation page shows {label}: {conversation:?}"));
+            assert!(rect.top() > answer.bottom(), "{label} is pinned under the thread: {rect:?}");
+        }
+
+        // The settings page: none of the session's furniture, and the panel's own row still there.
+        state.settings_open = true;
+        let settings = draw(&state);
+        for absent in ["工作区修改", "DeepSeek-V41-Flash", "缓存命中", "仅可查看", "轮"] {
+            assert!(
+                !settings.iter().any(|(text, _)| text.contains(absent)),
+                "the settings page draws no {absent}: {settings:?}",
+            );
+        }
+        for present in ["悬浮窗设置", "发送", "关闭"] {
+            assert!(
+                settings.iter().any(|(text, _)| text.contains(present)),
+                "the settings page keeps {present}: {settings:?}",
+            );
+        }
     }
 
     #[test]

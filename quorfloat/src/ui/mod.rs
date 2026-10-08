@@ -222,7 +222,9 @@ pub(crate) fn draw(
                     // so the user can still see which conversation they are about to go back to.
                     if state.settings_open {
                         let top = ui.cursor().min.y - panel_top;
-                        let footer = footer_height(ui, state);
+                        // The session's strip is not part of this page, so it is neither drawn nor
+                        // reserved for — the page gets that height back.
+                        let footer = footer_height(ui, state, Page::Settings);
                         let spacing = ui.spacing().item_spacing.y;
                         let border = theme::BORDER * 2.0;
                         let available = (ui.available_height() - footer - spacing)
@@ -235,7 +237,7 @@ pub(crate) fn draw(
                         if let Some(chosen) = outcome.action() {
                             *action = Some(chosen);
                         }
-                        footer_bar(ui, state, action);
+                        footer_bar(ui, state, action, Page::Settings);
                         let chrome_above = top + content + spacing;
                         return PanelLayout {
                             desired_height: (border + chrome_above + footer)
@@ -257,9 +259,9 @@ pub(crate) fn draw(
                     // starts, and it is what makes "how tall does the panel want to be" a
                     // question with an answer instead of an estimate.
                     let chrome_above = ui.cursor().min.y - panel_top;
-                    let footer = footer_height(ui, state);
+                    let footer = footer_height(ui, state, Page::Conversation);
                     if state.entries.is_empty() && state.live.is_none() {
-                        footer_bar(ui, state, action);
+                        footer_bar(ui, state, action, Page::Conversation);
                         return PanelLayout {
                             desired_height: (chrome_above + footer)
                                 .clamp(MIN_PANEL_HEIGHT, state.max_height),
@@ -292,7 +294,7 @@ pub(crate) fn draw(
                             conversation(ui, state, thread, markdown)
                         })
                         .inner;
-                    footer_bar(ui, state, action);
+                    footer_bar(ui, state, action, Page::Conversation);
                     PanelLayout {
                         desired_height: (chrome_above + thread_padding + content + footer)
                             .clamp(MIN_PANEL_HEIGHT, state.max_height),
@@ -565,6 +567,26 @@ fn cards(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
         });
 }
 
+/// Which page a bottom bar is measured and drawn for.
+///
+/// **The session's own controls belong to the conversation page**: its permission, its model and
+/// effort, its statistics. They sit in a strip of their own, a *sibling* of the scrolling thread and
+/// pinned under it, and they go away with that page when the settings replace it — in web-UI terms the
+/// strip lives at the bottom of the conversation's own `div`, not beside it. What both pages keep is
+/// the panel's own row: the key hints, and whatever the panel has to say (`已提交，等待 Harness
+/// 确认…`, a refused setting, a missing font).
+///
+/// The design puts the strip *outside* `q-main` (as a sibling of `q-main` and `q-settings`), which is
+/// why it used to stay on the settings page; that is what the user asked to change, and why this
+/// distinction exists at all (see `docs/dsh-quorfloat.md` §11.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Page {
+    /// The conversation: a thread, and the session's controls under it.
+    Conversation,
+    /// The settings page, which is about the panel: the session's controls are not part of it.
+    Settings,
+}
+
 /// Reserve the exact two strips and their separator before sizing the conversation.
 fn runtime_height(state: &PanelState) -> f32 {
     if state.options.as_ref().is_some_and(|options| !options.models.is_empty() || !options.permissions.is_empty()) {
@@ -573,8 +595,12 @@ fn runtime_height(state: &PanelState) -> f32 {
 }
 
 /// Total reserved height, including the layout's trailing item spacing.
-fn footer_height(ui: &egui::Ui, state: &PanelState) -> f32 {
-    runtime_height(state)
+///
+/// The session's strip is counted only on the page that draws it: reserving height for a strip that is
+/// not there is how a panel comes out taller than its own content.
+fn footer_height(ui: &egui::Ui, state: &PanelState, page: Page) -> f32 {
+    let session = if page == Page::Conversation { runtime_height(state) } else { 0.0 };
+    session
         + theme::BORDER + theme::FOOTER_INFO_HEIGHT
         + f32::from(theme::PAD_FOOTER.top + theme::PAD_FOOTER.bottom)
         + ui.spacing().item_spacing.y
@@ -643,22 +669,28 @@ pub(crate) fn key_symbols() -> String {
 }
 
 
-/// Settings above, shortcuts and statistics below, each in explicitly allocated rectangles.
-fn footer_bar(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>) {
+/// The session's strip above, the panel's own row below, each in explicitly allocated rectangles.
+///
+/// @param page - which page this bar belongs to; the session's strip is drawn on the conversation page
+///   only, and its statistics give way to the panel's own line (`status_line`) when it has one.
+fn footer_bar(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>, page: Page) {
     let width = ui.available_width();
-    let height = footer_height(ui, state) - ui.spacing().item_spacing.y;
+    let height = footer_height(ui, state, page) - ui.spacing().item_spacing.y;
     let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let session = page == Page::Conversation && runtime_height(state) > 0.0;
     let runtime = egui::Rect::from_min_max(
         rect.min + egui::vec2(f32::from(theme::PAD_RUNTIME.left), 0.0),
         egui::pos2(rect.right() - f32::from(theme::PAD_RUNTIME.right), rect.top() + theme::FOOTER_PICKER_HEIGHT),
     );
-    if runtime_height(state) > 0.0 {
+    if session {
         ui.scope_builder(egui::UiBuilder::new().max_rect(runtime), |ui| {
             ui.set_width(runtime.width());
             footer::settings(ui, state, action);
         });
     }
-    let rule_y = rect.top() + runtime_height(state);
+    // The separator belongs to the strip it closes: the session strip when there is one, and the
+    // content above the bar otherwise (the settings rows, on that page).
+    let rule_y = rect.top() + if session { runtime_height(state) } else { 0.0 };
     ui.painter().hline(rect.x_range(), rule_y, egui::Stroke::new(theme::BORDER, theme::line()));
     let info = egui::Rect::from_min_max(
         egui::pos2(rect.left() + f32::from(theme::PAD_FOOTER.left), rule_y + theme::BORDER + f32::from(theme::PAD_FOOTER.top)),
@@ -680,7 +712,9 @@ fn footer_bar(ui: &mut egui::Ui, state: &PanelState, action: &mut Option<Action>
     ui.scope_builder(egui::UiBuilder::new().max_rect(right).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
         if let Some(status) = status_line(state) {
             ui.add(egui::Label::new(egui::RichText::new(status.text).size(theme::TEXT_SMALL).color(status.colour)).truncate());
-        } else {
+        } else if page == Page::Conversation {
+            // Session statistics are the conversation's, so they are the session strip's counterpart:
+            // the settings page shows nothing here unless the panel has something to say.
             footer::statistics(ui, state.stats);
         }
     });
