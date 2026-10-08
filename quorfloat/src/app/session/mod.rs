@@ -25,6 +25,13 @@ use crate::app::session::interaction::{
 };
 use crate::app::session::transcript::Transcript;
 
+/// Every prompt key this process has issued, counted once.
+///
+/// Not per session, and never reset: it is the part of a key that makes it new even when the clock has
+/// not moved and the process id is the same — see [`Session::prompt_key`] for what goes wrong when a key
+/// repeats.
+static PROMPT_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Which outbound request a response settles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Sending {
@@ -287,8 +294,6 @@ pub struct Session {
     /// Held here rather than in the panel because only this layer knows when the creation has
     /// finished: it finishes as an attach, and an attach is done when its answer arrives.
     pending_prompt: Option<String>,
-    /// Idempotency keys issued so far, so a retry after a failure uses a fresh one.
-    prompts_issued: u64,
     /// Where raw conversation frames are captured, when a capture was asked for.
     ///
     /// Owned here rather than read from the environment in [`Session::new`] so tests
@@ -428,7 +433,6 @@ impl Session {
             cancel: Delivery::Idle,
             sends_in_flight: BTreeMap::new(),
             pending_prompt: None,
-            prompts_issued: 0,
             dump: Dump::default(),
             follow_request: None,
             setting_requests: BTreeMap::new(),
@@ -1394,8 +1398,7 @@ impl Session {
     /// @param sink - where the frame goes.
     /// @returns how the attempt ended.
     fn send_to(&mut self, session_id: &str, text: &str, sink: &mut dyn FrameSink) -> Delivery {
-        self.prompts_issued += 1;
-        let key = format!("{session_id}:prompt-{}", self.prompts_issued);
+        let key = Self::prompt_key(session_id);
         let request_id = self.take_request_id();
         let frame = rpc::request(
             request_id,
@@ -1411,6 +1414,49 @@ impl Session {
             sink.log(&format!("could not send a prompt: {error}"));
         }
         self.prompt.clone()
+    }
+
+    /// The idempotency key for one prompt attempt.
+    ///
+    /// **It has to be new for a new attempt, and the attempt may be in a different process than the
+    /// last one.** The host keeps keys for the life of a *conversation*: its session controller
+    /// answers `accepted: true` **without admitting anything** when the `requestId` matches a
+    /// `user/message` already in that session's history (`hasPromptRequest` in
+    /// `packages/api/session-controller/src/commands.ts`). A counter that begins at zero in every
+    /// process therefore loses the first prompt after every restart — the input is cleared, the host
+    /// says "accepted", and the message is simply gone (reported 2026-10-08; the marker's fingerprint
+    /// was `session-…:prompt-1` appearing three times for one conversation).
+    ///
+    /// So the key is built from things that do not restart with the panel: a sequence that runs for the
+    /// life of the process ([`PROMPT_SEQUENCE`]), the process id, and the clock. The session id is there
+    /// so the marker stays readable. A per-session counter is *not* enough on its own, and that is
+    /// measurable: two sessions in one process, in the same millisecond, produced the same key.
+    ///
+    /// @param session_id - the conversation the prompt goes to.
+    /// @returns the key to put in `requestId`.
+    fn prompt_key(session_id: &str) -> String {
+        Self::prompt_key_for(
+            session_id,
+            // The run this attempt belongs to: the clock keeps one run out of the next, the process id
+            // keeps two panels started in the same millisecond apart.
+            &format!("{}-{}", std::process::id(), rpc::now_millis()),
+            PROMPT_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
+        )
+    }
+
+    /// The key's shape, as a function of the three things it is made of.
+    ///
+    /// A pure function because the property that matters is about **runs**, and a run cannot be produced
+    /// from inside one: two `Session`s in a test share the process id and can share the clock, so a test
+    /// that builds two of them proves nothing about a panel that was restarted. Here the run is an
+    /// argument, and a key that ignores it fails (`a_prompt_key_names_the_attempt_not_just_the_conversation`).
+    ///
+    /// @param session_id - the conversation the prompt goes to.
+    /// @param run - what identifies this run of the panel.
+    /// @param sequence - how many keys this run has issued, counting this one.
+    /// @returns the key to put in `requestId`.
+    fn prompt_key_for(session_id: &str, run: &str, sequence: u64) -> String {
+        format!("{session_id}:prompt-{run}-{sequence}")
     }
 
     /// Send the prompt that was waiting for a conversation to exist.
@@ -2632,6 +2678,42 @@ mod tests {
         session.on_frame(Inbound::Response { id, outcome: Ok(json!({"accepted": true})) }, &mut sink);
         assert_eq!(*session.prompt_delivery(), Delivery::Accepted);
         assert!(session.prompt_delivery().describe().is_none(), "accepted needs no line");
+    }
+
+    #[test]
+    fn a_prompt_key_names_the_attempt_not_just_the_conversation() {
+        // The bug this exists for (reported 2026-10-08): the panel restarted, the user typed, pressed
+        // Enter — the input was cleared and nothing was sent. The key was `{session}:prompt-{n}` with `n`
+        // starting at zero in every process, so the first prompt after a restart repeated a key the host
+        // already had in that conversation's history. The host answers `accepted: true` to a repeated key
+        // **without admitting the prompt** (`hasPromptRequest` in the harness's session controller), so
+        // the text went nowhere while the panel — for which "the host took it" is delivered — cleared the
+        // input.
+        //
+        // Two *runs*, one conversation, both on their first prompt: the attempt count cannot tell them
+        // apart, and that is exactly the case that was broken.
+        let key = |run: &str, sequence: u64| Session::prompt_key_for("session-1", run, sequence);
+        assert_ne!(
+            key("pid-1-1000", 1),
+            key("pid-2-1000", 1),
+            "another run of the panel is another attempt, even at the same clock tick",
+        );
+        assert_ne!(
+            key("pid-1-1000", 1),
+            key("pid-1-1000", 2),
+            "and a second attempt inside one run is one too",
+        );
+        assert_eq!(
+            key("pid-1-1000", 1),
+            key("pid-1-1000", 1),
+            "while the key for one attempt is stable, so a lost answer can be recognised",
+        );
+        // The conversation is still in the key, so the marker stays readable.
+        assert!(
+            key("pid-1-1000", 1).starts_with("session-1:prompt-"),
+            "{}",
+            key("pid-1-1000", 1),
+        );
     }
 
     #[test]
