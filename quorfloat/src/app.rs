@@ -137,6 +137,13 @@ pub struct App {
     /// Owned here rather than by the widget, because a widget forgets: this has to survive
     /// the frames in which the panel does not paint, and a send the host refused.
     draft: String,
+    /// The text of the attempt the host has not settled yet, while it is in flight.
+    ///
+    /// **The box is cleared when the send goes out, so this is the only copy** between the frame
+    /// leaving and the host's verdict arriving. A refusal that arrives late — the host answering an
+    /// ordinary-looking send with "nothing was sent" — would otherwise take the text with it, and the
+    /// user would have to type it again; see [`App::recover_refused_prompt`].
+    in_flight_prompt: Option<String>,
     /// What to tell the user about the fonts, when there is something to tell.
     ///
     /// A panel that cannot draw its own text has to say so: silent boxes look like a
@@ -240,6 +247,7 @@ impl App {
             screenshot_marked_at: None,
             markdown: egui_commonmark::CommonMarkCache::default(),
             draft: crate::ui::draft_from_env(),
+            in_flight_prompt: None,
             fonts_warning: None,
             fonts_checked: false,
             preferences,
@@ -591,6 +599,7 @@ impl App {
 
     /// Drain pending work from the reader thread.
     pub fn pump(&mut self) {
+        self.recover_refused_prompt();
         while let Ok(wake) = self.wake.try_recv() {
             match wake {
                 Wake::Hotkey => self.toggle(),
@@ -601,6 +610,37 @@ impl App {
             }
         }
         self.adopt_host_config();
+    }
+
+    /// Put back the text of a send the host refused.
+    ///
+    /// The box is cleared the moment a send goes out — the status line says "已提交，等待 Harness 确认…",
+    /// and clearing is what tells the user the panel took it. That is a promise, and this is where the
+    /// panel keeps it: if the host then refuses (its own reason, arriving later), the promise was wrong,
+    /// so the text comes back **with the reason** and the user can press Enter again. A refusal that
+    /// silently took the text is the difference between "that failed" and "my message vanished".
+    ///
+    /// Only when the box is empty: whatever the user has typed since is theirs, and a refusal is not a
+    /// reason to overwrite it.
+    fn recover_refused_prompt(&mut self) {
+        if self.in_flight_prompt.is_none() {
+            return;
+        }
+        let delivery = self.session.lock().expect("session").prompt_delivery().clone();
+        match delivery {
+            Delivery::Failed { .. } => {
+                let text = self.in_flight_prompt.take().expect("just checked");
+                if self.draft.is_empty() {
+                    self.sink.mark("the text of a refused send was put back in the box");
+                    self.draft = text;
+                }
+            }
+            // Settled the other way: the host has it, and the copy is done with.
+            Delivery::Accepted => {
+                self.in_flight_prompt = None;
+            }
+            Delivery::Idle | Delivery::Sending => {}
+        }
     }
 
     /// Flip the panel's visibility.
@@ -870,6 +910,8 @@ impl App {
                     // the user can fix a refusal, and cannot fix a vanished message.
                 } else {
                     self.draft.clear();
+                    // It is out of the box, so this copy is what a late refusal gets back.
+                    self.in_flight_prompt = Some(text);
                 }
             }
             Action::Cancel => {
@@ -3741,12 +3783,81 @@ mod tests {
         let ctx = egui::Context::default();
         crate::ui::fonts::ensure_icons(&ctx);
         let size = egui::vec2(708.0, 620.0);
+        type_and_send(&ctx, &mut app, size, "你好", 1);
+
+        let sent = prompt_frames(&recorded);
+        assert_eq!(sent.len(), 1, "one prompt went out: {sent:?}");
+        assert_eq!(sent[0]["params"]["text"], "你好");
+        assert_eq!(app.draft, "", "and the box was cleared");
+    }
+
+    /// The refusal, and the way out of it: the panel keeps the text and sends it again.
+    ///
+    /// The host refuses a prompt whose idempotency key the conversation has already spent, because
+    /// Harness answers such a prompt `{accepted: true}` **without admitting it** — the peer would clear
+    /// its input over a message that was never sent (`progress.md` §5). What makes that recoverable is
+    /// this half: the text stays where the user can press Enter again, and the second attempt is a *new*
+    /// key, so it goes through.
+    #[test]
+    fn a_refused_prompt_keeps_the_text_and_pressing_enter_again_sends_it() {
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let size = egui::vec2(708.0, 620.0);
+
+        type_and_send(&ctx, &mut app, size, "你好", 1);
+        let first = prompt_frames(&recorded);
+        assert_eq!(first.len(), 1, "the first attempt went out: {first:?}");
+        // The host's answer, worded as the session layer words it.
+        deliver(
+            &session,
+            &recorded,
+            Inbound::Response {
+                id: first[0]["id"].clone(),
+                outcome: Err(crate::ipc::rpc::RpcError {
+                    code: crate::ipc::protocol::error_code::UNAVAILABLE,
+                    message: "请再按一次发送：这条消息的幂等键本会话已经用过，Harness 会丢弃它".to_owned(),
+                    data: None,
+                }),
+            },
+        );
+        draw_once(&ctx, &mut app, size);
+
+        // The real loop pumps before it paints (`logic` → `pump` → `draw`), which is where a late
+        // verdict is turned into a box the user can use again.
+        app.pump();
+        assert_eq!(app.draft, "你好", "a refusal leaves the text where the user can fix it");
+        assert!(
+            app.state().prompt_line.as_deref().unwrap_or_default().contains("请再按一次发送"),
+            "and says why: {:?}",
+            app.state().prompt_line,
+        );
+
+        type_and_send(&ctx, &mut app, size, "", 1);
+        let second = prompt_frames(&recorded);
+        assert_eq!(second.len(), 2, "pressing Enter again is a second attempt: {second:?}");
+        assert_ne!(
+            second[1]["params"]["requestId"], first[0]["params"]["requestId"],
+            "and a new attempt is a new key — the host would refuse the old one",
+        );
+        assert_eq!(app.draft, "", "which the host took");
+    }
+
+    /// Type into the composer and press Enter, the way a user does.
+    ///
+    /// @param ctx - the context the panel draws in, so focus survives between passes.
+    /// @param app - the panel.
+    /// @param size - the window.
+    /// @param text - what to type; empty types nothing.
+    /// @param enters - how many Enters to press, one pass each.
+    fn type_and_send(ctx: &egui::Context, app: &mut App, size: egui::Vec2, text: &str, enters: usize) {
         // Inside the composer's editor: past the search mark, below the top bar.
         let editor = egui::pos2(
             f32::from(crate::ui::theme::SHADOW_ROOM_SIDE + crate::ui::theme::PAD_COMPOSER.left) + 60.0,
             f32::from(crate::ui::theme::SHADOW_ROOM_TOP) + 95.0,
         );
-        let plan: Vec<Vec<egui::Event>> = vec![
+        let mut plan: Vec<Vec<egui::Event>> = vec![
             vec![egui::Event::PointerMoved(editor)],
             vec![egui::Event::PointerButton {
                 pos: editor,
@@ -3760,16 +3871,20 @@ mod tests {
                 pressed: false,
                 modifiers: egui::Modifiers::NONE,
             }],
-            vec![egui::Event::Text("你好".to_owned())],
-            vec![egui::Event::Key {
+        ];
+        if !text.is_empty() {
+            plan.push(vec![egui::Event::Text(text.to_owned())]);
+        }
+        for _ in 0..enters {
+            plan.push(vec![egui::Event::Key {
                 key: egui::Key::Enter,
                 physical_key: None,
                 pressed: true,
                 repeat: false,
                 modifiers: egui::Modifiers::NONE,
-            }],
-        ];
-        for (index, events) in plan.into_iter().enumerate() {
+            }]);
+        }
+        for events in plan {
             let mut output = ctx.run_ui(
                 egui::RawInput {
                     events,
@@ -3780,17 +3895,39 @@ mod tests {
                 |ui| app.draw(ui),
             );
             output.textures_delta.clear();
-            let _ = index;
         }
+    }
 
-        let frames = recorded.frames.lock().expect("not poisoned").clone();
-        let sent: Vec<&serde_json::Value> = frames
+    /// One pass of the panel, with its texture deltas dropped (egui panics on unapplied ones).
+    ///
+    /// @param ctx - the context the panel draws in.
+    /// @param app - the panel.
+    /// @param size - the window.
+    fn draw_once(ctx: &egui::Context, app: &mut App, size: egui::Vec2) {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                focused: true,
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            },
+            |ui| app.draw(ui),
+        );
+        output.textures_delta.clear();
+    }
+
+    /// Every `session/prompt` frame the panel has written, in order.
+    ///
+    /// @param recorded - the frames the panel wrote.
+    /// @returns the prompt frames.
+    fn prompt_frames(recorded: &crate::app::tests::Recorded) -> Vec<serde_json::Value> {
+        recorded
+            .frames
+            .lock()
+            .expect("not poisoned")
             .iter()
             .filter(|frame| frame["method"] == "session/prompt")
-            .collect();
-        assert_eq!(sent.len(), 1, "one prompt went out: {frames:?}");
-        assert_eq!(sent[0]["params"]["text"], "你好");
-        assert_eq!(app.draft, "", "and the box was cleared");
+            .cloned()
+            .collect()
     }
 
 

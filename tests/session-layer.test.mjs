@@ -315,3 +315,98 @@ test('describe() exposes subscription state for diagnostics', async () => {
   assert.equal(described.follows[0].cursor, 7)
   assert.equal(described.follows[0].snapshotDelivered, true)
 })
+
+test('a key the conversation has already used is refused, not silently dropped', async () => {
+  // The bug this exists for (2026-10-08): the panel restarted, its first prompt reused
+  // `session-…:prompt-1`, and the Harness — which keeps prompt keys for the life of the *conversation*
+  // — answered `{accepted: true}` without admitting anything. The panel treats that as delivered, so
+  // the input was cleared and the message was never sent. Refusing is what makes it recoverable: the
+  // peer keeps the text and says why.
+  const { layer, harness } = buildLayer()
+  await layer.attach('session-1')
+  harness.push(
+    'session-1',
+    snapshot(9, [
+      {
+        type: 'event',
+        event: {
+          type: 'user/message',
+          seq: 4,
+          data: { role: 'user', source: { kind: 'user', rpcId: 'session-1:prompt-1' } },
+        },
+      },
+    ]),
+  )
+  await tick()
+
+  await assert.rejects(() => layer.prompt('session-1', 'session-1:prompt-1', '你好'), error => {
+    assert.ok(error instanceof HarnessError)
+    assert.equal(error.code, 'stale')
+    assert.match(error.message, /再按一次发送/)
+    return true
+  })
+  assert.deepEqual(harness.calls.prompts, [], 'nothing was forwarded for a spent key')
+})
+
+test('a key spent by a live user message is refused too', async () => {
+  // The same rule, reached through the other door: the key arrives as an event rather than inside the
+  // snapshot — which is how a key spent *in this run* becomes visible to the guard.
+  const { layer, harness } = buildLayer()
+  await layer.attach('session-1')
+  harness.push('session-1', snapshot(1, []))
+  harness.push('session-1', {
+    type: 'event',
+    seq: 2,
+    eventType: 'user/message',
+    time: 2,
+    data: { role: 'user', source: { kind: 'user', rpcId: 'session-1:prompt-7' } },
+  })
+  await tick()
+
+  await assert.rejects(() => layer.prompt('session-1', 'session-1:prompt-7', '你好'), error => {
+    assert.equal(error.code, 'stale')
+    return true
+  })
+})
+
+test('a key this run already admitted is still answered as accepted', async () => {
+  // The other side of the guard: a repeat of a key *this* process sent is a retry of its own frame, and
+  // the answer the peer needs is the one it already got. Refusing that would be worse than the bug —
+  // the peer would say "nothing was sent" about a message that *was* sent.
+  //
+  // The order matters, so this test walks the key into both sets: it is sent, and then its own
+  // `user/message` arrives, which is what puts it in the conversation's history.
+  const { layer, harness } = buildLayer()
+  await layer.attach('session-1')
+  harness.push('session-1', snapshot(1, []))
+  await tick()
+  await layer.prompt('session-1', 'session-1:prompt-2', '你好')
+  harness.push('session-1', {
+    type: 'event',
+    seq: 2,
+    eventType: 'user/message',
+    time: 2,
+    data: { role: 'user', source: { kind: 'user', rpcId: 'session-1:prompt-2' } },
+  })
+  await tick()
+
+  const again = await layer.prompt('session-1', 'session-1:prompt-2', '你好')
+  assert.deepEqual(again, { accepted: true }, 'a retry of our own frame is not a reuse of a spent key')
+  assert.equal(harness.calls.prompts.length, 1, 'and it is not forwarded twice')
+})
+
+test('a fresh key is admitted even though the conversation has older ones', async () => {
+  const { layer, harness } = buildLayer()
+  await layer.attach('session-1')
+  harness.push(
+    'session-1',
+    snapshot(4, [
+      { type: 'event', event: { type: 'user/message', seq: 3, data: { source: { kind: 'user', rpcId: 'old' } } } },
+      { type: 'event', event: { type: 'assistant/message', seq: 4, data: { source: { kind: 'user' } } } },
+    ]),
+  )
+  await tick()
+
+  await layer.prompt('session-1', 'session-1:prompt-9', '你好')
+  assert.deepEqual(harness.calls.prompts.map(call => call.requestId), ['session-1:prompt-9'])
+})
