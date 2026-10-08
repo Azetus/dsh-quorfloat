@@ -3672,6 +3672,104 @@ mod tests {
         );
     }
 
+    /// Exercise the real popup, clipped text, wheel events and the last row's two hit targets.
+    fn top_picker_fits_and_scrolls(kind: crate::ui::PickerKind) {
+        use crate::ui::{Action, PickerKind, theme};
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        let font = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/fonts/NotoSansSC-VF.otf");
+        assert!(matches!(crate::ui::fonts::install_from(&ctx, &font), crate::ui::fonts::FontStatus::Loaded { .. }));
+        let (app, _, _, _) = app_and_session();
+        let mut state = app.state();
+        state.workspaces_asked = true;
+        let popup = crate::ui::picker_popup_id(kind);
+        let frame = |state: &PanelState, height: f32, events: Vec<egui::Event>| {
+            let mut action = None;
+            let mut output = ctx.run_ui(egui::RawInput {
+                focused: true, events,
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(708.0, height))),
+                ..Default::default()
+            }, |ui| { crate::ui::draw(ui, state, &mut String::new(), &mut action,
+                &mut egui_commonmark::CommonMarkCache::default()); });
+            let mut visible_text = Vec::new();
+            for shape in &output.shapes {
+                let mut texts = Vec::new();
+                collect_text(&shape.shape, &mut texts);
+                visible_text.extend(texts.into_iter().filter(|(_, rect)| shape.clip_rect.contains_rect(*rect)));
+            }
+            output.textures_delta.clear();
+            (visible_text, action)
+        };
+        let click = |state: &PanelState, height, pos| {
+            frame(state, height, vec![egui::Event::PointerMoved(pos)]);
+            let mut action = None;
+            for pressed in [true, false] {
+                let (_, result) = frame(state, height, vec![egui::Event::PointerButton {
+                    pos, pressed, button: egui::PointerButton::Primary, modifiers: egui::Modifiers::NONE,
+                }]);
+                if result.is_some() { action = result; }
+            }
+            action
+        };
+        for _ in 0..3 { frame(&state, 620.0, vec![]); }
+        let (texts, _) = frame(&state, 620.0, vec![]);
+        let label = if kind == PickerKind::Workspace { "工作区" } else { "新会话" };
+        let anchor = texts.iter().find(|(text, _)| text == label).expect("picker button").1;
+        click(&state, 620.0, anchor.center());
+        assert!(egui::Popup::is_id_open(&ctx, popup), "real click opened the picker");
+        // Data arrives after the menu opened; its old empty size must not cap the new list.
+        for _ in 0..3 { frame(&state, 620.0, vec![]); }
+        state.workspaces = (0..30).map(|i| crate::app::session::follow::Workspace {
+            workspace_id: format!("workspace-{i}"), title: format!("工作区 {i:02}"), path: format!("/work/{i}"),
+        }).collect();
+        state.conversations = (0..30).map(|i| crate::app::session::follow::SessionSummary {
+            session_id: format!("session-{i}"), title: Some(format!("会话 {i:02}")),
+            cwd: Some(format!("/work/{i}")), updated_at: 0, label: None, running: false, blank: false
+        }).collect();
+        // Shrinking an already-open popup must recalculate its budget too.
+        for height in [620.0, 258.0, 228.0] {
+            for _ in 0..4 { frame(&state, height, vec![]); }
+            let menu = ctx.memory(|mem| mem.area_rect(popup)).expect("popup area");
+            let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(708.0, height));
+            assert!(window.contains_rect(menu), "{kind:?} menu {menu:?} outside {window:?}");
+            assert!(menu.top() > anchor.bottom(), "menu must stay below its button: {menu:?}");
+        }
+        let height = 228.0;
+        let menu = ctx.memory(|mem| mem.area_rect(popup)).unwrap();
+        let pointer = menu.center();
+        frame(&state, height, vec![egui::Event::PointerMoved(pointer)]);
+        frame(&state, height, vec![egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point, delta: egui::vec2(0.0, -10000.0), modifiers: egui::Modifiers::NONE, phase: egui::TouchPhase::Move,
+        }]);
+        for _ in 0..40 { frame(&state, height, vec![]); }
+        let (texts, _) = frame(&state, height, vec![]);
+        let last = if kind == PickerKind::Workspace { "工作区 29" } else { "会话 29" };
+        let row = texts.iter().find(|(text, rect)| text == last && menu.contains_rect(*rect))
+            .unwrap_or_else(|| panic!("last row must be fully visible after scrolling: {texts:?}")).1;
+        let pin = texts.iter().find(|(text, rect)| text == crate::ui::icons::Icon::PushPinSlash.chars()
+            && rect.top() >= row.top() && rect.top() < row.bottom() + theme::MENU_DETAIL_HEIGHT
+            && menu.contains_rect(*rect)).expect("last row pin").1;
+        let pinned = click(&state, height, pin.center());
+        match (kind, pinned) {
+            (PickerKind::Workspace, Some(Action::PinWorkspace { workspace_id: Some(id) })) => assert_eq!(id, "workspace-29"),
+            (PickerKind::Conversation, Some(Action::PinConversation { session_id: Some(id) })) => assert_eq!(id, "session-29"),
+            other => panic!("last row pin must be clickable: {other:?}"),
+        }
+        assert!(egui::Popup::is_id_open(&ctx, popup), "pinning keeps the menu open");
+        assert!(matches!(click(&state, height, row.center()), Some(Action::ChooseConversation { session_id }) if session_id == "session-29"));
+        assert!(!egui::Popup::is_id_open(&ctx, popup), "choosing closes it");
+    }
+
+    #[test]
+    fn conversation_picker_fits_short_windows_and_reaches_its_last_row() {
+        top_picker_fits_and_scrolls(crate::ui::PickerKind::Conversation);
+    }
+
+    #[test]
+    fn workspace_picker_fits_short_windows_and_reaches_its_last_row() {
+        top_picker_fits_and_scrolls(crate::ui::PickerKind::Workspace);
+    }
+
     #[test]
     fn pressing_a_picker_opens_it_instead_of_dragging_the_window() {
         let (mut app, _recorded, _session, _wake) = app_and_session();

@@ -74,6 +74,48 @@ pub(super) struct Outcome {
     pub button: egui::Rect,
 }
 
+/// A top-bar menu bounded by the native viewport, with a fixed heading and scrollable body.
+///
+/// Popup's Area only moves oversized content; it does not make it scroll. Calculate the budget
+/// from the button and viewport on every frame, so late list replies and window shrinking work too.
+fn list_popup(
+    button: &egui::Response,
+    kind: Kind,
+    title: &str,
+    detail: &str,
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    let frame = theme::popover_frame();
+    let margin = frame.total_margin();
+    let height = (button.ctx.viewport_rect().bottom() - button.rect.bottom() - theme::GAP_TIGHT
+        - frame.shadow.margin().bottom - margin.top - margin.bottom).max(0.0);
+    egui::Popup::menu(button)
+        .id(kind.id())
+        .align(egui::RectAlign::BOTTOM_START)
+        .align_alternatives(&[])
+        .gap(theme::GAP_TIGHT)
+        .frame(frame)
+        // Pinning keeps the menu open; selecting a row explicitly closes it.
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_width(theme::POPOVER_WIDTH);
+            // Set this before the heading: set_max_height resets the cursor, and the Area may
+            // still remember an empty list's height (or the previous, taller native window).
+            ui.set_max_height(height);
+            popover_head(ui, title, detail);
+            let remaining = (ui.available_height() - ui.spacing().item_spacing.y).max(0.0);
+            // Keep an overflow cue visible even before hovering, and leave the pins their own space.
+            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+            egui::ScrollArea::vertical()
+                .id_salt(kind.id())
+                .auto_shrink([false, true])
+                .min_scrolled_height(0.0)
+                .max_height(remaining)
+                .show(ui, body);
+        });
+}
+
+
 /// The workspace picker.
 ///
 /// @param ui - where to draw.
@@ -89,15 +131,7 @@ pub(super) fn workspaces(ui: &mut egui::Ui, state: &PanelState) -> Outcome {
     let button = picker_button(ui, Kind::Workspace.id(), Some(Icon::Folder), &current, state.pinned_workspace.is_some());
 
     let mut action = None;
-    egui::Popup::menu(&button)
-        .id(Kind::Workspace.id())
-        .gap(theme::GAP_TIGHT)
-        .frame(theme::popover_frame())
-        // A row's pin button must not dismiss the menu, so only clicks outside it close.
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .show(|ui| {
-            ui.set_width(theme::POPOVER_WIDTH);
-            popover_head(ui, "工作区", &format!("{} 个", state.workspaces.len()));
+    list_popup(&button, Kind::Workspace, "工作区", &format!("{} 个", state.workspaces.len()), |ui| {
             if state.workspaces.is_empty() {
                 // Asked for once, when the menu is first opened: a request per frame would be
                 // a panel that spends its life asking the same question. After that the list is
@@ -163,17 +197,8 @@ pub(super) fn conversations(ui: &mut egui::Ui, state: &PanelState) -> Outcome {
     let button = picker_button(ui, Kind::Conversation.id(), Some(Icon::Chat), &current, state.pinned.is_some());
 
     let mut action = None;
-    egui::Popup::menu(&button)
-        .id(Kind::Conversation.id())
-        .gap(theme::GAP_TIGHT)
-        .frame(theme::popover_frame())
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .show(|ui| {
-            ui.set_width(theme::POPOVER_WIDTH);
-            // The header says *where* these conversations are, not how many there are: the
-            // workspace is what tells two similarly named conversations apart, and the count is
-            // something the list shows by existing.
-            popover_head(ui, "会话", &workspace_title(state));
+    // The header identifies the workspace; the list itself shows how many conversations it has.
+    list_popup(&button, Kind::Conversation, "会话", &workspace_title(state), |ui| {
             if let Some(Row::Chosen) =
                 option_row(ui, Some(Icon::Plus), "开始新会话", Some("发送时创建"), false, false, false)
             {
