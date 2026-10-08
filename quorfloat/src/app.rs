@@ -239,7 +239,7 @@ impl App {
             screenshot_taken_at: None,
             screenshot_marked_at: None,
             markdown: egui_commonmark::CommonMarkCache::default(),
-            draft: String::new(),
+            draft: crate::ui::draft_from_env(),
             fonts_warning: None,
             fonts_checked: false,
             preferences,
@@ -3140,6 +3140,199 @@ mod tests {
             "and the prompt waits for it: {frames:?}",
         );
         assert_eq!(app.draft, "", "the box is free again: the text is in the session's hands");
+    }
+
+    /// The composer's row, and the line under it, as geometry rather than as an impression.
+    ///
+    /// Both halves of the same request (2026-10-08): the magnifier, the input and the send button are
+    /// **one row aligned to its top**, so a wrapped draft grows downwards and leaves the button where
+    /// it was; and the hairline under them is the thread's own top edge, so the panel no longer keeps
+    /// the strip the design reserved for its clipboard row.
+    ///
+    /// @param app - the panel.
+    /// @param draft - what to put in the input box.
+    /// @param size - the window.
+    /// @returns the shapes the pass painted.
+    fn composer_shapes(app: &mut App, draft: &str, size: egui::Vec2) -> Vec<egui::Shape> {
+        let ctx = egui::Context::default();
+        crate::ui::fonts::ensure_icons(&ctx);
+        app.draft = draft.to_owned();
+        // Two passes: the first builds the font atlas, and the icon family joins it at the end of that
+        // pass — so a single pass paints the magnifier and the button as empty galleys, which is a
+        // property of egui's atlas rather than of the layout being measured here.
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    focused: true,
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ui| app.draw(ui),
+            );
+            output.textures_delta.clear();
+            shapes = output.shapes.into_iter().map(|clipped| clipped.shape).collect();
+        }
+        shapes
+    }
+
+    /// The topmost hairline below `below`, which is the rule over the thread.
+    ///
+    /// @param shapes - one pass's shapes.
+    /// @param below - only lines below this y are considered.
+    /// @returns the line's rectangle.
+    fn first_rule_below(shapes: &[egui::Shape], below: f32) -> egui::Rect {
+        /// The recursive half: a hairline is a filled rectangle one or two pixels tall.
+        fn walk(shape: &egui::Shape, below: f32, out: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, below, out);
+                    }
+                }
+                egui::Shape::Rect(rect)
+                    if rect.fill != egui::Color32::TRANSPARENT
+                        && rect.rect.height() <= 2.0
+                        && rect.rect.width() > 200.0
+                        && rect.rect.top() > below =>
+                {
+                    out.push(rect.rect);
+                }
+                _ => {}
+            }
+        }
+        let mut found: Vec<egui::Rect> = Vec::new();
+        for shape in shapes {
+            walk(shape, below, &mut found);
+        }
+        found
+            .into_iter()
+            .min_by(|left, right| left.top().total_cmp(&right.top()))
+            .expect("a hairline under the composer")
+    }
+
+    /// The one filled square of a given size in a pass — the send button, in this file's use of it.
+    ///
+    /// @param shapes - one pass's shapes.
+    /// @param size - the square's side.
+    /// @returns the square's rectangle.
+    fn filled_square(shapes: &[egui::Shape], size: f32) -> egui::Rect {
+        /// The recursive half.
+        fn walk(shape: &egui::Shape, size: f32, out: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::Shape::Vec(inner) => {
+                    for shape in inner {
+                        walk(shape, size, out);
+                    }
+                }
+                egui::Shape::Rect(rect)
+                    if rect.fill != egui::Color32::TRANSPARENT
+                        && (rect.rect.width() - size).abs() <= 1.0
+                        && (rect.rect.height() - size).abs() <= 1.0 =>
+                {
+                    out.push(rect.rect);
+                }
+                _ => {}
+            }
+        }
+        let mut found: Vec<egui::Rect> = Vec::new();
+        for shape in shapes {
+            walk(shape, size, &mut found);
+        }
+        assert_eq!(found.len(), 1, "one {size}px square, which is the button: {found:?}");
+        found[0]
+    }
+
+    #[test]
+    fn the_composer_is_one_top_aligned_row_above_the_threads_own_line() {
+        use crate::ui::theme;
+        let (mut app, recorded, session, _wake) = app_and_session();
+        attach_one(&mut app, &recorded, &session);
+        deliver(&session, &recorded, conversation_frame());
+
+        let mark_glyph = crate::ui::icons::Icon::Search.chars();
+        let mut draw = |draft: &str| {
+            let shapes = composer_shapes(&mut app, draft, egui::vec2(708.0, 620.0));
+            let mut texts = Vec::new();
+            for shape in &shapes {
+                collect_text(shape, &mut texts);
+            }
+            (shapes, texts)
+        };
+        let at = |texts: &[(String, egui::Rect)], needle: &str| {
+            texts
+                .iter()
+                .find(|(text, _)| text.contains(needle))
+                .map(|(_, rect)| *rect)
+                .unwrap_or_else(|| panic!("missing {needle:?} in {texts:?}"))
+        };
+
+        let first = "第一行";
+        let tall_draft = "第一行\n第二行\n第三行\n第四行\n第五行";
+        let (short_shapes, short_text) = draw(first);
+        let (tall_shapes, tall_text) = draw(tall_draft);
+
+        // The button is the 34×34 filled square and the rule is the hairline the thread opens with:
+        // both are boxes, where a glyph's ink rectangle is a few pixels smaller than its line box and
+        // comparing two of those measures the font rather than the layout.
+        let button = filled_square(&short_shapes, theme::SEND_BUTTON);
+        let tall_button = filled_square(&tall_shapes, theme::SEND_BUTTON);
+        let rule = first_rule_below(&short_shapes, button.top());
+        let tall_rule = first_rule_below(&tall_shapes, tall_button.top());
+        let mark = at(&short_text, mark_glyph);
+        let tall_mark = at(&tall_text, mark_glyph);
+        let line = at(&short_text, first);
+        let tall_line = at(&tall_text, first);
+
+        // **The mark rides the first line** — that is what the design's `.q-search { padding-top:6px }`
+        // is for — and it keeps riding it when the draft grows, because the row is aligned to its top
+        // (`align-items:flex-start`) rather than to its middle.
+        assert!(
+            (mark.center().y - line.center().y).abs() <= 3.0,
+            "the mark is on the first line: {mark:?} / {line:?}",
+        );
+        // The draft's text grows *downwards*, so what must not change is the mark's offset from the
+        // top of the text block — its centre says nothing once five lines share one galley.
+        assert!(
+            ((tall_mark.center().y - tall_line.top()) - (mark.center().y - line.top())).abs() <= 3.0,
+            "and still on the first line after the draft grew: {tall_mark:?} / {tall_line:?}",
+        );
+
+        // **The button holds its place against the first line**, which is the request: centred in the
+        // row instead, it would sit ~40px lower once the input was five lines tall.
+        let inset = button.top() - line.top();
+        let tall_inset = tall_button.top() - tall_line.top();
+        // Negative: the button's top edge is the row's, and the text's ink begins inside the editor's
+        // own padding below it. (That the two tops are the *same* edge is what the rule assertion at the
+        // end of this test measures, since the editor's box is exactly one line tall here.)
+        assert!(inset < 0.0, "the button starts at the row's top, above the first line: {inset}");
+        assert!(
+            (tall_inset - inset).abs() <= 3.0,
+            "and stays there when the input grows: {inset} -> {tall_inset} ({button:?} -> {tall_button:?})",
+        );
+        // The row really did grow, so the assertion above is not passing on a composer that never
+        // changed: the rule under it is a box, and it is below the editor, so it moves with it.
+        assert!(
+            tall_rule.top() - rule.top() > theme::LINE_COMPOSER,
+            "the input grew by more than a line: {rule:?} -> {tall_rule:?}",
+        );
+
+        // **The strip the clipboard row used to reserve is gone.** Measured from the editor's own box
+        // (the button's top plus one line, since the two share a top edge): the gap is the composer's
+        // bottom padding plus the layout's inter-section spacing, and it must stay *below* the design's
+        // `.q-thread` padding — which is what used to sit above the line as well, and now sits under it
+        // where the design puts it (`border-top` on `.q-thread`).
+        let editor_bottom = button.top() + crate::ui::EDITOR_MIN_HEIGHT;
+        let gap = rule.top() - editor_bottom;
+        assert!(
+            gap >= f32::from(theme::PAD_COMPOSER.bottom),
+            "the composer keeps its own padding: {gap}px",
+        );
+        assert!(
+            gap < f32::from(theme::PAD_COMPOSER.bottom) + f32::from(theme::PAD_THREAD.top),
+            "and the strip above the rule is gone: {gap}px of {} + spacing",
+            theme::PAD_COMPOSER.bottom,
+        );
     }
 
     #[test]

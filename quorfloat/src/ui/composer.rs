@@ -38,13 +38,28 @@ pub(super) fn composer(
     let sending = state.prompt_sending;
     let frame = egui::Frame::NONE.inner_margin(theme::PAD_COMPOSER);
     frame.show(ui, |ui| {
-        ui.horizontal(|ui| {
+        // **One row, top-aligned** — `align-items: flex-start`, in the design's own words
+        // (`.q-compose`). Centring the row instead is what put the send button on the input's
+        // vertical centre: harmless at one line, and visibly wrong the moment the draft wraps,
+        // because the button drifts down with the text instead of staying where it was.
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::TOP), |ui| {
             ui.spacing_mut().item_spacing.x = theme::GAP_COMPOSER;
             // The design's leading mark: what this row is for, in the one colour that means
-            // "here". It is not a button and does not pretend to be one.
+            // "here". It is not a button and does not pretend to be one. It carries the design's
+            // own top offset (`.q-search { padding-top:6px }`): the row is aligned to its top, so
+            // without it the 16px mark would sit above the first line's optical centre.
             let mark = theme::TEXT_COMPOSER * 0.8;
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(mark, mark), egui::Sense::hover());
-            crate::ui::icons::paint(ui, rect.center(), crate::ui::icons::Icon::Search, mark, theme::accent());
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(mark, mark + theme::SEARCH_MARK_TOP),
+                egui::Sense::hover(),
+            );
+            crate::ui::icons::paint(
+                ui,
+                egui::pos2(rect.center().x, rect.top() + theme::SEARCH_MARK_TOP + mark / 2.0),
+                crate::ui::icons::Icon::Search,
+                mark,
+                theme::accent(),
+            );
 
             let editor_width = (ui.available_width() - theme::SEND_BUTTON - theme::GAP_COMPOSER).max(80.0);
             let editor = ui.add_sized(
@@ -157,13 +172,20 @@ fn submit_button(ui: &mut egui::Ui, stop: bool, enabled: bool, refusal: Option<&
 /// @returns the height to give the editor, between the design's minimum and its cap.
 #[must_use]
 fn editor_height(draft: &str) -> f32 {
-    let rows = draft.lines().count().max(1) as f32;
+    // **Every line, including the one a trailing newline opens.** `str::lines` drops it, and a draft the
+    // user is still writing ends in a newline all the time (Shift+Enter, then think): the box would then
+    // be one row shorter than the caret needs, and the editor would scroll a line out of sight to keep
+    // up with it.
+    let rows = draft.split('\n').count() as f32;
     (rows * crate::ui::theme::LINE_COMPOSER + EDITOR_PADDING)
         .clamp(EDITOR_MIN_HEIGHT, EDITOR_MAX_HEIGHT)
 }
 
 /// The height the editor starts at, from the design's `height:38px`.
-const EDITOR_MIN_HEIGHT: f32 = 38.0;
+///
+/// Readable from the panel's tests so that a layout assertion compares against this number rather than
+/// restating it (`docs/progress.md` §5: a test that repeats the formula passes with the bug in place).
+pub(crate) const EDITOR_MIN_HEIGHT: f32 = 38.0;
 
 /// The tallest the editor grows before it scrolls, from the design's own cap.
 const EDITOR_MAX_HEIGHT: f32 = 120.0;
@@ -219,6 +241,23 @@ fn composing(ui: &egui::Ui) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_editor_grows_with_the_lines_and_stops_at_its_cap() {
+        // Properties rather than the formula: it grows with each explicit line, it never goes below the
+        // design's single-line height, and it stops growing at the cap so that a pasted essay scrolls
+        // inside the box instead of pushing the conversation off the panel. How many pixels a line is
+        // worth is `editor_height`'s business; that it *grows* is the composer's.
+        let one = editor_height("一行");
+        let three = editor_height("一行\n二行\n三行");
+        let many = editor_height(&"一行\n".repeat(40));
+        assert!(three > one, "more lines, a taller box: {one} -> {three}");
+        assert!(many > three, "and taller still: {three} -> {many}");
+        assert_eq!(editor_height(""), one, "an empty box is one line tall");
+        assert_eq!(editor_height("\n\n"), three, "blank lines count, or the caret would leave the box");
+        assert_eq!(many, EDITOR_MAX_HEIGHT, "the cap holds");
+        assert_eq!(one, EDITOR_MIN_HEIGHT, "and the floor is the design's single line");
+    }
 
     #[test]
     fn enter_in_a_focused_composer_sends() {

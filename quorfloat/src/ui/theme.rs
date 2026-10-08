@@ -334,7 +334,7 @@ pub const TEXT_BODY: f32 = 14.0;
 /// The brand line in the top bar (`--q-brand`, 12px at weight 500, 1.3px letter spacing).
 pub const TEXT_BRAND: f32 = 12.0;
 
-/// Labels, metadata, questions, menu rows, the clipboard line.
+/// Labels, metadata, questions and menu rows.
 pub const TEXT_META: f32 = 12.0;
 
 /// Footer hints and menu hints (`--q-footer`, `.q-pophint`).
@@ -805,6 +805,13 @@ pub const GAP_CLOSE: f32 = 3.0;
 
 /// The composer's spacing around the input (`gap:14px`).
 pub const GAP_COMPOSER: f32 = 14.0;
+
+/// How far the composer's leading mark sits below the row's top, from the design's own
+/// `.q-search { padding-top:6px }`.
+///
+/// The row is top-aligned (`align-items:flex-start`), so without this the 16px mark would line up
+/// with the *top* of a 30px first line rather than with its middle.
+pub const SEARCH_MARK_TOP: f32 = 6.0;
 
 /// Between one turn and the next (`margin-top:20px`).
 pub const GAP_TURN: f32 = 20.0;

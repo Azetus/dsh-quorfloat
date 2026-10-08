@@ -27,6 +27,10 @@ mod table;
 /// The one thing the app needs from the picker: the id of the workspace menu, so a send that
 /// has no workspace to create in can open the menu that chooses one.
 pub(crate) use footer::{Kind as FooterKind, popup_id as footer_popup_id};
+/// The editor's own single-line height, reachable from the panel's tests so that the composer's layout
+/// is asserted against this number rather than against a copy of it.
+#[cfg(test)]
+pub(crate) use composer::EDITOR_MIN_HEIGHT;
 #[cfg(test)]
 pub(crate) use footer::{fill_radius_for_test, track_radius_for_test};
 pub(crate) use picker::{Kind as PickerKind, popup_id as picker_popup_id};
@@ -277,20 +281,25 @@ pub(crate) fn draw(
                     // own padding is part of that arithmetic — forgetting it is how the
                     // first version drew prose against the panel's border.
                     // The rule above the thread is drawn inside this frame too, so its one pixel
-                    // is part of the height being counted.
-                    let thread_padding = f32::from(theme::PAD_THREAD.top + theme::PAD_THREAD.bottom)
-                        + theme::BORDER;
+                    // is part of the height being counted, and so is the space the design puts
+                    // under it (see below).
+                    let thread_padding = f32::from(theme::PAD_THREAD.bottom) + theme::BORDER
+                        + f32::from(theme::PAD_THREAD.top);
                     let thread = (ui.available_height() - footer - thread_padding).max(0.0);
                     let content = egui::Frame::NONE
-                        .inner_margin(theme::PAD_THREAD)
+                        .inner_margin(egui::Margin { top: 0, ..theme::PAD_THREAD })
                         .show(ui, |ui| {
-                            // The line the design draws above the thread: it separates the
-                            // conversation from the composer without a heading.
-                            // One hairline, and nothing else: the frame's own inner margin is
-                            // the space above the thread, and adding to it here is how the panel
-                            // came out 20px taller than the height it had counted (§30, and the
-                            // invariant test that caught it again).
+                            // **The hairline is the thread's own top border**, which is how the design
+                            // draws it: `.q-thread { border-top:1px solid var(--q-line); padding:20px 24px
+                            // 22px }` — the padding is *under* the line. Drawing it above the line instead
+                            // left the composer's reserved strip in place (the space the design keeps for
+                            // its clipboard row, which this panel does not have): 34px of empty panel
+                            // between the input and the line that is supposed to divide it from the thread.
+                            //
+                            // The 20px is spent here rather than inside the scrolling thread, so the first
+                            // line never ends up pressed against the line while the user reads upwards.
                             rule(ui);
+                            ui.add_space(f32::from(theme::PAD_THREAD.top));
                             conversation(ui, state, thread, markdown)
                         })
                         .inner;
@@ -357,6 +366,21 @@ pub fn settings_requested() -> bool {
             !value.is_empty() && value != "0" && value != "false"
         })
         .unwrap_or(false)
+}
+
+/// What the composer should start with, when the environment names a draft.
+///
+/// The same kind of development aid as [`settings_requested`], and here for a layout that cannot be
+/// photographed otherwise: the composer grows with explicit lines, the send button is pinned to the
+/// top of the row, and **a screenshot cannot type**. `DSH_QUORFLOAT_DRAFT=$'first\nsecond'` puts those
+/// two lines in the box so the grown row can be looked at.
+///
+/// Unset or empty means an empty composer, exactly as before.
+///
+/// @returns the text to put in the composer.
+#[must_use]
+pub fn draft_from_env() -> String {
+    std::env::var("DSH_QUORFLOAT_DRAFT").unwrap_or_default()
 }
 
 /// Whether the environment asks for the hotkey row to come up listening.

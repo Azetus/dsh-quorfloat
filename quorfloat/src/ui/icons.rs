@@ -48,8 +48,6 @@ pub enum Icon {
     ArrowUp,
     /// Stop: the answer being generated right now.
     Stop,
-    /// The clipboard attachment row.
-    ClipboardText,
     /// Reasoning effort.
     Brain,
     /// Permission, granted after a check.
@@ -75,7 +73,7 @@ pub enum Icon {
 }
 
 /// Every icon this build knows, for the checks that have to consider all of them.
-pub const ALL: [Icon; 24] = [
+pub const ALL: [Icon; 23] = [
     Icon::Folder,
     Icon::FolderSimple,
     Icon::Chat,
@@ -87,7 +85,6 @@ pub const ALL: [Icon; 24] = [
     Icon::Search,
     Icon::ArrowUp,
     Icon::Stop,
-    Icon::ClipboardText,
     Icon::Brain,
     Icon::ShieldCheck,
     Icon::Shield,
@@ -107,7 +104,7 @@ pub const ALL: [Icon; 24] = [
 /// Kept apart from [`ALL`] so that the cross-check against the mockup stays meaningful: the
 /// design's map is what those icons are checked against, while an icon for a control the
 /// design does not have — the keyboard hints, here — is a choice this panel made and says so.
-pub const DESIGNED: [Icon; 20] = [
+pub const DESIGNED: [Icon; 19] = [
     Icon::Folder,
     Icon::FolderSimple,
     Icon::Chat,
@@ -119,7 +116,6 @@ pub const DESIGNED: [Icon; 20] = [
     Icon::Search,
     Icon::ArrowUp,
     Icon::Stop,
-    Icon::ClipboardText,
     Icon::Brain,
     Icon::ShieldCheck,
     Icon::Shield,
@@ -147,7 +143,6 @@ impl Icon {
             Self::Search => "magnifying-glass",
             Self::ArrowUp => "arrow-up",
             Self::Stop => "square",
-            Self::ClipboardText => "clipboard-text",
             Self::Brain => "brain",
             Self::ShieldCheck => "shield-check",
             Self::Shield => "shield",
@@ -178,7 +173,6 @@ impl Icon {
             Self::Search => egui_phosphor::regular::MAGNIFYING_GLASS,
             Self::ArrowUp => egui_phosphor::regular::ARROW_UP,
             Self::Stop => egui_phosphor::regular::SQUARE,
-            Self::ClipboardText => egui_phosphor::regular::CLIPBOARD_TEXT,
             Self::Brain => egui_phosphor::regular::BRAIN,
             Self::ShieldCheck => egui_phosphor::regular::SHIELD_CHECK,
             Self::Shield => egui_phosphor::regular::SHIELD,
