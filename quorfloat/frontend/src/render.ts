@@ -14,7 +14,7 @@ import { renderMarkdown } from './lib/markdown'
 import { keepOpenChecked, themeColorScheme } from './lib/settings'
 import { cacheLabel, contextLabel, roundsLabel, tokensLabel } from './lib/stats'
 import { foldTurns, type Turn } from './lib/turns'
-import type { Conversation, Snapshot, Workspace } from './lib/state'
+import type { Conversation, Snapshot } from './lib/state'
 
 // ── user-owned state the snapshot does not carry ────────────────────────────
 
@@ -34,8 +34,6 @@ let openMenu: string | null = null
 let recordingHotkey = false
 /** A transient error the settings page produced, for the status line. */
 let transientError: string | null = null
-/** The last visibility the shell reported. */
-let visible = false
 
 /** The latest snapshot, kept for event handlers that need it. */
 let lastState: Snapshot | null = null
@@ -702,7 +700,17 @@ function renderSettings(state: Snapshot): void {
   for (const chip of document.querySelectorAll<HTMLButtonElement>('#q-theme-chips .q-chip')) {
     chip.setAttribute('aria-pressed', String(chip.dataset.theme === state.settings.theme))
   }
-  $('q-keep-open').setAttribute('aria-checked', keepOpenChecked(state.settings.hideOnBlur))
+  // The live DOM's own state, on the record whenever it changes: the last link
+  // in the ground-truth chain for the switch — if the marker says one thing and
+  // the screen shows another, the divergence is in rendering, not in binding.
+  const keepOpen = $('q-keep-open')
+  const checked = keepOpenChecked(state.settings.hideOnBlur)
+  if (keepOpen.getAttribute('aria-checked') !== checked) {
+    keepOpen.setAttribute('aria-checked', checked)
+    void api.log(
+      `frontend switch aria-checked=${checked} hideOnBlur=${state.settings.hideOnBlur}`,
+    )
+  }
   const chip = $<HTMLInputElement>('q-shortcut')
   if (recordingHotkey) {
     chip.classList.add('q-recording')
@@ -828,14 +836,6 @@ export function setTransientError(message: string | null): void {
   transientError = message
 }
 
-export function setVisible(nowVisible: boolean): void {
-  visible = nowVisible
-}
-
-export function isVisible(): boolean {
-  return visible
-}
-
 export function updateDraftFromInput(): void {
   draft = input.value
   resizeComposer()
@@ -907,7 +907,6 @@ export function bindStatic(): void {
 
 export function renderState(state: Snapshot): void {
   lastState = state
-  setVisible(state.window.visible)
   render(state)
 }
 

@@ -88,6 +88,9 @@ button:hover { background: var(--q-soft); }
   justify-content: space-between;
   gap: 14px;
   flex: none;
+  /* The bar is the window's drag region: no text may be selectable in it. */
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .q-brand { font-size: 12px; font-weight: 500; letter-spacing: 1.3px; flex: none; }
@@ -311,20 +314,25 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
 
 /* The switch is a real button with a real knob: pseudo-elements do not render
    on <input>, so an input-based switch would show no knob at all and the state
-   would be unreadable. aria-checked drives both the pill and the knob. */
+   would be unreadable. The knob's side is decided by flexbox alignment — the
+   most primitive layout there is — so no transform or transition can ever
+   invert it: checked = accent pill + knob on the right (the design's own
+   convention). */
 .q-switch {
   width: 29px; height: 17px; border-radius: 20px;
   background: var(--q-line); position: relative;
   flex: none; cursor: pointer; padding: 0;
   transition: background var(--q-speed);
+  display: flex; align-items: center;
+  justify-content: flex-start;
 }
-.q-switch[aria-checked='true'] { background: var(--q-accent); }
+.q-switch[aria-checked='true'] { background: var(--q-accent); justify-content: flex-end; }
 .q-knob {
-  position: absolute; width: 13px; height: 13px; border-radius: 50%;
-  top: 2px; left: 2px; background: var(--q-bg);
-  transition: transform var(--q-speed);
+  width: 13px; height: 13px; border-radius: 50%;
+  margin: 0 2px;
+  background: var(--q-bg);
+  flex: none;
 }
-.q-switch[aria-checked='true'] .q-knob { transform: translateX(12px); }
 
 /* Theme chips (ours): the design has no appearance row, the panel has three. */
 .q-chips { display: flex; gap: 6px; }

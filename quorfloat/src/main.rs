@@ -139,19 +139,34 @@ fn run() -> Result<SessionExit, String> {
 
     // The shell's own facts, beside the session: effective settings, the hotkey as
     // the settings chip reports it, and the height coordination.
+    //
+    // The user's preferences are overlaid on the environment baseline at
+    // **startup** — the documented contract has two call sites, this one and the
+    // host-config application in the dispatcher — so the very first snapshot the
+    // frontend renders already carries the user's choices.
+    let preferences = preferences_path.as_deref().map(Preferences::load).unwrap_or_default();
     let view = Arc::new(Mutex::new(ShellView {
-        settings: settings.clone(),
+        settings: settings.clone().with_preferences(&preferences),
         hotkey_requested: hotkey.spec().map(str::to_owned),
         hotkey_held: hotkey.held_spec().map(str::to_owned),
         hotkey_registered: hotkey.is_active(),
         hotkey_reason: hotkey.reason().map(str::to_owned),
-        preferences: preferences_path
-            .as_deref()
-            .map(Preferences::load)
-            .unwrap_or_default(),
+        preferences,
         visible: settings.start_visible,
         height: Height::new(),
     }));
+    // The effective settings at startup, on the record: the ground truth the
+    // settings page's controls are rendered from, before any host frame or
+    // user click has had a chance to change them.
+    {
+        let view = lock(&view);
+        marker.write(&format!(
+            "settings initial: keepOpen={} hideOnBlur={} theme={}",
+            view.preferences.keep_open.unwrap_or(false),
+            view.settings.hide_on_blur,
+            theme_name_for_marker(view.settings.theme),
+        ));
+    }
 
     // The handshake, before the Tauri app exists and therefore before any window,
     // webview, font, or GPU initialisation can delay it.
@@ -481,9 +496,27 @@ fn set_preferences(
         let mut view = lock(&state.view);
         view.preferences = preferences;
         view.settings = view.settings.with_preferences(&view.preferences);
+        // On the record, with the *effective* values: this is the ground truth
+        // that answers "did the switch's click reach the behaviour" without a
+        // window to look at.
+        state.sink.mark(&format!(
+            "preferences set: keepOpen={} hideOnBlur={} theme={}",
+            view.preferences.keep_open.unwrap_or(false),
+            view.settings.hide_on_blur,
+            theme_name_for_marker(view.settings.theme),
+        ));
     }
     (state.emit)();
     Ok(json!({}))
+}
+
+/// The theme's wire name, for the preferences marker.
+fn theme_name_for_marker(theme: dsh_quorfloat::app::theme::Preference) -> &'static str {
+    match theme {
+        dsh_quorfloat::app::theme::Preference::System => "system",
+        dsh_quorfloat::app::theme::Preference::Light => "light",
+        dsh_quorfloat::app::theme::Preference::Dark => "dark",
+    }
 }
 
 /// `report_content_height` — the frontend measured its own height; the dispatcher
@@ -610,6 +643,13 @@ fn spawn_dispatcher(
                     Err(RecvTimeoutError::Timeout) => {
                         // Height housekeeping: check whether the platform made room.
                         tick_height(&window, &view, &marker, &emit);
+                        // And where the panel is now: a drag is remembered once it
+                        // settles (the geometry module's one-second rule), so a
+                        // crash or a kill does not lose the user's placement.
+                        if let Ok(position) = window.outer_position() {
+                            let mut state = lock(&window_state);
+                            state.observe((position.x as f32, position.y as f32), rpc::now_millis());
+                        }
                     }
                     Err(RecvTimeoutError::Disconnected) => {
                         sink.log("the wake channel closed; exiting");
@@ -673,7 +713,7 @@ fn apply_host_window(
         let session = lock(session);
         session.host_config().window.clone()
     };
-    let (changed, width, always_on_top) = {
+    let (changed, width, always_on_top, hide_on_blur) = {
         let mut view = lock(view);
         let before = view.settings.clone();
         view.settings.apply_host(host_window.as_ref());
@@ -682,6 +722,7 @@ fn apply_host_window(
             view.settings != before,
             view.settings.width,
             view.settings.always_on_top,
+            view.settings.hide_on_blur,
         )
     };
     if !changed {
@@ -699,7 +740,9 @@ fn apply_host_window(
     if let Err(error) = window.set_always_on_top(always_on_top) {
         marker.write(&format!("could not apply the host's alwaysOnTop: {error}"));
     }
-    marker.write(&format!("window config applied: width={width:.0} alwaysOnTop={always_on_top}"));
+    marker.write(&format!(
+        "window config applied: width={width:.0} alwaysOnTop={always_on_top} hideOnBlur={hide_on_blur}",
+    ));
 }
 
 /// Accept the frontend's measured panel height and coordinate the native window.

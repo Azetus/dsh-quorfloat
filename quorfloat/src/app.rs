@@ -12,7 +12,7 @@
 
 pub mod bridge;
 pub mod height;
-mod theme;
+pub mod theme;
 
 pub mod geometry;
 pub mod pinned;

@@ -3,13 +3,14 @@
 // - `quorfloat/state` — the bridge's snapshot; the panel re-renders from it.
 // - `quorfloat/hotkey-hide` — the Rust hotkey fired while visible: the page
 //   plays the exit transition and asks the shell to hide when it finishes.
-// - a ResizeObserver reports the panel height, which the shell's height
-//   machine coordinates with the native window.
+// - every render measures the panel (bounded, clamped — see
+//   `render.measureAndReport`) and reports it to the shell's height machine.
 // - the 180ms fade-in/out is the design's `.q-away` transition, verbatim.
 
 import { listen } from '@tauri-apps/api/event'
 import { api } from './api'
 import { chordFromEvent, validateChord } from './lib/hotkey'
+import { hidesOnBlur } from './lib/settings'
 import type { Snapshot } from './lib/state'
 import * as render from './render'
 
@@ -120,7 +121,7 @@ document.addEventListener('keydown', event => {
 })
 
 window.addEventListener('blur', () => {
-  if (lastSnapshot !== null && !lastSnapshot.settings.hideOnBlur) hidePanel()
+  if (lastSnapshot !== null && hidesOnBlur(lastSnapshot.settings.hideOnBlur)) hidePanel()
 })
 
 // ── development bridge ─────────────────────────────────────────────────────
