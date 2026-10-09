@@ -25,3 +25,7 @@ assets/fonts/*
 
 # tauri-build 生成的 schema
 /gen/
+
+.npm-cache/
+node_modules/
+dist/

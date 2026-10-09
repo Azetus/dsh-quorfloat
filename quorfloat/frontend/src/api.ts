@@ -1,0 +1,24 @@
+// Typed wrappers over the shell's Tauri commands (`quorfloat/src/main.rs`).
+// The command arguments are the bridge's parameters, camelCased — Tauri converts
+// them back to the Rust snake_case names.
+
+import { invoke } from '@tauri-apps/api/core'
+
+export const api = {
+  submit: (text: string, workspaceId: string | null) => invoke('submit', { text, workspaceId }),
+  cancel: () => invoke('cancel'),
+  answerApproval: (interactionId: string, allow: boolean) => invoke('answer_approval', { interactionId, allow }),
+  selectSession: (sessionId: string) => invoke('select_session', { sessionId }),
+  startNew: () => invoke('start_new'),
+  pin: (sessionId: string | null) => invoke('pin', { sessionId }),
+  requestWorkspaces: () => invoke('request_workspaces'),
+  selectModel: (provider: string, model: string, effort: string | null) => invoke('select_model', { provider, model, effort }),
+  setPermission: (value: string) => invoke('set_permission', { value }),
+  dismissInteraction: (interactionId: string) => invoke('dismiss_interaction', { interactionId }),
+  dismissHandoff: () => invoke('dismiss_handoff'),
+  log: (line: string) => invoke('log', { line }),
+  setPreferences: (preferences: { theme?: string; keepOpen?: boolean; hotkey?: string }) =>
+    invoke('set_preferences', preferences),
+  reportContentHeight: (height: number) => invoke('report_content_height', { height }),
+  setVisible: (visible: boolean) => invoke('set_visible', { visible }),
+}

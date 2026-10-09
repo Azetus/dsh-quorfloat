@@ -47,6 +47,12 @@ pub struct ShellView {
     pub hotkey_registered: bool,
     /// Why the last attempt did not become the held one, when it did not.
     pub hotkey_reason: Option<String>,
+    /// Whether the panel's native window is on screen right now.
+    ///
+    /// Owned by the dispatcher — it is the only thread that touches the window —
+    /// and carried here so the snapshot can tell the frontend which way the
+    /// transition should run.
+    pub visible: bool,
     /// The height coordination state machine.
     pub height: Height,
 }
@@ -79,6 +85,9 @@ pub fn snapshot(session: &Session, shell: &ShellView) -> Value {
         "height": {
             "target": shell.height.target(),
             "capped": shell.height.is_capped(),
+        },
+        "window": {
+            "visible": shell.visible,
         },
         "session": {
             "ready": session.is_ready(),
@@ -485,6 +494,7 @@ mod tests {
             hotkey_held: Some("Alt+Space".to_owned()),
             hotkey_registered: true,
             hotkey_reason: None,
+            visible: false,
             height: Height::new(),
         }
     }
@@ -507,6 +517,7 @@ mod tests {
         assert_eq!(value["hotkey"]["registered"], true);
         assert_eq!(value["height"]["target"], 0.0);
         assert_eq!(value["height"]["capped"], false);
+        assert_eq!(value["window"]["visible"], false, "the shell reports the dispatcher's truth");
         assert_eq!(value["session"]["ready"], false, "no handshake yet");
     }
 

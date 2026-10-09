@@ -2,29 +2,99 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>quorfloat</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="/src/styles/tokens.css">
 </head>
 <body>
-  <div class="panel">
-    <div class="bar">quorfloat</div>
-    <div class="hint">Tauri shell · M3 骨架</div>
-    <div class="note" id="summary">等待 shell 状态…</div>
+  <div class="q-stage">
+    <section id="q-window" class="q-window q-away" aria-label="Quorfloat 对话窗口">
+      <div class="q-top">
+        <span class="q-brand">DeepSeek</span>
+        <div class="q-context">
+          <div class="q-menu-wrap">
+            <button type="button" id="q-workspace" class="q-picker" aria-label="选择工作区" aria-expanded="false" aria-controls="q-workspace-menu">
+              <span id="q-workspace-icon"></span>
+              <span class="q-name" id="q-workspace-name">—</span>
+              <span id="q-workspace-pinmark" class="q-pinmark" hidden></span>
+              <span id="q-workspace-chevron" class="q-chevron"></span>
+            </button>
+            <div id="q-workspace-menu" class="q-popover" aria-label="工作区选择" hidden></div>
+          </div>
+          <span class="q-divider" aria-hidden="true">/</span>
+          <div class="q-menu-wrap q-session-wrap">
+            <button type="button" id="q-session" class="q-picker" aria-label="选择会话" aria-expanded="false" aria-controls="q-session-menu">
+              <span id="q-session-icon"></span>
+              <span class="q-name" id="q-session-name">新会话</span>
+              <span id="q-session-pinmark" class="q-pinmark" hidden></span>
+              <span id="q-session-chevron" class="q-chevron"></span>
+            </button>
+            <div id="q-session-menu" class="q-popover" aria-label="会话选择" hidden></div>
+          </div>
+        </div>
+        <div class="q-tools">
+          <button id="q-settings-open" type="button" class="q-close" aria-label="悬浮窗设置" aria-pressed="false"><span id="q-settings-open-icon"></span></button>
+          <button id="q-close" type="button" class="q-close" aria-label="收起悬浮窗"><span id="q-close-icon"></span></button>
+        </div>
+      </div>
+
+      <div id="q-settings" class="q-settings" hidden>
+        <div class="q-settings-title"><span>悬浮窗设置</span><button id="q-settings-back" type="button">返回对话</button></div>
+        <div class="q-setting"><span>外观<small>明暗主题跟随系统或手动指定</small></span>
+          <span class="q-chips" id="q-theme-chips">
+            <button type="button" class="q-chip" data-theme="system">跟随系统</button>
+            <button type="button" class="q-chip" data-theme="light">浅色</button>
+            <button type="button" class="q-chip" data-theme="dark">深色</button>
+          </span>
+        </div>
+        <div class="q-setting"><label for="q-shortcut">呼出快捷键<small>点击后按下组合键</small></label>
+          <input id="q-shortcut" class="q-shortcut" value="—" aria-label="呼出快捷键" readonly>
+        </div>
+        <div class="q-setting"><span>失焦时保持展开<small>切换应用后仍保留悬浮窗</small></span>
+          <button type="button" id="q-keep-open" class="q-switch" role="switch" aria-checked="false"><span class="q-knob"></span></button>
+        </div>
+      </div>
+
+      <div id="q-main">
+        <div class="q-compose">
+          <span class="q-search" id="q-search-icon"></span>
+          <textarea id="q-input" rows="1" aria-label="输入问题" placeholder="问点什么…"></textarea>
+          <button type="button" id="q-send" class="q-submit" aria-label="发送问题"><span id="q-send-icon"></span></button>
+        </div>
+        <div id="q-cards" class="q-cards"></div>
+        <div id="q-thread-scroll" class="q-thread-scroll">
+          <div id="q-thread" class="q-thread"></div>
+        </div>
+        <div class="q-runtime">
+          <div class="q-menu-wrap q-permission-wrap">
+            <button type="button" id="q-permission" class="q-picker" aria-label="选择权限" aria-expanded="false" aria-controls="q-permission-menu">
+              <span id="q-permission-icon" class="q-permission-icon"></span>
+              <span id="q-permission-name">—</span>
+              <span id="q-permission-chevron" class="q-chevron"></span>
+            </button>
+            <div id="q-permission-menu" class="q-popover q-up" aria-label="权限选择" hidden></div>
+          </div>
+          <div class="q-menu-wrap q-config-wrap">
+            <button type="button" id="q-config" class="q-picker" aria-label="模型与推理等级" aria-expanded="false" aria-controls="q-config-menu">
+              <span id="q-model-name">—</span>
+              <span id="q-effort-name" class="q-config-effort"></span>
+              <span id="q-config-chevron" class="q-chevron"></span>
+            </button>
+            <div id="q-config-menu" class="q-popover q-right q-up q-config-menu" aria-label="模型与推理等级设置" hidden></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="q-footer">
+        <span id="q-status"></span>
+        <div id="q-session-stats" class="q-session-stats" aria-label="会话统计" hidden>
+          <span class="q-stat" id="q-stat-rounds"><span id="q-stat-speed-icon"></span><span id="q-stat-speed"></span></span>
+          <span class="q-stat" id="q-stat-tokens"><span id="q-stat-token-icon"></span><span><span id="q-stat-token-count"></span><span class="q-stat-separator"> · </span>缓存命中 <span id="q-stat-cache"></span></span></span>
+          <span class="q-stat" id="q-stat-context" hidden><span id="q-stat-context-icon"></span><span id="q-stat-context-value"></span></span>
+        </div>
+      </div>
+    </section>
   </div>
-  <script>
-    // The shell emits a full snapshot after anything changes; the real frontend
-    // (M4) re-renders from it. The placeholder shows one line as proof the
-    // channel works end to end.
-    if (window.__TAURI__) {
-      window.__TAURI__.event.listen('quorfloat/state', (event) => {
-        const state = event.payload
-        const following = state.session?.following?.sessionId
-        const entries = state.transcript?.entries?.length ?? 0
-        const ready = state.session?.ready ? 'ready' : 'handshake…'
-        document.getElementById('summary').textContent =
-          `${ready} · 跟随 ${following ?? '—'} · 记录 ${entries} 条`
-      })
-    }
-  </script>
+  <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

@@ -26,6 +26,8 @@ pub enum Wake {
     Hotkey,
     /// The frontend reported a new content height (logical px, panel only).
     Height(f32),
+    /// The frontend asks the window to show or hide (after its own transition).
+    Visibility(crate::app::session::WindowCommand),
     /// The host asked this process to stop, or the channel ended.
     Exit(SessionExit),
 }

@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "identifier": "dev.dsh.quorfloat",
   "build": {
-    "frontendDist": "frontend"
+    "frontendDist": "frontend/dist"
   },
   "app": {
     "withGlobalTauri": true,

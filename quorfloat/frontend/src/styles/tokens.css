@@ -1,0 +1,342 @@
+/* The panel's styles. Tokens and measurements are taken verbatim from the
+   authoritative design (docs/ui/harness-quorfloat-phosphor-ui.html); the few
+   additions are marked — the turn disclosure, the approval card, the theme
+   chips, and the markdown content styles, which the design leaves to us. */
+
+@font-face {
+  font-family: 'Noto Sans SC';
+  src: url('/fonts/NotoSansSC-VF.otf') format('opentype');
+  font-weight: 100 900;
+  font-display: block;
+}
+
+:root {
+  /* The design's own tokens. light-dark() follows `color-scheme`, which the
+     panel sets from the host's theme — one property switches both palettes. */
+  --q-bg: light-dark(#fafaf9, #242529);
+  --q-text: light-dark(#24262c, #ededef);
+  --q-muted: light-dark(#72757d, #a5a8b0);
+  --q-line: light-dark(#e4e5e7, #3b3d43);
+  --q-soft: light-dark(#f0f1f3, #303238);
+  --q-accent: light-dark(#505caf, #a8b1ff);
+  --q-button: light-dark(#303643, #dddfe8);
+  --q-onbutton: light-dark(#fff, #24262c);
+  --q-shadow: light-dark(#20263822, #00000066);
+  --q-speed: 180ms;
+  /* Ours: the design has no opinion about an error colour. */
+  --q-bad: light-dark(#b3261e, #ff8a80);
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+  font: 14px/1.6 'Noto Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+  color: var(--q-text);
+}
+
+* { box-sizing: border-box; }
+button, textarea { font: inherit; }
+button { color: inherit; border: 0; background: transparent; cursor: pointer; }
+button:hover { background: var(--q-soft); }
+[hidden] { display: none !important; }
+
+/* The window is the panel plus the room its shadow needs (design: side 34,
+   top 20, bottom 40) — the stage pads the panel inside the native window. */
+.q-stage {
+  width: 100vw;
+  height: 100vh;
+  padding: 20px 34px 40px;
+  display: flex;
+  flex-direction: column;
+}
+
+.q-window {
+  width: 100%;
+  max-width: 640px;
+  margin: auto;
+  background: var(--q-bg);
+  border: 1px solid var(--q-line);
+  border-radius: 18px;
+  box-shadow: 0 16px 42px var(--q-shadow), 0 3px 8px var(--q-shadow);
+  transform-origin: 50% 0;
+  transition: opacity var(--q-speed), transform var(--q-speed);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* Never shrink to the viewport: the panel keeps its natural height, the
+     shell grows the native window to fit it, and the thread scrolls only when
+     the panel is capped. Without this, a tall settings page would be squeezed
+     into the old window height and the height loop could never ask for more. */
+  flex: none;
+}
+
+.q-window.q-away {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.985);
+  pointer-events: none;
+}
+
+/* ── top bar ─────────────────────────────────────────────────────────── */
+
+.q-top {
+  padding: 12px 17px 0 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex: none;
+}
+
+.q-brand { font-size: 12px; font-weight: 500; letter-spacing: 1.3px; flex: none; }
+.q-context { display: flex; align-items: center; gap: 3px; flex: 1; min-width: 0; }
+.q-tools { display: flex; gap: 3px; margin-left: auto; }
+.q-divider { color: var(--q-line); padding: 0 3px; }
+.q-close { width: 28px; height: 28px; border-radius: 7px; display: grid; place-items: center; color: var(--q-muted); }
+
+.q-picker {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 7px; border-radius: 6px;
+  font-size: 12px; white-space: nowrap; min-width: 0; max-width: 100%;
+}
+.q-name { overflow: hidden; text-overflow: ellipsis; }
+.q-chevron { width: 12px; height: 12px; color: var(--q-muted); flex: none; display: flex; }
+.q-picker > svg:first-child { color: var(--q-muted); width: 14px; height: 14px; }
+.q-pinmark { color: var(--q-accent); display: flex; }
+.q-pinmark svg { width: 12px; height: 12px; }
+.q-picker[aria-expanded='true'], .q-close[aria-pressed='true'] { background: var(--q-soft); }
+
+svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
+
+/* ── composer ────────────────────────────────────────────────────────── */
+
+.q-compose { display: flex; align-items: flex-start; gap: 14px; padding: 21px 22px 14px; flex: none; }
+.q-search { color: var(--q-accent); padding-top: 6px; flex: none; }
+.q-compose textarea {
+  display: block; min-width: 0; flex: 1; width: 100%;
+  height: 38px; resize: none; overflow: hidden;
+  border: 0; background: transparent; color: var(--q-text);
+  font-size: 20px; line-height: 1.5; padding: 0;
+}
+.q-compose textarea::placeholder { color: var(--q-muted); }
+.q-submit {
+  background: var(--q-button); color: var(--q-onbutton);
+  border-radius: 9px; width: 34px; height: 34px; flex: none;
+  display: grid; place-items: center;
+}
+.q-submit:hover { background: var(--q-accent); color: var(--q-bg); }
+
+/* ── cards (ours: the design draws no approval card) ─────────────────── */
+
+.q-cards { padding: 0 22px; flex: none; display: flex; flex-direction: column; gap: 8px; }
+.q-card {
+  border: 1px solid var(--q-line); border-radius: 10px;
+  padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;
+}
+.q-card-title { display: flex; align-items: center; gap: 7px; font-size: 12px; }
+.q-card-title svg { color: var(--q-accent); }
+.q-card-title strong { font-weight: 600; }
+.q-card-reason { font-size: 12px; color: var(--q-muted); overflow-wrap: anywhere; }
+.q-card-state { font-size: 12px; color: var(--q-muted); }
+.q-card-state.q-refused { color: var(--q-bad); }
+.q-card-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.q-card-actions button {
+  font-size: 12px; padding: 5px 12px; border-radius: 5px;
+  background: var(--q-soft); border: 1px solid var(--q-line);
+}
+.q-card-actions button.q-allow { background: var(--q-accent); color: var(--q-bg); border-color: transparent; }
+.q-card-actions button:disabled { opacity: 0.5; cursor: default; }
+.q-handoff {
+  border: 1px solid var(--q-line); border-radius: 10px;
+  padding: 10px 14px; font-size: 12px; color: var(--q-muted);
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+}
+
+/* ── thread ──────────────────────────────────────────────────────────── */
+
+/* The conversation page is one flex chain: when the panel is capped at its
+   max height, #q-main shrinks and the thread scrolls inside it. */
+#q-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.q-thread-scroll {
+  flex: 1; min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+.q-thread { border-top: 1px solid var(--q-line); padding: 20px 24px 22px; }
+.q-thread:empty { border-top-color: transparent; }
+
+.q-turn + .q-turn { border-top: 1px solid var(--q-line); padding-top: 18px; margin-top: 20px; }
+.q-question { font-size: 12px; color: var(--q-muted); margin-bottom: 14px; overflow-wrap: anywhere; }
+
+/* The disclosure (ours): caret, label, and the spinner while working. */
+.q-disclosure {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 12px; color: var(--q-muted);
+  padding: 3px 0; margin-bottom: 4px;
+  width: 100%; text-align: left; border-radius: 5px;
+}
+.q-caret { width: 11px; height: 11px; display: grid; place-items: center; flex: none; }
+.q-caret svg { width: 11px; height: 11px; }
+.q-disclosure .q-spin { width: 11px; height: 11px; display: grid; place-items: center; flex: none; }
+.q-spin svg { width: 11px; height: 11px; animation: q-spin 1.4s linear infinite; }
+@keyframes q-spin { to { transform: rotate(360deg); } }
+
+.q-working { display: none; }
+.q-working.q-open { display: block; }
+.q-working-line {
+  font-size: 12px; color: var(--q-muted);
+  overflow-wrap: anywhere; padding: 2px 0 2px 18px;
+  white-space: pre-wrap;
+}
+.q-working-line.q-reasoning { opacity: 0.85; }
+.q-working-line.q-call { color: var(--q-text); }
+.q-working-line.q-call .q-tool-name { color: var(--q-accent); }
+.q-working-line.q-tool .q-tool-name { color: var(--q-accent); }
+.q-working-line.q-error { color: var(--q-bad); }
+.q-working-line.q-call-args { color: var(--q-muted); font-family: ui-monospace, monospace; }
+
+/* The answer, rendered from markdown. */
+.q-answer {
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  line-height: 1.85; min-height: 28px;
+  font-size: 14px;
+}
+.q-answer > :first-child { margin-top: 0; }
+.q-answer > :last-child { margin-bottom: 0; }
+.q-answer h1, .q-answer h2, .q-answer h3 { font-size: 1.05em; margin: 14px 0 6px; line-height: 1.5; }
+.q-answer p { margin: 8px 0; }
+.q-answer ul, .q-answer ol { margin: 8px 0; padding-left: 22px; }
+.q-answer li { margin: 2px 0; }
+.q-answer blockquote { margin: 8px 0; padding: 2px 12px; border-left: 2px solid var(--q-line); color: var(--q-muted); }
+.q-answer code { background: var(--q-soft); border-radius: 4px; padding: 1px 5px; font-size: 0.92em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.q-answer pre {
+  background: var(--q-soft); border-radius: 8px; padding: 10px 12px;
+  overflow-x: auto; margin: 8px 0;
+}
+.q-answer pre code { background: transparent; padding: 0; }
+/* Tables stay inside the panel: the design limits them to the panel width. */
+.q-answer table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 8px 0; }
+.q-answer th, .q-answer td { border: 1px solid var(--q-line); padding: 4px 9px; font-size: 12px; text-align: left; }
+.q-answer a { color: var(--q-accent); }
+
+.q-answerbar { display: flex; align-items: center; gap: 10px; color: var(--q-muted); font-size: 12px; margin-top: 16px; }
+.q-answerbar button { margin-left: auto; display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 6px; }
+
+/* ── runtime row + footer ────────────────────────────────────────────── */
+
+.q-runtime {
+  display: flex; flex-wrap: wrap; justify-content: space-between;
+  align-items: center; gap: 6px 12px; padding: 0 15px 10px; flex: none;
+}
+.q-runtime .q-picker { color: var(--q-muted); }
+.q-permission-wrap { margin-right: auto; }
+.q-config-wrap { margin-left: auto; max-width: 100%; }
+#q-config { gap: 4px; }
+#q-model-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--q-text); }
+.q-config-effort { color: var(--q-muted); }
+#q-config[aria-expanded='true'] #q-config-chevron svg { transform: rotate(180deg); }
+.q-permission-icon, #q-permission-chevron, #q-config-chevron { display: flex; }
+.q-permission-icon svg { width: 14px; height: 14px; }
+.q-config-menu { width: 250px; padding: 4px; }
+.q-config-row { display: flex; align-items: center; gap: 7px; width: 100%; padding: 8px 9px; border-radius: 7px; font-size: 12px; }
+.q-config-value { margin-left: auto; color: var(--q-muted); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.q-config-back { display: block; width: 100%; padding: 7px 9px; text-align: left; color: var(--q-muted); font-size: 12px; border-radius: 6px; margin-bottom: 3px; }
+
+.q-footer {
+  border-top: 1px solid var(--q-line);
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 7px 10px; padding: 9px 22px; color: var(--q-muted); font-size: 11px; flex: none;
+}
+.q-footer kbd { font: inherit; background: var(--q-soft); border: 1px solid var(--q-line); border-radius: 4px; padding: 1px 4px; }
+#q-status { flex: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 46%; }
+.q-session-stats {
+  display: flex; align-items: center; justify-content: flex-end;
+  gap: 5px 13px; flex-wrap: wrap; margin-left: auto; min-width: 0;
+  font-variant-numeric: tabular-nums; font-size: 11px;
+}
+.q-stat { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.q-stat > span:first-child { display: flex; }
+.q-stat svg { width: 13px; height: 13px; }
+.q-stat-separator { color: var(--q-muted); }
+
+/* ── popovers ────────────────────────────────────────────────────────── */
+
+.q-menu-wrap { position: relative; min-width: 0; }
+.q-popover {
+  position: absolute; top: calc(100% + 7px); left: 0;
+  width: 276px; max-width: min(640px, calc(100vw - 30px));
+  max-height: min(420px, calc(100vh - 140px));
+  overflow-y: auto; scrollbar-gutter: stable;
+  padding: 6px; border-radius: 10px;
+  border: 1px solid var(--q-line); background: var(--q-bg);
+  box-shadow: 0 10px 30px var(--q-shadow); z-index: 10;
+  font-size: 12px; color: var(--q-text);
+}
+.q-right { left: auto; right: 0; }
+.q-up { top: auto; bottom: calc(100% + 7px); }
+.q-pophead { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px 8px; color: var(--q-muted); font-size: 11px; }
+.q-pophead strong { font: inherit; color: var(--q-text); }
+.q-pophead span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.q-popover hr { border: 0; border-top: 1px solid var(--q-line); margin: 5px 3px; }
+.q-option-row { display: flex; align-items: center; gap: 2px; padding-right: 4px; border-radius: 6px; }
+.q-option-row:hover { background: var(--q-soft); }
+.q-option { display: flex; width: 100%; min-width: 0; align-items: center; gap: 8px; padding: 8px 9px; border-radius: 6px; text-align: left; }
+.q-option-main { flex: 1; min-width: 0; }
+.q-option-main > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.q-option small { display: block; color: var(--q-muted); font-size: 11px; margin-top: 1px; }
+.q-check { color: var(--q-accent); width: 14px; height: 14px; flex: none; }
+.q-pin { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 5px; flex: none; color: var(--q-muted); }
+.q-pin[aria-pressed='true'] { color: var(--q-accent); background: var(--q-soft); }
+.q-pin svg { width: 14px; height: 14px; }
+.q-pophint { padding: 7px 9px 5px; font-size: 11px; color: var(--q-muted); line-height: 1.6; }
+
+/* ── settings ────────────────────────────────────────────────────────── */
+
+.q-settings { margin: 18px 22px 20px; flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
+.q-settings-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.q-settings-title span { font-size: 15px; }
+.q-settings-title button { color: var(--q-muted); font-size: 12px; padding: 5px 8px; border-radius: 6px; }
+.q-setting { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 0; border-top: 1px solid var(--q-line); font-size: 12px; }
+.q-setting small { display: block; font-size: 11px; color: var(--q-muted); }
+.q-shortcut { font: inherit; border: 1px solid var(--q-line); border-radius: 6px; background: var(--q-soft); color: var(--q-text); padding: 5px 8px; width: 102px; text-align: center; }
+.q-shortcut.q-recording { border-color: var(--q-accent); color: var(--q-accent); }
+
+/* The switch is a real button with a real knob: pseudo-elements do not render
+   on <input>, so an input-based switch would show no knob at all and the state
+   would be unreadable. aria-checked drives both the pill and the knob. */
+.q-switch {
+  width: 29px; height: 17px; border-radius: 20px;
+  background: var(--q-line); position: relative;
+  flex: none; cursor: pointer; padding: 0;
+  transition: background var(--q-speed);
+}
+.q-switch[aria-checked='true'] { background: var(--q-accent); }
+.q-knob {
+  position: absolute; width: 13px; height: 13px; border-radius: 50%;
+  top: 2px; left: 2px; background: var(--q-bg);
+  transition: transform var(--q-speed);
+}
+.q-switch[aria-checked='true'] .q-knob { transform: translateX(12px); }
+
+/* Theme chips (ours): the design has no appearance row, the panel has three. */
+.q-chips { display: flex; gap: 6px; }
+.q-chip {
+  font-size: 12px; padding: 5px 9px; border-radius: 6px;
+  background: var(--q-soft); color: var(--q-muted);
+}
+.q-chip[aria-pressed='true'] { background: var(--q-accent); color: var(--q-bg); }
+
+/* ── reduced motion ──────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .q-window { transition: none; }
+  .q-spin svg { animation: none; }
+}

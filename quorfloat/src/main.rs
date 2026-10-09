@@ -149,6 +149,7 @@ fn run() -> Result<SessionExit, String> {
             .as_deref()
             .map(Preferences::load)
             .unwrap_or_default(),
+        visible: settings.start_visible,
         height: Height::new(),
     }));
 
@@ -313,6 +314,7 @@ fn run() -> Result<SessionExit, String> {
             log,
             set_preferences,
             report_content_height,
+            set_visible,
         ])
         .build(tauri::generate_context!())
         .map_err(|error| format!("could not build the shell: {error}"))?;
@@ -492,6 +494,16 @@ fn report_content_height(state: tauri::State<'_, ShellRuntime>, height: f64) -> 
     json!({})
 }
 
+/// `set_visible` — the frontend asks the native window to show or hide, after its
+/// own transition has run. The dispatcher stays the only thread that touches the
+/// window: this command is a request, not a direct action.
+#[tauri::command]
+fn set_visible(state: tauri::State<'_, ShellRuntime>, visible: bool) -> Value {
+    let command = if visible { WindowCommand::Show } else { WindowCommand::Hide };
+    let _ = state.height_tx.send(Wake::Visibility(command));
+    json!({})
+}
+
 // ── dispatcher ───────────────────────────────────────────────────────────────
 
 /// Applies window commands, the host's window configuration and the hotkey to the
@@ -533,6 +545,7 @@ fn spawn_dispatcher(
                 let _ = window.show();
                 let _ = window.set_focus();
             }
+            set_view_visible(&view, visible);
             // The first report is the measurement the host waits for: until it
             // arrives, the host does not know whether a panel can appear at all.
             report_visibility(&session, &sink, visible, &capabilities);
@@ -550,6 +563,7 @@ fn spawn_dispatcher(
                             apply_window_command(&window, command, &mut visible);
                         }
                         if changed {
+                            set_view_visible(&view, visible);
                             report_visibility(&session, &sink, visible, &capabilities);
                         }
                         // The host's `ready` may have changed the window section:
@@ -558,12 +572,27 @@ fn spawn_dispatcher(
                         emit();
                     }
                     Ok(Wake::Hotkey) => {
-                        apply_window_command(&window, WindowCommand::Toggle, &mut visible);
-                        report_visibility(&session, &sink, visible, &capabilities);
-                        emit();
+                        if visible {
+                            // The frontend plays the exit transition and asks to
+                            // hide when it finishes: hiding the native window here
+                            // would cut the 180ms fade short. The host can still
+                            // force-hide through `window/visibility` on Frames.
+                            let _ = handle.emit("quorfloat/hotkey-hide", ());
+                        } else {
+                            apply_window_command(&window, WindowCommand::Show, &mut visible);
+                            set_view_visible(&view, visible);
+                            report_visibility(&session, &sink, visible, &capabilities);
+                            emit();
+                        }
                     }
                     Ok(Wake::Height(panel_height)) => {
                         apply_height(&window, &view, &marker, &emit, panel_height);
+                    }
+                    Ok(Wake::Visibility(command)) => {
+                        apply_window_command(&window, command, &mut visible);
+                        set_view_visible(&view, visible);
+                        report_visibility(&session, &sink, visible, &capabilities);
+                        emit();
                     }
                     Ok(Wake::Exit(exit)) => {
                         // Remember where the panel was — a drag that ends inside the
@@ -592,6 +621,14 @@ fn spawn_dispatcher(
             }
         })
         .map(|_| ())
+}
+
+/// Record the current visibility in the shell's view, for the snapshot.
+///
+/// The dispatcher is the only writer, and every window command goes through it,
+/// so the view and the window cannot disagree.
+fn set_view_visible(view: &Arc<Mutex<ShellView>>, visible: bool) {
+    lock(view).visible = visible;
 }
 
 /// Apply one parsed command to the native window.
