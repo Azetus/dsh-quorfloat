@@ -6,7 +6,8 @@
 // rows inside the viewport (plus a few) are mounted now, and a row's height is measured
 // rather than guessed, because an answer is as tall as its Markdown says.
 
-import { useCallback, useLayoutEffect, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
+import { setBottomPin } from '../../lib/bottom-pin'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { Snapshot } from '../../lib/state'
 import { foldTurns, type Turn as TurnModel } from '../../lib/turns'
@@ -50,6 +51,8 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
   // Whether the reader is at the bottom. Starts true: the first paint should show the end
   // of the conversation, which is what a chat panel is for.
   const follow = useRef(true)
+  /** The box height at the last pin: what a change in it has to be taken out of. */
+  const lastHeight = useRef<number | null>(null)
 
   const view = foldTurns(state.transcript.entries, state.transcript.live, state.transcript.turnActive)
   const rows: Row[] = []
@@ -102,6 +105,32 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
     if (scroll === null || !follow.current) return
     scroll.scrollTop = scroll.scrollHeight
   })
+
+  // The other half of the promise: whoever moves the reader (today, the composer growing as
+  // the user types, which comes out of this box while the panel is at its cap) asks for the
+  // pin instead of waiting for a render. See `lib/bottom-pin.ts`.
+  //
+  // Both readers are served, because a box that changes around somebody is two different
+  // problems: the one at the bottom wants to stay at the bottom, and the one reading further up
+  // wants the words not to move. The box's top edge (and so the first visible line) moves down
+  // by the composer's growth while its bottom edge stays put, so keeping a line on screen means
+  // scrolling *forward* by that much: `scrollTop += previous - height`. The browser's own
+  // scroll anchoring does not cover a container being resized, which is why this is here.
+  useEffect(() => {
+    setBottomPin(() => {
+      const scroll = scrollRef.current
+      if (scroll === null) return
+      const height = scroll.clientHeight
+      const previous = lastHeight.current
+      lastHeight.current = height
+      if (follow.current) {
+        scroll.scrollTop = scroll.scrollHeight
+        return
+      }
+      if (previous !== null && previous !== height) scroll.scrollTop += previous - height
+    })
+    return () => { setBottomPin(null) }
+  }, [])
 
   return (
     <div
