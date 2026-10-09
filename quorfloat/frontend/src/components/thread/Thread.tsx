@@ -106,6 +106,23 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
     scroll.scrollTop = scroll.scrollHeight
   })
 
+  // Re-read the mounted rows' sizes after every commit.
+  //
+  // The virtualizer remembers a row's height under its key, and a row can shrink while it is not
+  // on screen: an earlier turn's answer settles into its final shape, a fold closes, a card
+  // leaves. A row that is not mounted has no resize observer watching it, so a remembered height
+  // that is too large stays too large — the spacer below the content carries the error, and the
+  // reader gets a band of empty space under the last turn, with the panel pinned at its cap
+  // (2026-10-09). Measuring the few rows that are actually mounted costs nothing and makes a
+  // stale size impossible; the measurement is idempotent, so it cannot feed itself.
+  useLayoutEffect(() => {
+    const thread = scrollRef.current?.querySelector('#q-thread')
+    if (thread === null || thread === undefined) return
+    for (const row of thread.querySelectorAll<HTMLElement>('.q-thread-item')) {
+      virtual.measureElement(row)
+    }
+  })
+
   // The other half of the promise: whoever moves the reader (today, the composer growing as
   // the user types, which comes out of this box while the panel is at its cap) asks for the
   // pin instead of waiting for a render. See `lib/bottom-pin.ts`.
