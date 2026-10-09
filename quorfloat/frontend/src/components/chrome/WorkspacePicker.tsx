@@ -1,5 +1,6 @@
 // The top bar's workspace picker.
 
+import { api } from '../../api'
 import type { Snapshot } from '../../lib/state'
 import { pinnedWorkspaceMark, workspaceTitle } from '../../lib/view-text'
 import { Icon } from '../common/Icon'
@@ -10,8 +11,8 @@ import { WorkspaceMenu } from '../menus/WorkspaceMenu'
 export interface WorkspacePickerProps {
   /** The snapshot. */
   readonly state: Snapshot
-  /** The frontend's own preselect for a new conversation. */
-  readonly workspaceChoice: string | null
+  /** The workspace the next conversation would use (the user's pick, or the shell's). */
+  readonly targetWorkspace: string | null
   /** Whether this popover is the open one. */
   readonly open: boolean
   /** Toggle request from the trigger. */
@@ -28,8 +29,8 @@ export interface WorkspacePickerProps {
  * @param props - snapshot, open state, and handlers.
  * @returns the picker.
  */
-export function WorkspacePicker({ state, workspaceChoice, open, onToggle, onClose, onChoose }: WorkspacePickerProps) {
-  const marked = state.session.following === null && pinnedWorkspaceMark(state, workspaceChoice)
+export function WorkspacePicker({ state, targetWorkspace, open, onToggle, onClose, onChoose }: WorkspacePickerProps) {
+  const marked = state.session.following === null && pinnedWorkspaceMark(state, targetWorkspace)
   return (
     <PickerPopover
       id="q-workspace"
@@ -37,12 +38,18 @@ export function WorkspacePicker({ state, workspaceChoice, open, onToggle, onClos
       label="选择工作区"
       menuLabel="工作区选择"
       open={open}
-      onToggle={onToggle}
+      onToggle={() => {
+        // The host sends the workspace list only when asked, and the panel asks when the user
+        // first looks at the picker. Without this the picker drew an empty list forever — the
+        // old renderer asked here, and the React migration dropped the call (2026-10-09).
+        if (state.session.workspaces.length === 0) void api.requestWorkspaces()
+        onToggle()
+      }}
       onClose={onClose}
       trigger={
         <>
           <span id="q-workspace-icon"><Icon name="folder" /></span>
-          <span className="q-name" id="q-workspace-name">{workspaceTitle(state, workspaceChoice)}</span>
+          <span className="q-name" id="q-workspace-name">{workspaceTitle(state, targetWorkspace)}</span>
           <span id="q-workspace-pinmark" className="q-pinmark" hidden={!marked}>
             {marked && <Icon name="pin" />}
           </span>
@@ -50,7 +57,7 @@ export function WorkspacePicker({ state, workspaceChoice, open, onToggle, onClos
         </>
       }
     >
-      <WorkspaceMenu state={state} workspaceChoice={workspaceChoice} onChoose={onChoose} onClose={onClose} />
+      <WorkspaceMenu state={state} targetWorkspace={targetWorkspace} onChoose={onChoose} onClose={onClose} />
     </PickerPopover>
   )
 }

@@ -168,9 +168,18 @@ impl Transcript {
     }
 
     /// Whether an answer is being generated right now.
+    ///
+    /// "There is a live buffer **with something in it**": [`Self::live_entry`] already hides
+    /// an empty one, and a buffer holding nothing is not an answer — but the composer reads
+    /// this flag to choose between send and stop, so an empty buffer used to leave it
+    /// offering "stop" for a turn that was over (2026-10-09).
+    ///
+    /// The buffer's own lifetime is what makes that enough: it is created by a stream frame
+    /// and settled by the turn boundary (see the `turn/end` arm below), so a live buffer
+    /// only exists while a turn is running.
     #[must_use]
     pub fn is_streaming(&self) -> bool {
-        self.live.is_some()
+        self.live.as_ref().is_some_and(|live| !live.is_empty())
     }
 
     /// Whether the host says a turn is in progress.
@@ -419,7 +428,19 @@ impl Transcript {
             // A turn boundary is state rather than a line: the composer reads it, and a
             // rule drawn between every turn would be noise in a panel this short.
             "turn/start" => self.turn_active = true,
-            "turn/end" => self.turn_active = false,
+            "turn/end" => {
+                self.turn_active = false;
+                // The turn boundary settles whatever the stream left behind. A buffer with
+                // nothing in it is dropped (a straggler frame creates one that would
+                // otherwise sit there for the rest of the conversation), and an answer that
+                // only ever arrived as deltas is kept as a settled entry — the turn is over,
+                // so nothing about it may still say "正在生成".
+                if let Some(live) = self.live.take() {
+                    if !live.is_empty() {
+                        self.push(Entry::Assistant { blocks: live.blocks().to_vec(), streaming: false });
+                    }
+                }
+            }
             // Machinery. Counted, never drawn: a panel that shows `request/header` has stopped
             // being a conversation window.
             //
@@ -924,6 +945,73 @@ mod tests {
         transcript.apply_event(&json!({"sessionId": "session-1", "generation": 1, "seq": 5,
             "type": "turn/end", "time": 2, "data": {"turn": 2, "reason": {"kind": "completed"}}}));
         assert!(!transcript.is_turn_active());
+    }
+
+    #[test]
+    fn a_late_stream_frame_does_not_leave_the_panel_streaming() {
+        // The bug the composer showed: `streaming` was `live.is_some()`, and a stream frame
+        // that arrives after the turn's own end (an empty frame, or a straggler the host
+        // flushed late) creates a live buffer that nothing ever clears. `live_entry()` hides
+        // an empty buffer, so the thread looked settled — while the composer read the flag
+        // and kept offering "stop" for a turn that was over.
+        let mut transcript = Transcript::new();
+        transcript.apply_snapshot(&snapshot(vec![], 0, 1));
+        transcript.apply_event(&json!({"sessionId": "session-1", "generation": 1, "seq": 1,
+            "type": "turn/start", "time": 1, "data": {"turn": 1}}));
+        transcript.apply_stream(&live(json!({"type": "start", "attemptId": "session-1:1",
+            "revision": 1, "startedAfterSeq": 0, "step": 1, "turn": 1})));
+        transcript.apply_stream(&live(json!({"type": "chunk", "attemptId": "session-1:1", "revision": 2,
+            "index": 0, "time": 1, "chunk": {"type": "block-start", "blockType": "text", "index": 0}})));
+        transcript.apply_stream(&live(json!({"type": "chunk", "attemptId": "session-1:1", "revision": 3,
+            "index": 1, "time": 2, "chunk": {"type": "text-delta", "index": 0, "text": "答案"}})));
+        assert!(transcript.is_streaming(), "mid-turn it is streaming");
+
+        // The message lands, then the turn ends, then one more frame arrives.
+        transcript.apply_event(&json!({"sessionId": "session-1", "generation": 1, "seq": 2,
+            "type": "assistant/message", "time": 3,
+            "data": {"message": {"content": [{"type": "text", "text": "答案"}]}}}));
+        transcript.apply_event(&json!({"sessionId": "session-1", "generation": 1, "seq": 3,
+            "type": "turn/end", "time": 4, "data": {"turn": 1, "reason": {"kind": "completed"}}}));
+        transcript.apply_stream(&live(json!({"type": "end", "attemptId": "session-1:1", "revision": 4})));
+
+        assert!(
+            !transcript.is_streaming(),
+            "the turn is over: the composer must offer send again, not stop",
+        );
+    }
+
+    #[test]
+    fn a_live_stream_left_over_when_the_turn_ends_is_settled() {
+        // The other half of the same defect: an answer that only ever arrived as deltas (the
+        // host never sent its `assistant/message`) must not sit in the thread as "正在生成"
+        // forever. The turn boundary settles it, exactly as the message would have.
+        let mut transcript = Transcript::new();
+        transcript.apply_snapshot(&snapshot(vec![], 0, 1));
+        transcript.apply_event(&json!({"sessionId": "session-1", "generation": 1, "seq": 1,
+            "type": "turn/start", "time": 1, "data": {"turn": 1}}));
+        transcript.apply_stream(&live(json!({"type": "start", "attemptId": "session-1:1",
+            "revision": 1, "startedAfterSeq": 0, "step": 1, "turn": 1})));
+        transcript.apply_stream(&live(json!({"type": "chunk", "attemptId": "session-1:1", "revision": 2,
+            "index": 0, "time": 1, "chunk": {"type": "block-start", "blockType": "text", "index": 0}})));
+        transcript.apply_stream(&live(json!({"type": "chunk", "attemptId": "session-1:1", "revision": 3,
+            "index": 1, "time": 2, "chunk": {"type": "text-delta", "index": 0, "text": "只有增量"}})));
+
+        transcript.apply_event(&json!({"sessionId": "session-1", "generation": 1, "seq": 2,
+            "type": "turn/end", "time": 3, "data": {"turn": 1, "reason": {"kind": "completed"}}}));
+
+        assert!(transcript.live_entry().is_none(), "nothing is still being generated");
+        assert!(!transcript.is_streaming());
+        let settled = transcript
+            .entries()
+            .iter()
+            .rev()
+            .find_map(|entry| match entry {
+                Entry::Assistant { blocks, streaming } => Some((blocks.clone(), *streaming)),
+                _ => None,
+            })
+            .expect("the text is kept, as a settled answer");
+        assert_eq!(settled.0, vec![Block::Text("只有增量".to_owned())]);
+        assert!(!settled.1, "and it is not marked as still streaming");
     }
 
     #[test]
