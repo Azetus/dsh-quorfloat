@@ -131,6 +131,18 @@ fn run() -> Result<SessionExit, String> {
             registered: hotkey.is_active(),
         },
     })));
+    // The pin file, read once: its session half is adopted by the follow layer
+    // (which validates it against the list it will receive), its workspace half
+    // seeds the new-conversation default (P0). The two are one fact, not two —
+    // see `app/pinned.rs`.
+    let pinned = pinned_path
+        .as_deref()
+        .map(dsh_quorfloat::app::pinned::Pinned::load)
+        .unwrap_or_default();
+    {
+        let mut session = lock(&session);
+        session.adopt_pinned(pinned.session.clone());
+    }
 
     // Shared with the sink, so a breadcrumb written from inside the session (an
     // approval arriving, an answer being applied) lands in the same file as the
@@ -139,18 +151,35 @@ fn run() -> Result<SessionExit, String> {
 
     // The shell's own facts, beside the session: effective settings, the hotkey as
     // the settings chip reports it, and the height coordination.
+    //
+    // The user's preferences are overlaid on the environment baseline at
+    // **startup** — the documented contract has two call sites, this one and the
+    // host-config application in the dispatcher — so the very first snapshot the
+    // frontend renders already carries the user's choices.
+    let preferences = preferences_path.as_deref().map(Preferences::load).unwrap_or_default();
     let view = Arc::new(Mutex::new(ShellView {
-        settings: settings.clone(),
+        settings: settings.clone().with_preferences(&preferences),
         hotkey_requested: hotkey.spec().map(str::to_owned),
         hotkey_held: hotkey.held_spec().map(str::to_owned),
         hotkey_registered: hotkey.is_active(),
         hotkey_reason: hotkey.reason().map(str::to_owned),
-        preferences: preferences_path
-            .as_deref()
-            .map(Preferences::load)
-            .unwrap_or_default(),
+        preferences,
+        pinned_workspace: pinned.workspace.clone(),
+        visible: settings.start_visible,
         height: Height::new(),
     }));
+    // The effective settings at startup, on the record: the ground truth the
+    // settings page's controls are rendered from, before any host frame or
+    // user click has had a chance to change them.
+    {
+        let view = lock(&view);
+        marker.write(&format!(
+            "settings initial: keepOpen={} hideOnBlur={} theme={}",
+            view.preferences.keep_open.unwrap_or(false),
+            view.settings.hide_on_blur,
+            theme_name_for_marker(view.settings.theme),
+        ));
+    }
 
     // The handshake, before the Tauri app exists and therefore before any window,
     // webview, font, or GPU initialisation can delay it.
@@ -305,6 +334,7 @@ fn run() -> Result<SessionExit, String> {
             select_session,
             start_new,
             pin,
+            pin_workspace,
             request_workspaces,
             select_model,
             set_permission,
@@ -313,6 +343,7 @@ fn run() -> Result<SessionExit, String> {
             log,
             set_preferences,
             report_content_height,
+            set_visible,
         ])
         .build(tauri::generate_context!())
         .map_err(|error| format!("could not build the shell: {error}"))?;
@@ -384,12 +415,45 @@ fn start_new(state: tauri::State<'_, ShellRuntime>) -> Value {
 }
 
 /// `pin` — pin one conversation (or stop pinning), remembered across runs.
+///
+/// The workspace projection the bridge computed is put into the shell's view
+/// *before* the snapshot is emitted, so the frontend sees the pin and its
+/// projection in one state.
 #[tauri::command]
 fn pin(state: tauri::State<'_, ShellRuntime>, session_id: Option<String>) -> Value {
     let pinned_path = state.pinned_path.clone();
-    with_session(&state, |session, sink| {
-        bridge::pin(session, sink, session_id.as_deref(), pinned_path.as_deref())
-    })
+    let mut session = lock(&state.session);
+    let result = state.sink.with(|sink| {
+        bridge::pin(&mut session, sink, session_id.as_deref(), pinned_path.as_deref())
+    });
+    drop(session);
+    apply_pinned_workspace(&state.view, &result);
+    (state.emit)();
+    result
+}
+
+/// `pin_workspace` — pin the default directory for a new conversation, leaving
+/// the current one (a new-conversation-state action by design).
+#[tauri::command]
+fn pin_workspace(state: tauri::State<'_, ShellRuntime>, workspace_id: Option<String>) -> Value {
+    let pinned_path = state.pinned_path.clone();
+    let mut session = lock(&state.session);
+    let result = state.sink.with(|sink| {
+        bridge::pin_workspace(&mut session, sink, workspace_id.as_deref(), pinned_path.as_deref())
+    });
+    drop(session);
+    apply_pinned_workspace(&state.view, &result);
+    (state.emit)();
+    result
+}
+
+/// Put the bridge's workspace projection into the shell's view.
+fn apply_pinned_workspace(view: &Arc<Mutex<ShellView>>, result: &Value) {
+    let mut view = lock(view);
+    view.pinned_workspace = result
+        .get("pinnedWorkspace")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
 }
 
 /// `request_workspaces` — ask the host for the workspace list.
@@ -479,9 +543,27 @@ fn set_preferences(
         let mut view = lock(&state.view);
         view.preferences = preferences;
         view.settings = view.settings.with_preferences(&view.preferences);
+        // On the record, with the *effective* values: this is the ground truth
+        // that answers "did the switch's click reach the behaviour" without a
+        // window to look at.
+        state.sink.mark(&format!(
+            "preferences set: keepOpen={} hideOnBlur={} theme={}",
+            view.preferences.keep_open.unwrap_or(false),
+            view.settings.hide_on_blur,
+            theme_name_for_marker(view.settings.theme),
+        ));
     }
     (state.emit)();
     Ok(json!({}))
+}
+
+/// The theme's wire name, for the preferences marker.
+fn theme_name_for_marker(theme: dsh_quorfloat::app::theme::Preference) -> &'static str {
+    match theme {
+        dsh_quorfloat::app::theme::Preference::System => "system",
+        dsh_quorfloat::app::theme::Preference::Light => "light",
+        dsh_quorfloat::app::theme::Preference::Dark => "dark",
+    }
 }
 
 /// `report_content_height` — the frontend measured its own height; the dispatcher
@@ -489,6 +571,16 @@ fn set_preferences(
 #[tauri::command]
 fn report_content_height(state: tauri::State<'_, ShellRuntime>, height: f64) -> Value {
     let _ = state.height_tx.send(Wake::Height(height as f32));
+    json!({})
+}
+
+/// `set_visible` — the frontend asks the native window to show or hide, after its
+/// own transition has run. The dispatcher stays the only thread that touches the
+/// window: this command is a request, not a direct action.
+#[tauri::command]
+fn set_visible(state: tauri::State<'_, ShellRuntime>, visible: bool) -> Value {
+    let command = if visible { WindowCommand::Show } else { WindowCommand::Hide };
+    let _ = state.height_tx.send(Wake::Visibility(command));
     json!({})
 }
 
@@ -533,6 +625,7 @@ fn spawn_dispatcher(
                 let _ = window.show();
                 let _ = window.set_focus();
             }
+            set_view_visible(&view, visible);
             // The first report is the measurement the host waits for: until it
             // arrives, the host does not know whether a panel can appear at all.
             report_visibility(&session, &sink, visible, &capabilities);
@@ -550,6 +643,7 @@ fn spawn_dispatcher(
                             apply_window_command(&window, command, &mut visible);
                         }
                         if changed {
+                            set_view_visible(&view, visible);
                             report_visibility(&session, &sink, visible, &capabilities);
                         }
                         // The host's `ready` may have changed the window section:
@@ -558,12 +652,35 @@ fn spawn_dispatcher(
                         emit();
                     }
                     Ok(Wake::Hotkey) => {
-                        apply_window_command(&window, WindowCommand::Toggle, &mut visible);
-                        report_visibility(&session, &sink, visible, &capabilities);
-                        emit();
+                        if visible {
+                            // The frontend plays the exit transition and asks to
+                            // hide when it finishes: hiding the native window here
+                            // would cut the 180ms fade short. The host can still
+                            // force-hide through `window/visibility` on Frames.
+                            let _ = handle.emit("quorfloat/hotkey-hide", ());
+                        } else {
+                            apply_window_command(&window, WindowCommand::Show, &mut visible);
+                            set_view_visible(&view, visible);
+                            // A summon means a fresh conversation, unless the pin
+                            // says "continue this one" (user decision 2026-10-09).
+                            // The host's own shows (`window/visibility` on Frames)
+                            // do not reset — that is the host's intent, not a summon.
+                            {
+                                let mut session = lock(&session);
+                                let _ = sink.with(|sink| bridge::on_show(&mut session, sink));
+                            }
+                            report_visibility(&session, &sink, visible, &capabilities);
+                            emit();
+                        }
                     }
                     Ok(Wake::Height(panel_height)) => {
                         apply_height(&window, &view, &marker, &emit, panel_height);
+                    }
+                    Ok(Wake::Visibility(command)) => {
+                        apply_window_command(&window, command, &mut visible);
+                        set_view_visible(&view, visible);
+                        report_visibility(&session, &sink, visible, &capabilities);
+                        emit();
                     }
                     Ok(Wake::Exit(exit)) => {
                         // Remember where the panel was — a drag that ends inside the
@@ -581,6 +698,13 @@ fn spawn_dispatcher(
                     Err(RecvTimeoutError::Timeout) => {
                         // Height housekeeping: check whether the platform made room.
                         tick_height(&window, &view, &marker, &emit);
+                        // And where the panel is now: a drag is remembered once it
+                        // settles (the geometry module's one-second rule), so a
+                        // crash or a kill does not lose the user's placement.
+                        if let Ok(position) = window.outer_position() {
+                            let mut state = lock(&window_state);
+                            state.observe((position.x as f32, position.y as f32), rpc::now_millis());
+                        }
                     }
                     Err(RecvTimeoutError::Disconnected) => {
                         sink.log("the wake channel closed; exiting");
@@ -592,6 +716,14 @@ fn spawn_dispatcher(
             }
         })
         .map(|_| ())
+}
+
+/// Record the current visibility in the shell's view, for the snapshot.
+///
+/// The dispatcher is the only writer, and every window command goes through it,
+/// so the view and the window cannot disagree.
+fn set_view_visible(view: &Arc<Mutex<ShellView>>, visible: bool) {
+    lock(view).visible = visible;
 }
 
 /// Apply one parsed command to the native window.
@@ -636,7 +768,7 @@ fn apply_host_window(
         let session = lock(session);
         session.host_config().window.clone()
     };
-    let (changed, width, always_on_top) = {
+    let (changed, width, always_on_top, hide_on_blur) = {
         let mut view = lock(view);
         let before = view.settings.clone();
         view.settings.apply_host(host_window.as_ref());
@@ -645,6 +777,7 @@ fn apply_host_window(
             view.settings != before,
             view.settings.width,
             view.settings.always_on_top,
+            view.settings.hide_on_blur,
         )
     };
     if !changed {
@@ -662,7 +795,9 @@ fn apply_host_window(
     if let Err(error) = window.set_always_on_top(always_on_top) {
         marker.write(&format!("could not apply the host's alwaysOnTop: {error}"));
     }
-    marker.write(&format!("window config applied: width={width:.0} alwaysOnTop={always_on_top}"));
+    marker.write(&format!(
+        "window config applied: width={width:.0} alwaysOnTop={always_on_top} hideOnBlur={hide_on_blur}",
+    ));
 }
 
 /// Accept the frontend's measured panel height and coordinate the native window.

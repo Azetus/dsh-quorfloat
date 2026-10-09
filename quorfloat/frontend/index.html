@@ -2,29 +2,12 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>quorfloat</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="/src/styles/tokens.css">
 </head>
 <body>
-  <div class="panel">
-    <div class="bar">quorfloat</div>
-    <div class="hint">Tauri shell · M3 骨架</div>
-    <div class="note" id="summary">等待 shell 状态…</div>
-  </div>
-  <script>
-    // The shell emits a full snapshot after anything changes; the real frontend
-    // (M4) re-renders from it. The placeholder shows one line as proof the
-    // channel works end to end.
-    if (window.__TAURI__) {
-      window.__TAURI__.event.listen('quorfloat/state', (event) => {
-        const state = event.payload
-        const following = state.session?.following?.sessionId
-        const entries = state.transcript?.entries?.length ?? 0
-        const ready = state.session?.ready ? 'ready' : 'handshake…'
-        document.getElementById('summary').textContent =
-          `${ready} · 跟随 ${following ?? '—'} · 记录 ${entries} 条`
-      })
-    }
-  </script>
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
 </body>
 </html>

@@ -2,16 +2,24 @@
 //!
 //! A pin is a preference, so it belongs in a file — but it is also the *only* thing that
 //! decides which conversation the panel opens, and a file that can break the panel is worse
-//! than no file. The rules are therefore the ones `ui/geometry.rs` uses for the window's
+//! than no file. The rules are therefore the ones `geometry.rs` uses for the window's
 //! position, for the same reasons:
 //!
 //! - **Nothing is load-bearing.** A missing, unreadable or unparseable file means "nothing
 //!   is pinned", which is exactly the behaviour the panel had before pins existed.
 //! - **Nothing is written without a place to write it.**
 //! - **A pin that cannot be honoured is dropped rather than kept.** A pinned conversation
-//!   the host no longer lists must not leave the panel attached to nothing: the follow layer
-//!   validates the pin against the list it receives, and falls back to the newest
-//!   conversation ([`crate::app::session::follow`]).
+//!   the host no longer lists must not leave the panel attached to nothing: the follow
+//!   layer validates the pin against the list it receives and forgets an unlisted one,
+//!   which puts the panel back into "new conversation" mode (`dsh-quorfloat.md` §9).
+//!
+//! **The two fields are not two facts (2026-10-09, user decision).** The session pin is
+//! *the* pin — "which conversation opens next". The workspace field is either its
+//! projection (the pinned conversation's own workspace) or, with no session pin, the
+//! default directory for a new conversation (the P0 rung of the workspace ladder).
+//! The bridge (`app/bridge.rs`) is the one place that enforces this invariant on every
+//! write; a file written by an older build may hold any combination, and is read
+//! leniently: with a session pin, the workspace field is ignored at adoption.
 
 use std::path::PathBuf;
 

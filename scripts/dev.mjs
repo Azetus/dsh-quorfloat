@@ -210,8 +210,8 @@ profile in a real DSH_HOME is read or modified.
  *
  * @returns true when the command reported success.
  */
-function run(command, args) {
-  const result = spawnSync(command, args, { cwd: ROOT, stdio: 'inherit', shell: NEEDS_SHELL })
+function run(command, args, cwd = ROOT) {
+  const result = spawnSync(command, args, { cwd, stdio: 'inherit', shell: NEEDS_SHELL })
   return result.status === 0
 }
 
@@ -667,6 +667,13 @@ function main() {
 
   if (options.build && !run('npm', ['run', 'build'])) {
     process.stderr.write('dev: the build failed; not starting\n')
+    process.exit(1)
+  }
+
+  // The frontend is embedded by cargo (`generate_context!`), so it must be built
+  // first; without this step a stale dist would be compiled into the sidecar.
+  if (options.build && !run('npm', ['run', 'build'], join(ROOT, 'quorfloat', 'frontend'))) {
+    process.stderr.write('dev: the frontend build failed; not starting\n')
     process.exit(1)
   }
 

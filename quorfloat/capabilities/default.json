@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "The panel window: core defaults only. Custom commands are not gated by the ACL.",
+  "description": "The panel window: core defaults, plus window dragging from the top bar. Custom commands are not gated by the ACL.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "core:window:allow-start-dragging"]
 }
