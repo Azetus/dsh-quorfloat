@@ -1194,7 +1194,7 @@ impl Session {
             sink.log("session/stats carried no statistics");
             return;
         };
-        self.stats = Some(Stats {
+        let recorded = Stats {
             turns: stats.get("turns").and_then(Value::as_u64).unwrap_or(0),
             steps: stats.get("steps").and_then(Value::as_u64).unwrap_or(0),
             tokens_per_second: stats.get("tokensPerSecond").and_then(Value::as_f64),
@@ -1202,7 +1202,27 @@ impl Session {
             cache_hit_percent: stats.get("cacheHitPercent").and_then(Value::as_f64),
             context_tokens: stats.get("contextTokens").and_then(Value::as_u64),
             context_limit: stats.get("contextLimit").and_then(Value::as_u64),
-        });
+        };
+        let ran = recorded.steps > 0;
+        self.stats = Some(recorded);
+
+        // A conversation this panel created is attached the moment it exists, so the options read
+        // that follows the attach arrives *before* Harness has recorded what the conversation will
+        // use: the model projection is built from `request/header`, and no request has been made yet.
+        // The host answers `model=? permission=workspace-write` — honestly, and uselessly: without a
+        // second read the footer says "unknown" for the rest of the run while the conversation runs
+        // on the deployment default.
+        //
+        // A closed step is exactly when that record exists, so ask once more then — and only while
+        // the model is still missing, so a conversation that has never run is not asked about again
+        // for reporting statistics of its own.
+        let knows_model = self
+            .options
+            .as_ref()
+            .is_some_and(|options| options.current_model.is_some());
+        if ran && !knows_model {
+            self.request_options(sink);
+        }
     }
 
     /// Ask the host for a fresh subscription to the conversation being followed.
@@ -2502,6 +2522,118 @@ mod tests {
         assert_eq!(stats.cache_hit_percent, Some(75.0));
         assert_eq!(stats.context_tokens, Some(4000));
         assert_eq!(stats.context_limit, Some(128000));
+    }
+
+    /// One `session/stats` notification for the conversation the fixture follows.
+    ///
+    /// @param turns - closed turns the host reports.
+    /// @param steps - closed steps the host reports.
+    /// @returns the inbound notification.
+    fn stats_notification(turns: u64, steps: u64) -> Inbound {
+        Inbound::Notification {
+            method: "session/stats".to_owned(),
+            params: Some(json!({
+                "sessionId": "session-1",
+                "stats": {"turns": turns, "steps": steps},
+            })),
+        }
+    }
+
+    /// How many `session/options` requests one slice of frames holds.
+    ///
+    /// @param frames - the frames to count in.
+    /// @returns the number of catalog reads.
+    fn options_requests(frames: &[serde_json::Value]) -> usize {
+        frames.iter().filter(|frame| frame["method"] == "session/options").count()
+    }
+
+    /// The catalog answer the host sends for a conversation it has just created: no current model,
+    /// because nothing has run yet (the real reply is `model=? permission=workspace-write`).
+    ///
+    /// @returns the result payload.
+    fn fresh_conversation_options() -> serde_json::Value {
+        json!({
+            "groups": [{"id": "deepseek", "name": "DeepSeek", "models": [
+                {"id": "v41-flash", "name": "V4.1 Flash", "efforts": [{"id": "high", "name": "高"}], "defaultEffort": "high"},
+            ]}],
+            "permissions": [{"value": "workspace-write", "name": "工作区"}],
+            "permission": "workspace-write",
+        })
+    }
+
+    #[test]
+    fn a_conversation_created_before_it_ran_learns_its_model_when_a_step_closes() {
+        // The panel attaches a conversation the moment it creates one, so the options read that
+        // follows the attach arrives *before* Harness has anything to say: the model projection is
+        // built from `request/header`, and no request has been made yet. The real host answers
+        // `model=? permission=workspace-write` (2026-10-09, `.dev-home/sidecar.log`), and nothing
+        // used to ask again — so the footer said "unknown" for the rest of the run while the
+        // conversation ran on the deployment default.
+        let (mut session, mut sink) = followed();
+        let id = last_request(&sink)["id"].clone();
+        session.on_frame(
+            Inbound::Response { id, outcome: Ok(fresh_conversation_options()) },
+            &mut sink,
+        );
+        assert!(
+            session.options().is_some_and(|options| options.current_model.is_none()),
+            "the host honestly says it does not know yet",
+        );
+
+        let before = sink.frames.len();
+        session.on_frame(stats_notification(1, 1), &mut sink);
+        assert_eq!(
+            options_requests(&sink.frames[before..]),
+            1,
+            "a closed step is when the record exists, so the panel asks once more: {:?}",
+            &sink.frames[before..],
+        );
+    }
+
+    #[test]
+    fn the_model_retry_waits_for_a_step_and_stops_once_the_model_is_known() {
+        let (mut session, mut sink) = followed();
+        let id = last_request(&sink)["id"].clone();
+        session.on_frame(
+            Inbound::Response { id, outcome: Ok(fresh_conversation_options()) },
+            &mut sink,
+        );
+
+        // An attach reports statistics of its own, and "attached but never run" is not a reason to
+        // read the catalog again: there is nothing new to learn yet.
+        let before = sink.frames.len();
+        session.on_frame(stats_notification(0, 0), &mut sink);
+        assert_eq!(options_requests(&sink.frames[before..]), 0, "nothing has run yet");
+
+        // A closed step is the moment the record exists.
+        session.on_frame(stats_notification(1, 1), &mut sink);
+        assert_eq!(options_requests(&sink.frames[before..]), 1);
+
+        // The answer now carries the model, which ends the retry.
+        let id = last_request(&sink)["id"].clone();
+        session.on_frame(
+            Inbound::Response {
+                id,
+                outcome: Ok(json!({
+                    "groups": [{"id": "deepseek", "name": "DeepSeek", "models": [
+                        {"id": "v41-flash", "name": "V4.1 Flash", "efforts": [{"id": "high", "name": "高"}], "defaultEffort": "high"},
+                    ]}],
+                    "current": {"provider": "deepseek", "model": "v41-flash", "reasoningEffort": "high"},
+                    "permissions": [{"value": "workspace-write", "name": "工作区"}],
+                    "permission": "workspace-write",
+                })),
+            },
+            &mut sink,
+        );
+        assert!(session.options().is_some_and(|options| options.current_model.is_some()));
+
+        let after = sink.frames.len();
+        session.on_frame(stats_notification(3, 7), &mut sink);
+        assert_eq!(
+            options_requests(&sink.frames[after..]),
+            0,
+            "a model that is already known is not asked for again",
+        );
     }
 
     #[test]
