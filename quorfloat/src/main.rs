@@ -11,29 +11,39 @@
 //! including the panic hook installed below, because a panic message on stdout
 //! would corrupt the stream on the way out.
 //!
-//! The shape of the shell mirrors the old egui loop, one thread per duty:
+//! The shape of the shell, one thread per duty:
 //!
 //! - **reader** — owns stdin and answers frames. It needs no window to be visible,
 //!   which is why the host keeps receiving answers while the panel is hidden.
 //! - **dispatcher** — the only thread that touches the native window: it applies the
-//!   host's `window/visibility` commands, toggles on the hotkey, reports visibility
-//!   back, and ends the process when the session does.
+//!   host's `window/visibility` commands, toggles on the hotkey, applies the host's
+//!   window configuration, runs the height coordination, reports visibility back,
+//!   and ends the process when the session does.
 //! - **clock** — asks the follow layer to keep its conversation current, once per
 //!   interval, so a hidden panel still notices the conversation started next to it.
 //! - **hotkey watcher** — blocks on the global hotkey channel and wakes the
 //!   dispatcher.
 //!
-//! The frontend (`frontend/`) receives a nudge event after every answered frame and
-//! re-renders from the session state; the bridge that carries real state is M3.
+//! The frontend (`frontend/`) is fed through one channel: after anything changes,
+//! the shell emits `quorfloat/state` with the bridge's snapshot, and the page
+//! re-renders from it. The page speaks back through the Tauri commands below,
+//! which are thin wrappers over the bridge (see `app/bridge.rs`).
 
 use std::process::ExitCode;
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
+use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
+use dsh_quorfloat::app::bridge::{self, ShellView};
 use dsh_quorfloat::app::geometry::WindowState;
-use dsh_quorfloat::app::session::{FrameSink, HotkeyReport, Identity, Session, SessionExit, WindowCommand};
+use dsh_quorfloat::app::height::{Height, HeightAction, SHADOW_SIDE};
+use dsh_quorfloat::app::preferences::Preferences;
+use dsh_quorfloat::app::session::{
+    FrameSink, HotkeyReport, Identity, Session, SessionExit, WindowCommand,
+};
 use dsh_quorfloat::app::sink::{Reader, SharedSink, Wake};
 use dsh_quorfloat::app::window_settings::WindowSettings;
 use dsh_quorfloat::ipc::rpc;
@@ -43,14 +53,25 @@ use dsh_quorfloat::runtime::hotkey::{self, Hotkey};
 use dsh_quorfloat::VERSION;
 
 /// How often the follow layer re-checks which conversation the panel is attached to.
-///
-/// The reader thread answers frames; this thread is what makes the *questions* keep
-/// flowing while the window is hidden, so a panel sitting idle still discovers the
-/// conversation that was just started next to it.
 const CLOCK_INTERVAL_MS: u64 = 1000;
 
-/// Height of the placeholder window until the frontend reports content heights (M3).
+/// How often the dispatcher checks whether the platform made room for a height request.
+const HEIGHT_TICK_MS: u64 = 50;
+
+/// Height of the placeholder window until the frontend reports content heights.
 const PLACEHOLDER_HEIGHT: f64 = 400.0;
+
+/// Everything the Tauri commands and the worker threads share.
+struct ShellRuntime {
+    session: Arc<Mutex<Session>>,
+    sink: Arc<SharedSink>,
+    view: Arc<Mutex<ShellView>>,
+    hotkey: Mutex<Option<Hotkey>>,
+    height_tx: Sender<Wake>,
+    pinned_path: Option<std::path::PathBuf>,
+    preferences_path: Option<std::path::PathBuf>,
+    emit: Arc<dyn Fn() + Send + Sync>,
+}
 
 fn main() -> ExitCode {
     install_panic_hook();
@@ -80,6 +101,8 @@ fn run() -> Result<SessionExit, String> {
     // Read before the window exists: the shell restores the position from this, and
     // the same value is what it writes back at the end of the session.
     let window_state = Arc::new(Mutex::new(WindowState::load()));
+    let pinned_path = dsh_quorfloat::app::pinned::path_from_env();
+    let preferences_path = dsh_quorfloat::app::preferences::path_from_env();
     // Registered before the window exists: a taken accelerator is a normal outcome
     // and must be known before `hello` reports it, so the host shows the real state
     // rather than a key that silently does nothing.
@@ -114,6 +137,21 @@ fn run() -> Result<SessionExit, String> {
     // lifecycle lines written here. One file, one ordering, one story.
     let sink = Arc::new(SharedSink::new(Box::new(StdioSink::new(marker.clone()))));
 
+    // The shell's own facts, beside the session: effective settings, the hotkey as
+    // the settings chip reports it, and the height coordination.
+    let view = Arc::new(Mutex::new(ShellView {
+        settings: settings.clone(),
+        hotkey_requested: hotkey.spec().map(str::to_owned),
+        hotkey_held: hotkey.held_spec().map(str::to_owned),
+        hotkey_registered: hotkey.is_active(),
+        hotkey_reason: hotkey.reason().map(str::to_owned),
+        preferences: preferences_path
+            .as_deref()
+            .map(Preferences::load)
+            .unwrap_or_default(),
+        height: Height::new(),
+    }));
+
     // The handshake, before the Tauri app exists and therefore before any window,
     // webview, font, or GPU initialisation can delay it.
     {
@@ -136,6 +174,7 @@ fn run() -> Result<SessionExit, String> {
     let shell_outcome = Arc::clone(&outcome);
     let shell_marker = marker.clone();
     let shell_state = Arc::clone(&window_state);
+    let shell_view = Arc::clone(&view);
     let shell_hotkey_wake = hotkey_wake.clone();
 
     let app = tauri::Builder::default()
@@ -147,54 +186,54 @@ fn run() -> Result<SessionExit, String> {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let handle = app.handle().clone();
-            // The reader thread answers frames while the panel is hidden; the frontend
-            // must know the state changed so it re-renders from the session.
-            let nudge: Arc<dyn Fn() + Send + Sync> = {
+            // One channel into the frontend: after anything changes, a fresh snapshot
+            // is emitted and the page re-renders from it.
+            let emit: Arc<dyn Fn() + Send + Sync> = {
                 let handle = handle.clone();
+                let session = Arc::clone(&shell_session);
+                let view = Arc::clone(&shell_view);
                 Arc::new(move || {
-                    let _ = handle.emit("quorfloat/nudge", ());
+                    let session = lock(&session);
+                    let view = lock(&view);
+                    let value = bridge::snapshot(&session, &view);
+                    drop(session);
+                    drop(view);
+                    let _ = handle.emit("quorfloat/state", value);
                 })
             };
 
-            // The grab must outlive this closure: dropping the manager would release
-            // the accelerator. Leaking it is deliberate — the registration is
-            // process-lifetime by design, and the OS reclaims it on exit.
-            let _held_hotkey: &'static mut Hotkey = Box::leak(Box::new(hotkey));
-
-            let window = {
-                // The window is created here rather than by the configuration so the
-                // development hook can point the webview at a Vite dev server:
-                // `DSH_QUORFLOAT_DEV_URL` selects an external page (hot reload while
-                // the host spawns this binary), otherwise the embedded assets load.
-                let url = match std::env::var("DSH_QUORFLOAT_DEV_URL") {
-                    Ok(raw) if !raw.trim().is_empty() => match raw.trim().parse::<tauri::Url>() {
-                        Ok(url) => tauri::WebviewUrl::External(url),
-                        Err(error) => {
-                            shell_sink.log(&format!(
-                                "DSH_QUORFLOAT_DEV_URL is not a URL ({error}); using the embedded frontend",
-                            ));
-                            tauri::WebviewUrl::App("index.html".into())
-                        }
-                    },
-                    _ => tauri::WebviewUrl::App("index.html".into()),
-                };
-                tauri::WebviewWindowBuilder::new(app, "main", url)
-                    .title("quorfloat")
-                    .inner_size(f64::from(settings.width), PLACEHOLDER_HEIGHT)
-                    .resizable(false)
-                    .maximizable(false)
-                    .minimizable(false)
-                    .decorations(false)
-                    .transparent(true)
-                    .shadow(false)
-                    .skip_taskbar(true)
-                    .always_on_top(settings.always_on_top)
-                    .visible(false)
-                    .focused(false)
-                    .accept_first_mouse(true)
-                    .build()
-                    .map_err(|error| format!("could not create the main window: {error}"))?
+            // The window is created here rather than by the configuration so the
+            // development hook can point the webview at a Vite dev server:
+            // `DSH_QUORFLOAT_DEV_URL` selects an external page (hot reload while
+            // the host spawns this binary), otherwise the embedded assets load.
+            let url = match std::env::var("DSH_QUORFLOAT_DEV_URL") {
+                Ok(raw) if !raw.trim().is_empty() => match raw.trim().parse::<tauri::Url>() {
+                    Ok(url) => tauri::WebviewUrl::External(url),
+                    Err(error) => {
+                        shell_sink.log(&format!(
+                            "DSH_QUORFLOAT_DEV_URL is not a URL ({error}); using the embedded frontend",
+                        ));
+                        tauri::WebviewUrl::App("index.html".into())
+                    }
+                },
+                _ => tauri::WebviewUrl::App("index.html".into()),
             };
+            let window = tauri::WebviewWindowBuilder::new(app, "main", url)
+                .title("quorfloat")
+                .inner_size(f64::from(settings.width), PLACEHOLDER_HEIGHT)
+                .resizable(false)
+                .maximizable(false)
+                .minimizable(false)
+                .decorations(false)
+                .transparent(true)
+                .shadow(false)
+                .skip_taskbar(true)
+                .always_on_top(settings.always_on_top)
+                .visible(false)
+                .focused(false)
+                .accept_first_mouse(true)
+                .build()
+                .map_err(|error| format!("could not create the main window: {error}"))?;
             // Where the user left it — or nowhere, which is a real difference rather than
             // a default: a panel that always opened at the origin would be one the user
             // moves every launch.
@@ -206,12 +245,23 @@ fn run() -> Result<SessionExit, String> {
                 }
             }
 
+            app.manage(ShellRuntime {
+                session: Arc::clone(&shell_session),
+                sink: Arc::clone(&shell_sink),
+                view: Arc::clone(&shell_view),
+                hotkey: Mutex::new(Some(hotkey)),
+                height_tx: wake_tx.clone(),
+                pinned_path,
+                preferences_path,
+                emit: emit.clone(),
+            });
+
             let reader = Reader::new(
                 Arc::clone(&shell_session),
                 Arc::clone(&shell_sink),
                 wake_tx.clone(),
                 Arc::clone(&shell_outcome),
-                nudge.clone(),
+                emit.clone(),
             );
             std::thread::Builder::new()
                 .name("quorfloat-stdin".to_owned())
@@ -224,28 +274,46 @@ fn run() -> Result<SessionExit, String> {
                 Arc::clone(&shell_sink),
                 shell_marker,
                 handle,
+                Arc::clone(&shell_view),
                 settings.start_visible,
                 hotkey_active,
                 Arc::clone(&shell_state),
+                emit.clone(),
             )
             .map_err(|error| format!("could not start the window dispatcher: {error}"))?;
 
             // The hotkey is watched on its own thread rather than polled: the watcher
             // blocks until the user presses the key, then wakes the dispatcher.
             if hotkey_active {
-                hotkey::watch_hotkey(shell_hotkey_wake, nudge.clone(), Arc::clone(&shell_sink));
+                hotkey::watch_hotkey(shell_hotkey_wake, emit.clone(), Arc::clone(&shell_sink));
             }
 
             spawn_clock(
                 Arc::clone(&shell_session),
                 Arc::clone(&shell_sink),
                 Arc::clone(&shell_outcome),
-                nudge,
+                emit,
             )
             .map_err(|error| format!("could not start the clock thread: {error}"))?;
 
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![
+            submit,
+            cancel,
+            answer_approval,
+            select_session,
+            start_new,
+            pin,
+            request_workspaces,
+            select_model,
+            set_permission,
+            dismiss_interaction,
+            dismiss_handoff,
+            log,
+            set_preferences,
+            report_content_height,
+        ])
         .build(tauri::generate_context!())
         .map_err(|error| format!("could not build the shell: {error}"))?;
 
@@ -256,11 +324,182 @@ fn run() -> Result<SessionExit, String> {
     Ok(recorded)
 }
 
-/// Applies window commands and the hotkey to the native window, reports visibility
-/// changes, and ends the process when the session does.
+// ── Tauri commands ───────────────────────────────────────────────────────────
+
+/// Run one bridge command against the session, then refresh the frontend.
 ///
-/// The one thread that touches the window: nothing else may show or hide it, so the
-/// reported visibility and the real one cannot drift apart.
+/// The lock order is session, then sink, then view — everywhere in this file — so
+/// two threads cannot hold them in opposite orders and deadlock.
+fn with_session(
+    state: &ShellRuntime,
+    operation: impl FnOnce(&mut Session, &mut dyn FrameSink) -> Value,
+) -> Value {
+    let mut session = lock(&state.session);
+    let result = state.sink.with(|sink| operation(&mut session, sink));
+    drop(session);
+    (state.emit)();
+    result
+}
+
+/// `submit` — send the user's text to the followed conversation.
+#[tauri::command]
+fn submit(
+    state: tauri::State<'_, ShellRuntime>,
+    text: String,
+    workspace_id: Option<String>,
+) -> Value {
+    with_session(&state, |session, sink| {
+        bridge::submit(session, sink, &text, workspace_id.as_deref())
+    })
+}
+
+/// `cancel` — stop the turn being generated.
+#[tauri::command]
+fn cancel(state: tauri::State<'_, ShellRuntime>) -> Value {
+    with_session(&state, |session, sink| bridge::cancel(session, sink))
+}
+
+/// `answer_approval` — settle one approval card.
+#[tauri::command]
+fn answer_approval(
+    state: tauri::State<'_, ShellRuntime>,
+    interaction_id: String,
+    allow: bool,
+) -> Value {
+    with_session(&state, |session, sink| {
+        bridge::answer_approval(session, sink, &interaction_id, allow)
+    })
+}
+
+/// `select_session` — follow a different conversation.
+#[tauri::command]
+fn select_session(state: tauri::State<'_, ShellRuntime>, session_id: String) -> Value {
+    with_session(&state, |session, sink| bridge::select_session(session, sink, &session_id))
+}
+
+/// `start_new` — go back to "new conversation" mode.
+#[tauri::command]
+fn start_new(state: tauri::State<'_, ShellRuntime>) -> Value {
+    with_session(&state, |session, sink| bridge::start_new(session, sink))
+}
+
+/// `pin` — pin one conversation (or stop pinning), remembered across runs.
+#[tauri::command]
+fn pin(state: tauri::State<'_, ShellRuntime>, session_id: Option<String>) -> Value {
+    let pinned_path = state.pinned_path.clone();
+    with_session(&state, |session, sink| {
+        bridge::pin(session, sink, session_id.as_deref(), pinned_path.as_deref())
+    })
+}
+
+/// `request_workspaces` — ask the host for the workspace list.
+#[tauri::command]
+fn request_workspaces(state: tauri::State<'_, ShellRuntime>) -> Value {
+    with_session(&state, |session, sink| bridge::request_workspaces(session, sink))
+}
+
+/// `select_model` — apply one model and reasoning effort.
+#[tauri::command]
+fn select_model(
+    state: tauri::State<'_, ShellRuntime>,
+    provider: String,
+    model: String,
+    effort: Option<String>,
+) -> Value {
+    with_session(&state, |session, sink| {
+        bridge::select_model(session, sink, &provider, &model, effort.as_deref())
+    })
+}
+
+/// `set_permission` — apply one permission preset.
+#[tauri::command]
+fn set_permission(state: tauri::State<'_, ShellRuntime>, value: String) -> Value {
+    with_session(&state, |session, sink| bridge::set_permission(session, sink, &value))
+}
+
+/// `dismiss_interaction` — drop one card locally.
+#[tauri::command]
+fn dismiss_interaction(state: tauri::State<'_, ShellRuntime>, interaction_id: String) -> Value {
+    with_session(&state, |session, _| bridge::dismiss_interaction(session, &interaction_id))
+}
+
+/// `dismiss_handoff` — clear the "go to the Harness window" notice.
+#[tauri::command]
+fn dismiss_handoff(state: tauri::State<'_, ShellRuntime>) -> Value {
+    with_session(&state, |session, _| bridge::dismiss_handoff(session))
+}
+
+/// `log` — put one frontend breadcrumb on the record.
+#[tauri::command]
+fn log(state: tauri::State<'_, ShellRuntime>, line: String) -> Value {
+    state.sink.with(|sink| bridge::log(sink, &line))
+}
+
+/// `set_preferences` — apply what the settings page changed.
+///
+/// The hotkey is rebound here, on the main thread, which is where the platform
+/// wants registration. A refused accelerator keeps the previous grab, exactly as
+/// `Hotkey::rebind` documents.
+#[tauri::command]
+fn set_preferences(
+    state: tauri::State<'_, ShellRuntime>,
+    theme: Option<String>,
+    keep_open: Option<bool>,
+    hotkey: Option<String>,
+) -> Result<Value, String> {
+    let incoming = json!({ "theme": theme, "keepOpen": keep_open, "hotkey": hotkey });
+    let mut preferences = state
+        .preferences_path
+        .as_deref()
+        .map(Preferences::load)
+        .unwrap_or_default();
+    preferences = bridge::apply_preferences(preferences, &incoming)?;
+    if let Some(path) = state.preferences_path.as_deref() {
+        preferences.save(path);
+    }
+    if let Some(spec) = preferences.hotkey.clone() {
+        let mut slot = lock(&state.hotkey);
+        let rebound = slot
+            .take()
+            .unwrap_or_else(|| Hotkey::register(&spec))
+            .rebind(&spec);
+        {
+            let mut view = lock(&state.view);
+            view.hotkey_requested = rebound.spec().map(str::to_owned);
+            view.hotkey_held = rebound.held_spec().map(str::to_owned);
+            view.hotkey_registered = rebound.is_active();
+            view.hotkey_reason = rebound.reason().map(str::to_owned);
+        }
+        *slot = Some(rebound);
+    }
+    {
+        // The host's configuration is the baseline; the user's choices sit on top —
+        // the same single overlay as at startup, so a preference can never be lost
+        // to a settings update.
+        let mut view = lock(&state.view);
+        view.preferences = preferences;
+        view.settings = view.settings.with_preferences(&view.preferences);
+    }
+    (state.emit)();
+    Ok(json!({}))
+}
+
+/// `report_content_height` — the frontend measured its own height; the dispatcher
+/// coordinates the native window with it.
+#[tauri::command]
+fn report_content_height(state: tauri::State<'_, ShellRuntime>, height: f64) -> Value {
+    let _ = state.height_tx.send(Wake::Height(height as f32));
+    json!({})
+}
+
+// ── dispatcher ───────────────────────────────────────────────────────────────
+
+/// Applies window commands, the host's window configuration and the hotkey to the
+/// native window, runs the height coordination, reports visibility changes, and
+/// ends the process when the session does.
+///
+/// The one thread that touches the window: nothing else may show, hide, or resize
+/// it, so the reported visibility and the real one cannot drift apart.
 #[allow(clippy::too_many_arguments)]
 fn spawn_dispatcher(
     wake: Receiver<Wake>,
@@ -268,9 +507,11 @@ fn spawn_dispatcher(
     sink: Arc<SharedSink>,
     marker: Marker,
     handle: AppHandle,
+    view: Arc<Mutex<ShellView>>,
     start_visible: bool,
     hotkey_active: bool,
     window_state: Arc<Mutex<WindowState>>,
+    emit: Arc<dyn Fn() + Send + Sync>,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("quorfloat-window".to_owned())
@@ -297,17 +538,8 @@ fn spawn_dispatcher(
             report_visibility(&session, &sink, visible, &capabilities);
 
             loop {
-                let wake = match wake.recv() {
-                    Ok(wake) => wake,
-                    Err(_) => {
-                        sink.log("the wake channel closed; exiting");
-                        record_end(&session, &sink, &marker, &SessionExit::PeerClosed);
-                        handle.exit(0);
-                        return;
-                    }
-                };
-                match wake {
-                    Wake::Frames => {
+                match wake.recv_timeout(Duration::from_millis(HEIGHT_TICK_MS)) {
+                    Ok(Wake::Frames) => {
                         let commands = {
                             let mut session = lock(&session);
                             session.take_window_commands()
@@ -320,12 +552,20 @@ fn spawn_dispatcher(
                         if changed {
                             report_visibility(&session, &sink, visible, &capabilities);
                         }
+                        // The host's `ready` may have changed the window section:
+                        // apply it, then re-apply the user's preferences on top.
+                        apply_host_window(&window, &session, &view, &marker);
+                        emit();
                     }
-                    Wake::Hotkey => {
+                    Ok(Wake::Hotkey) => {
                         apply_window_command(&window, WindowCommand::Toggle, &mut visible);
                         report_visibility(&session, &sink, visible, &capabilities);
+                        emit();
                     }
-                    Wake::Exit(exit) => {
+                    Ok(Wake::Height(panel_height)) => {
+                        apply_height(&window, &view, &marker, &emit, panel_height);
+                    }
+                    Ok(Wake::Exit(exit)) => {
                         // Remember where the panel was — a drag that ends inside the
                         // settle window is as real as any other move — then leave.
                         if let Ok(position) = window.outer_position() {
@@ -335,6 +575,16 @@ fn spawn_dispatcher(
                             state.flush(now);
                         }
                         record_end(&session, &sink, &marker, &exit);
+                        handle.exit(0);
+                        return;
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        // Height housekeeping: check whether the platform made room.
+                        tick_height(&window, &view, &marker, &emit);
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        sink.log("the wake channel closed; exiting");
+                        record_end(&session, &sink, &marker, &SessionExit::PeerClosed);
                         handle.exit(0);
                         return;
                     }
@@ -370,6 +620,125 @@ fn apply_window_command(window: &WebviewWindow, command: WindowCommand, visible:
             }
         }
     }
+}
+
+/// Apply the host's `config.window` to the effective settings and the native window.
+///
+/// The overlay order is the documented one: host baseline first, then the user's
+/// preferences on top (`app/bridge.rs`). Only a change reaches the platform.
+fn apply_host_window(
+    window: &WebviewWindow,
+    session: &Arc<Mutex<Session>>,
+    view: &Arc<Mutex<ShellView>>,
+    marker: &Marker,
+) {
+    let host_window = {
+        let session = lock(session);
+        session.host_config().window.clone()
+    };
+    let (changed, width, always_on_top) = {
+        let mut view = lock(view);
+        let before = view.settings.clone();
+        view.settings.apply_host(host_window.as_ref());
+        view.settings = view.settings.with_preferences(&view.preferences);
+        (
+            view.settings != before,
+            view.settings.width,
+            view.settings.always_on_top,
+        )
+    };
+    if !changed {
+        return;
+    }
+    let native_width = f64::from(width + SHADOW_SIDE * 2.0);
+    if let Ok(size) = window.inner_size() {
+        if let Err(error) = window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(
+            native_width,
+            size.height as f64,
+        ))) {
+            marker.write(&format!("could not apply the host's width: {error}"));
+        }
+    }
+    if let Err(error) = window.set_always_on_top(always_on_top) {
+        marker.write(&format!("could not apply the host's alwaysOnTop: {error}"));
+    }
+    marker.write(&format!("window config applied: width={width:.0} alwaysOnTop={always_on_top}"));
+}
+
+/// Accept the frontend's measured panel height and coordinate the native window.
+fn apply_height(
+    window: &WebviewWindow,
+    view: &Arc<Mutex<ShellView>>,
+    marker: &Marker,
+    emit: &Arc<dyn Fn() + Send + Sync>,
+    panel_height: f32,
+) {
+    let action = {
+        let mut view = lock(view);
+        view.height.retarget(panel_height, rpc::now_millis())
+    };
+    if let Some(HeightAction::Resize { native }) = action {
+        resize(window, view, marker, native);
+        emit();
+    }
+}
+
+/// The periodic height check: did the platform make room for the outstanding request?
+fn tick_height(
+    window: &WebviewWindow,
+    view: &Arc<Mutex<ShellView>>,
+    marker: &Marker,
+    emit: &Arc<dyn Fn() + Send + Sync>,
+) {
+    let action = {
+        let native = window
+            .inner_size()
+            .map(|size| size.height as f32)
+            .unwrap_or(0.0);
+        let mut view = lock(view);
+        view.height.tick(rpc::now_millis(), native)
+    };
+    match action {
+        Some(HeightAction::Resize { native }) => {
+            resize(window, view, marker, native);
+            emit();
+        }
+        Some(HeightAction::Cap { available_panel }) => {
+            let (target, _) = {
+                let view = lock(view);
+                (view.height.target(), view.settings.width)
+            };
+            marker.write(&format!(
+                "height capped at {available_panel:.0}: asked {target:.0}, the window never made room",
+            ));
+            emit();
+        }
+        None => {}
+    }
+}
+
+/// Ask the platform for one native inner size, on the record.
+fn resize(
+    window: &WebviewWindow,
+    view: &Arc<Mutex<ShellView>>,
+    marker: &Marker,
+    native: f32,
+) {
+    let width = {
+        let view = lock(view);
+        f64::from(view.settings.width + SHADOW_SIDE * 2.0)
+    };
+    if let Err(error) =
+        window.set_size(tauri::Size::Logical(tauri::LogicalSize::new(width, f64::from(native))))
+    {
+        marker.write(&format!("could not set the window size: {error}"));
+        return;
+    }
+    let panel = {
+        let view = lock(view);
+        view.height.target()
+    };
+    marker.write(&format!("layout panel={panel:.0} window={width:.0}x{native:.0}"));
 }
 
 /// Wake the follow layer once per interval.
@@ -449,7 +818,7 @@ fn configured_hotkey() -> String {
 ///
 /// The rule lives in the library (`app::preferences::hotkey_to_attempt`) so it can be tested as a
 /// pure function; this only supplies the two facts it needs. Reading it here rather than inside
-/// `App::new` is deliberate: the grab has to be taken before the window exists, so that `hello` can
+/// the app is deliberate: the grab has to be taken before the window exists, so that `hello` can
 /// report what is really held instead of what was hoped for.
 ///
 /// @returns the accelerator to attempt.

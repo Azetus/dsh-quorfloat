@@ -2,12 +2,16 @@
 //!
 //! With the egui view gone (migrated to the Tauri frontend, `frontend/`), this module
 //! keeps what the shell still owns: the session state machine ([`session`]), the bridge
-//! to the frame reader ([`sink`]), and the small local files the process manages —
-//! [`preferences`], [`pinned`], [`workspace`], [`geometry`] and [`window_settings`].
+//! to the frame reader ([`sink`]), the frontend bridge ([`bridge`]: one snapshot shape
+//! plus the commands the page can issue), the native-height coordination ([`height`]),
+//! and the small local files the process manages — [`preferences`], [`pinned`],
+//! [`workspace`], [`geometry`] and [`window_settings`].
 //!
 //! The drawing itself lives in the web frontend; the Tauri shell in `main.rs` feeds it
 //! state and applies its intents to the session.
 
+pub mod bridge;
+pub mod height;
 mod theme;
 
 pub mod geometry;

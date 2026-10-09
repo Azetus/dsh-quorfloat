@@ -16,14 +16,16 @@ use std::sync::{Arc, Mutex};
 use crate::app::session::{FrameSink, Session, SessionExit};
 use crate::ipc::transport::StdinSource;
 
-/// Something that needs the main thread's attention.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Something that needs the shell's attention.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Wake {
     /// At least one frame arrived. The frames were already answered on the reader
-    /// thread; this asks the main thread to redraw with any new configuration.
+    /// thread; this asks the shell to refresh with any new configuration.
     Frames,
     /// The hotkey was pressed.
     Hotkey,
+    /// The frontend reported a new content height (logical px, panel only).
+    Height(f32),
     /// The host asked this process to stop, or the channel ended.
     Exit(SessionExit),
 }

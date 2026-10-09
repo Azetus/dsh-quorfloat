@@ -83,8 +83,10 @@ use crate::ipc::rpc::{self, Inbound, Outcome, RpcError, Router};
 
 pub mod follow;
 pub mod interaction;
+/// Shared by the session's own tests and the bridge's: the bridge drives the same
+/// scripted host through the public command surface, so the fake host lives here.
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 pub mod transcript;
 
 /// Where outbound frames go.

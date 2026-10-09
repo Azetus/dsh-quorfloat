@@ -14,10 +14,10 @@ use crate::ipc::rpc::Inbound;
 
 /// A sink that keeps frames in memory instead of writing them.
 #[derive(Default)]
-pub(super) struct RecordingSink {
-    pub(super) frames: Vec<Value>,
-    pub(super) logs: Vec<String>,
-    pub(super) marks: Vec<String>,
+pub(crate) struct RecordingSink {
+    pub(crate) frames: Vec<Value>,
+    pub(crate) logs: Vec<String>,
+    pub(crate) marks: Vec<String>,
 }
 
 impl FrameSink for RecordingSink {
@@ -36,12 +36,12 @@ impl FrameSink for RecordingSink {
 }
 
 /// A source that hands out prepared frames and then reports end of stream.
-pub(super) struct ScriptedSource {
+pub(crate) struct ScriptedSource {
     frames: VecDeque<Inbound>,
 }
 
 impl ScriptedSource {
-    pub(super) fn new(frames: Vec<Inbound>) -> Self {
+    pub(crate) fn new(frames: Vec<Inbound>) -> Self {
         Self { frames: frames.into() }
     }
 }
@@ -52,7 +52,7 @@ impl FrameSource for ScriptedSource {
     }
 }
 
-pub(super) fn identity() -> Identity {
+pub(crate) fn identity() -> Identity {
     Identity {
         quorfloat_version: "0.0.1".to_owned(),
         platform: "darwin".to_owned(),
@@ -61,16 +61,16 @@ pub(super) fn identity() -> Identity {
     }
 }
 
-pub(super) fn request(id: i64, method: &str) -> Inbound {
+pub(crate) fn request(id: i64, method: &str) -> Inbound {
     Inbound::Request { id: json!(id), method: method.to_owned(), params: None }
 }
 
-pub(super) fn notification(method: &str, params: Value) -> Inbound {
+pub(crate) fn notification(method: &str, params: Value) -> Inbound {
     Inbound::Notification { method: method.to_owned(), params: Some(params) }
 }
 
 /// The host's answer to a good `hello`, trimmed to the fields this side reads.
-pub(super) fn hello_ok() -> Inbound {
+pub(crate) fn hello_ok() -> Inbound {
     Inbound::Response {
         id: json!(1),
         outcome: Ok(json!({"protocol": "quorfloat/1", "hostVersion": "0.2.0-rc.2",
@@ -78,7 +78,7 @@ pub(super) fn hello_ok() -> Inbound {
     }
 }
 
-pub(super) fn conversation_snapshot() -> serde_json::Value {
+pub(crate) fn conversation_snapshot() -> serde_json::Value {
     json!({
         "sessionId": "session-1", "generation": 1, "cursor": 1, "hasMore": false,
         "records": [
@@ -93,7 +93,7 @@ pub(super) fn conversation_snapshot() -> serde_json::Value {
     })
 }
 
-pub(super) fn approval_open(id: &str) -> Inbound {
+pub(crate) fn approval_open(id: &str) -> Inbound {
     notification(
         "interaction/open",
         json!({
@@ -110,7 +110,7 @@ pub(super) fn approval_open(id: &str) -> Inbound {
 }
 
 /// Deliver frames without the handshake, which these tests do not exercise.
-pub(super) fn deliver(session: &mut Session, frames: Vec<Inbound>, sink: &mut RecordingSink) {
+pub(crate) fn deliver(session: &mut Session, frames: Vec<Inbound>, sink: &mut RecordingSink) {
     for frame in frames {
         session.on_frame(frame, sink);
     }
@@ -120,7 +120,7 @@ pub(super) fn deliver(session: &mut Session, frames: Vec<Inbound>, sink: &mut Re
 /// the handshake, the list is read and the user's decision — a pin or a choice — is what
 /// attaches. Following the newest conversation is gone; a test that needs an attachment has
 /// to make the same decision the panel's user would.
-pub(super) fn follow_a_conversation(session: &mut Session, sink: &mut RecordingSink) {
+pub(crate) fn follow_a_conversation(session: &mut Session, sink: &mut RecordingSink) {
     session.on_frame(hello_ok(), sink);
     session.pump_follow_at(0, sink);
     let list = sink.frames.last().expect("a list request")["id"].clone();

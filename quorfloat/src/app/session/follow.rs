@@ -204,6 +204,18 @@ impl Follow {
         self.create_failure.take()
     }
 
+    /// The reason the last creation failed, without consuming it.
+    ///
+    /// The frontend's snapshot is a read: consuming a failure there would drop it
+    /// before anything could show it. The settings page, which clears it, uses
+    /// [`Follow::take_create_failure`].
+    ///
+    /// @returns the host's message, if a creation failed.
+    #[must_use]
+    pub fn create_failure(&self) -> Option<&str> {
+        self.create_failure.as_deref()
+    }
+
     /// Whether the workspace list has ever been asked for.
     #[must_use]
     pub fn workspaces_asked(&self) -> bool {
