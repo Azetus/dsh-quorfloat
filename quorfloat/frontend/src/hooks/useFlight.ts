@@ -161,5 +161,25 @@ export function useFlight(
     return () => { void pending.then(unlisten => { unlisten() }) }
   }, [requestHide, requestShow])
 
+  // Losing focus is the panel's ordinary way of going away — the setting decides whether it
+  // does. The switch in the settings page is the *inversion* of this flag (the design labels
+  // it by what the user gets: 失焦时保持展开), and `hidesOnBlur` is the one place that is
+  // undone. A programmatic hide blurs the webview too; `requestHide`'s guards swallow that
+  // (with its own marker), which is why this handler can stay this simple.
+  useEffect(() => {
+    const onBlur = (): void => {
+      const state = stateRef.current
+      if (state === null) return
+      if (!hidesOnBlur(state.settings.hideOnBlur)) {
+        void api.log('frontend blur: keeping the panel open (hideOnBlur=false)')
+        return
+      }
+      void api.log('frontend blur: hiding (hideOnBlur=true)')
+      requestHide()
+    }
+    window.addEventListener('blur', onBlur)
+    return () => { window.removeEventListener('blur', onBlur) }
+  }, [requestHide])
+
   return { hiding, requestHide, requestShow }
 }
