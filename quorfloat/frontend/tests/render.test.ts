@@ -9,7 +9,8 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { beforeEach, describe, expect, test } from 'vitest'
-import type { Snapshot } from '../src/lib/state'
+import { ICONS } from '../src/lib/icons'
+import type { PermissionOption, Snapshot } from '../src/lib/state'
 
 // The real page skeleton, before render.ts's module top-level queries it.
 // vitest's module URLs are http, so the file is read by path from the vite root.
@@ -78,6 +79,47 @@ function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
 beforeEach(() => {
   invocations.length = 0
 })
+
+// Permission fixtures shared by the menu and the footer entry: values and names as
+// `session/options` sends them. The host translates the built-in label
+// (src/harness/adapter.ts) but the *value* is the stable key — the same keys Harness's
+// own picker maps glyphs for
+// (packages/client/ui-primitives/src/PermissionIcon.tsx).
+const trio: PermissionOption[] = [
+  { value: 'read-only', name: '仅可查看', description: null },
+  { value: 'workspace-write', name: '工作区内修改', description: null },
+  { value: 'danger-full-access', name: '完全权限', description: null },
+]
+
+/**
+ * The inner markup of one embedded asset — what the rendered `<svg>` must carry.
+ * Spelled out here instead of asking the module under test which asset it meant:
+ * a fixture that shares the parser's assumption cannot catch the parser. The
+ * asset goes through the same DOM parser as the real glyph so that serialisation
+ * (`<path/>` vs `<path></path>`) cannot be mistaken for a wrong icon.
+ * @param name - asset key from the embedded map.
+ * @returns the asset's markup without its `<svg>` wrapper.
+ */
+function assetBody(name: string): string {
+  const source = ICONS[name]
+  if (source === undefined) throw new Error(`the icon map carries no ${name}`)
+  const host = document.createElement('div')
+  host.innerHTML = source.trim()
+  return host.firstElementChild?.innerHTML ?? ''
+}
+
+/**
+ * One snapshot whose `session/options` carries the given catalog and current value.
+ * @param permissions - the catalog rows.
+ * @param permission - the current value, or null for "the host has not said".
+ * @returns the snapshot to render.
+ */
+function withPermissions(permissions: PermissionOption[], permission: string | null): Snapshot {
+  const base = snapshot()
+  return snapshot({
+    session: { ...base.session, options: { models: [], current: null, permissions, permission } },
+  })
+}
 
 describe('the keep-open switch', () => {
   test('hideOnBlur=false renders the switch on', () => {
@@ -182,5 +224,79 @@ describe('the workspace pin (direction A)', () => {
         invocation => invocation.cmd === 'pin_workspace' && invocation.args.workspaceId === 'ws-1',
       ),
     ).toBe(true)
+  })
+})
+
+describe('the permission menu glyphs', () => {
+  function openPermissionMenu(state: Snapshot): string[] {
+    render.renderState(state)
+    // The module remembers which popover is open; a previous test may have left
+    // this one open, and toggling it again would close it and assert on nothing.
+    render.closeMenu()
+    render.toggleMenu(state, 'q-permission')
+    // `:not(.q-check)` — the selected row carries the check mark as well, and it is
+    // the same kind of direct child.
+    return [...document.querySelectorAll('#q-permission-menu .q-option > svg:not(.q-check)')]
+      .map(svg => svg.innerHTML)
+  }
+
+  test('the three built-in presets carry three different glyphs, chosen by value', () => {
+    expect(openPermissionMenu(withPermissions(trio, 'read-only'))).toEqual([
+      assetBody('eye'), assetBody('folder-check'), assetBody('shield'),
+    ])
+  })
+
+  test('a preset outside the trio keeps the uniform shield, never another option glyph', () => {
+    const extra: PermissionOption = { value: 'auto', name: '自动审查', description: null }
+    expect(openPermissionMenu(withPermissions([...trio, extra], 'auto'))).toEqual([
+      assetBody('eye'), assetBody('folder-check'), assetBody('shield'), assetBody('shield-check'),
+    ])
+  })
+
+  test('the glyph follows the value, not the host label', () => {
+    const renamed = trio.map(option => ({ ...option, name: `自定义 ${option.value}` }))
+    expect(openPermissionMenu(withPermissions(renamed, 'read-only'))).toEqual([
+      assetBody('eye'), assetBody('folder-check'), assetBody('shield'),
+    ])
+  })
+})
+
+describe('the footer permission entry', () => {
+  /** The glyph on the entry's own left edge — not the chevron's, which is the
+   *  next `<svg>` inside the same button. */
+  function entryGlyph(): string {
+    return document.querySelector('#q-permission-icon > svg')?.innerHTML ?? ''
+  }
+
+  test('the entry shows the icon of the permission currently in force', () => {
+    for (const [value, asset] of [
+      ['read-only', 'eye'],
+      ['workspace-write', 'folder-check'],
+      ['danger-full-access', 'shield'],
+    ] as const) {
+      render.renderState(withPermissions(trio, value))
+      expect(entryGlyph()).toBe(assetBody(asset))
+    }
+  })
+
+  test('the entry and the selected menu row carry the same glyph', () => {
+    const state = withPermissions(trio, 'danger-full-access')
+    render.renderState(state)
+    render.closeMenu()
+    render.toggleMenu(state, 'q-permission')
+    const selected = document.querySelectorAll('#q-permission-menu .q-option[aria-pressed="true"] > svg:not(.q-check)')
+    expect(selected).toHaveLength(1)
+    expect(entryGlyph()).toBe(selected[0]?.innerHTML)
+  })
+
+  test('a permission the catalog cannot name keeps the uniform shield', () => {
+    // The host reports a value it never listed (or none at all): the entry must fall
+    // back to the uniform glyph rather than borrow a name it cannot check.
+    render.renderState(withPermissions(trio, 'auto'))
+    expect(entryGlyph()).toBe(assetBody('shield-check'))
+
+    const unknown = snapshot()
+    render.renderState(unknown)
+    expect(entryGlyph()).toBe(assetBody('shield-check'))
   })
 })

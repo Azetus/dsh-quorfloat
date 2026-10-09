@@ -9,13 +9,13 @@
 // everything the snapshot carries, so no click here mutates conversation state.
 
 import { api } from './api'
-import { icon, ring } from './lib/icons'
+import { icon, permissionIcon, ring } from './lib/icons'
 import { workspaceLabel } from './lib/labels'
 import { renderMarkdown } from './lib/markdown'
 import { keepOpenChecked, themeColorScheme } from './lib/settings'
 import { cacheLabel, contextLabel, roundsLabel, tokensLabel } from './lib/stats'
 import { foldTurns, type Turn } from './lib/turns'
-import type { Conversation, Snapshot } from './lib/state'
+import type { Conversation, Options, Snapshot } from './lib/state'
 
 // ── user-owned state the snapshot does not carry ────────────────────────────
 
@@ -75,7 +75,9 @@ function fillStaticIcons(): void {
   put('q-close-icon', 'x')
   put('q-search-icon', 'search')
   put('q-send-icon', 'arrow-up')
-  put('q-permission-icon', 'shield-check')
+  // The permission entry's own glyph is deliberately absent here: it follows whatever
+  // permission is in force (see renderPermissionEntry), so it is painted per snapshot
+  // instead of once at boot. Its chevron is static, like every other chevron.
   put('q-permission-chevron', 'chevron-down')
   put('q-config-chevron', 'chevron-down')
   put('q-stat-speed-icon', 'gauge')
@@ -441,8 +443,7 @@ function handoffElement(handoff: NonNullable<Snapshot['handoff']>): HTMLElement 
 function renderRuntime(state: Snapshot): void {
   const options = state.session.options
   const current = options?.current
-  $('q-permission-name').textContent =
-    options?.permissions.find(p => p.value === options.permission)?.name ?? '—'
+  renderPermissionEntry(options)
   $('q-model-name').textContent =
     options?.models.find(m => m.id === current?.model && m.provider === current?.provider)?.name ?? '—'
   $('q-effort-name').textContent =
@@ -457,6 +458,22 @@ function renderRuntime(state: Snapshot): void {
     $(id).setAttribute('aria-expanded', 'false')
   }
   if (openMenu !== null) renderMenu(state, openMenu)
+}
+
+/**
+ * The footer's permission entry — the label *and* the glyph of whatever is in force.
+ *
+ * The entry and the selected row of its own menu must agree: one permission has one
+ * glyph, and a footer showing the uniform shield over a menu that draws an eye for the
+ * same permission reads as two different states.
+ *
+ * @param options - the host's catalog and current value, or null before it arrives.
+ */
+function renderPermissionEntry(options: Options | null): void {
+  $('q-permission-name').textContent =
+    options?.permissions.find(p => p.value === options.permission)?.name ?? '—'
+  const svg = icon(permissionIcon(options?.permission ?? null))
+  if (svg !== null) $('q-permission-icon').replaceChildren(svg)
 }
 
 // ── menus ─────────────────────────────────────────────────────────────────
@@ -651,7 +668,7 @@ function renderPermissionMenu(state: Snapshot, menu: HTMLElement): void {
     menu.append(option(permission.name, options.permission === permission.value, () => {
       closeMenus()
       void api.setPermission(permission.value)
-    }, permission.description ?? '', 'shield-check'))
+    }, permission.description ?? '', permissionIcon(permission.value)))
   }
 }
 
