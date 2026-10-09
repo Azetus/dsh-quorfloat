@@ -311,7 +311,12 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
 
 /* ── settings ────────────────────────────────────────────────────────── */
 
-.q-settings { margin: 18px 22px 20px; flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
+/* The right padding keeps the scrollbar off the rows: macOS scrollbars are
+   overlay, and `scrollbar-gutter` reserves nothing for them. The cost is the
+   rows' 1px separators ending 10px short on the right — accepted (2026-10-09,
+   user request). The thread needs no such padding: its own 24px padding clears
+   the floating scrollbar. */
+.q-settings { margin: 18px 22px 20px; padding-right: 10px; flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
 .q-settings-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .q-settings-title span { font-size: 15px; }
 .q-settings-title button { color: var(--q-muted); font-size: 12px; padding: 5px 8px; border-radius: 6px; }
