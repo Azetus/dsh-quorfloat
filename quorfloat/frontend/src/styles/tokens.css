@@ -216,7 +216,20 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
 .q-thread { border-top: 1px solid var(--q-line); padding: 20px 24px 22px; }
 .q-thread:empty { border-top-color: transparent; }
 
-.q-turn + .q-turn { border-top: 1px solid var(--q-line); padding-top: 18px; margin-top: 20px; }
+/* The separator between turns.
+   The design writes it as `.q-turn + .q-turn`, which windowing cannot honour: the first
+   turn of a window has no predecessor in the DOM. The class is set from the row's place in
+   the *conversation* instead, and the gap is padding rather than a margin — an absolutely
+   positioned row's margin is outside its measured box, which would make the rows overlap
+   by exactly the margin. 20px margin + 1px border + 18px padding, as one box. */
+.q-turn.q-turn-sep { border-top: 1px solid var(--q-line); padding-top: 38px; }
+
+/* The windowed thread. `#q-thread` keeps the design's own box (border and padding); the
+   items live in one positioned container whose height is the whole conversation, and each
+   mounted row is translated to its measured offset. `flow-root` keeps a row's child
+   margins inside its measured height, which is what the offsets are computed from. */
+.q-thread-items { position: relative; }
+.q-thread-item { position: absolute; top: 0; left: 0; right: 0; display: flow-root; }
 .q-question { font-size: 12px; color: var(--q-muted); margin-bottom: 14px; overflow-wrap: anywhere; }
 
 /* The disclosure (ours): caret, label, and the spinner while working. */
