@@ -121,7 +121,10 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
   display: block; min-width: 0; flex: 1; width: 100%;
   height: 38px; resize: none; overflow: hidden;
   border: 0; background: transparent; color: var(--q-text);
-  font-size: 20px; line-height: 1.5; padding: 0;
+  /* 14px, the model reply's body size — a 2026-10-09 user polish: the input
+     reads like the conversation it feeds, not like a title (the design's own
+     token is 20px; the deviation is deliberate and on the record). */
+  font-size: 14px; line-height: 1.5; padding: 0;
 }
 .q-compose textarea::placeholder { color: var(--q-muted); }
 .q-submit {
