@@ -68,8 +68,19 @@ export function App({ state }: AppProps) {
   const arrived: Painted = { page, session: state.transcript.sessionId }
   const { remeasure } = usePanelDynamics(panelRef, state, arrived, available)
 
-  const focusComposer = useCallback((): void => { inputRef.current?.focus() }, [])
-  const flight = useFlight(panelRef, state, focusComposer)
+  // What a summon puts on screen. The panel is a thing you call for, not a place you
+  // resume: the settings page and any open list belonged to the *last* visit, and coming
+  // back to them (or to a half-finished chord capture, which would eat the next keystroke)
+  // answers a question the user did not ask. The composer is focused so the summon ends
+  // where the user's attention is.
+  const onPanelShown = useCallback((): void => {
+    setPage('main')
+    setOpenMenu(null)
+    setRecording(false)
+    setTransientError(null)
+    inputRef.current?.focus()
+  }, [])
+  const flight = useFlight(panelRef, state, onPanelShown)
 
   // The refusal recovery rule: the composer clears on send, and when the shell later
   // refuses, the words come back — only into an empty input, and only when it is not the
@@ -120,8 +131,8 @@ export function App({ state }: AppProps) {
   }, [])
   const backFromSettings = useCallback((): void => {
     setPage('main')
-    focusComposer()
-  }, [focusComposer])
+    inputRef.current?.focus()
+  }, [])
   const chooseWorkspace = useCallback((workspaceId: string): void => {
     // Choosing a workspace while following a conversation is the new-conversation action.
     if (state.session.following !== null) void api.startNew()
