@@ -25,6 +25,13 @@ function hidePanel(): void {
   if (hiding) return
   hiding = true
   windowEl.classList.add('q-away')
+  // Reduced motion means no transition to wait for: hide immediately instead
+  // of holding the window for the fallback timer.
+  if (lastSnapshot?.settings.reduceMotion === true) {
+    hiding = false
+    void api.setVisible(false)
+    return
+  }
   const finish = () => {
     windowEl.removeEventListener('transitionend', onEnd)
     void api.setVisible(false)

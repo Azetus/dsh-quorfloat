@@ -344,7 +344,14 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
 
 /* ── reduced motion ──────────────────────────────────────────────────── */
 
+/* The OS's own preference, and the host's reduceMotion setting (the panel
+   toggles .q-reduce-motion on <html>): both stop the transitions and the
+   spinner. Motion sensitivity is a user preference, not a per-app choice. */
 @media (prefers-reduced-motion: reduce) {
   .q-window { transition: none; }
+  .q-switch { transition: none; }
   .q-spin svg { animation: none; }
 }
+.q-reduce-motion .q-window { transition: none; }
+.q-reduce-motion .q-switch { transition: none; }
+.q-reduce-motion .q-spin svg { animation: none; }

@@ -103,3 +103,16 @@ describe('the window drag region', () => {
     expect(document.querySelector('.q-top')?.getAttribute('data-tauri-drag-region')).toBe('deep')
   })
 })
+
+describe('reduceMotion', () => {
+  test('the host preference toggles the motion class on the root', () => {
+    render.renderState(snapshot())
+    expect(document.documentElement.classList.contains('q-reduce-motion')).toBe(false)
+
+    render.renderState(snapshot({ settings: { ...snapshot().settings, reduceMotion: true } }))
+    expect(document.documentElement.classList.contains('q-reduce-motion')).toBe(true)
+
+    render.renderState(snapshot())
+    expect(document.documentElement.classList.contains('q-reduce-motion')).toBe(false)
+  })
+})

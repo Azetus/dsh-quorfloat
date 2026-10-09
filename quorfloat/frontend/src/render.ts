@@ -748,6 +748,9 @@ export function measureAndReport(state: Snapshot): void {
 function render(state: Snapshot): void {
   // The design's tokens are light-dark(); one property switches both palettes.
   document.documentElement.style.colorScheme = themeColorScheme(state.settings.theme)
+  // The host's reduceMotion preference drives the same CSS switch the OS's
+  // prefers-reduced-motion media query does.
+  document.documentElement.classList.toggle('q-reduce-motion', state.settings.reduceMotion)
 
   if (page === 'settings') $('q-settings').hidden = false, $('q-main').hidden = true
   else $('q-settings').hidden = true, $('q-main').hidden = false
