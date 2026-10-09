@@ -41,6 +41,7 @@ use dsh_quorfloat::app::bridge::{self, ShellView};
 use dsh_quorfloat::app::geometry::WindowState;
 use dsh_quorfloat::app::height::{Height, HeightAction, SHADOW_SIDE};
 use dsh_quorfloat::app::preferences::Preferences;
+use dsh_quorfloat::app::session::interaction::parse_answers;
 use dsh_quorfloat::app::session::{
     FrameSink, HotkeyReport, Identity, Session, SessionExit, WindowCommand,
 };
@@ -331,6 +332,7 @@ fn run() -> Result<SessionExit, String> {
             submit,
             cancel,
             answer_approval,
+            answer_question,
             select_session,
             start_new,
             pin,
@@ -399,6 +401,23 @@ fn answer_approval(
 ) -> Value {
     with_session(&state, |session, sink| {
         bridge::answer_approval(session, sink, &interaction_id, allow)
+    })
+}
+
+/// `answer_question` — settle one question card with the user's choices.
+///
+/// `answers` arrives as the frontend's array of `{ id, selected, custom? }`; it is
+/// parsed with the same total parser the session validates against, so an unreadable
+/// entry is refused by name rather than dropped silently.
+#[tauri::command]
+fn answer_question(
+    state: tauri::State<'_, ShellRuntime>,
+    interaction_id: String,
+    answers: Value,
+) -> Value {
+    let answers = parse_answers(Some(&answers));
+    with_session(&state, |session, sink| {
+        bridge::answer_question(session, sink, &interaction_id, answers)
     })
 }
 

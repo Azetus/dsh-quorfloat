@@ -9,6 +9,8 @@ import { QuestionCard } from './QuestionCard'
 export interface CardsProps {
   /** The snapshot. */
   readonly state: Snapshot
+  /** A field in a card grew: the panel has to remeasure. */
+  readonly onGrow: () => void
 }
 
 /**
@@ -20,13 +22,13 @@ export interface CardsProps {
  * @param props - the snapshot.
  * @returns the card strip.
  */
-export function Cards({ state }: CardsProps) {
+export function Cards({ state, onGrow }: CardsProps) {
   return (
     <div id="q-cards" className="q-cards">
       {state.interactions.map(interaction => (
         interaction.kind === 'approval'
           ? <ApprovalCard key={interaction.id} interaction={interaction} />
-          : <QuestionCard key={interaction.id} interaction={interaction} />
+          : <QuestionCard key={interaction.id} interaction={interaction} onGrow={onGrow} />
       ))}
       {state.handoff !== null && <HandoffBanner handoff={state.handoff} />}
     </div>

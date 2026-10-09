@@ -133,12 +133,15 @@ test('the real supervisor completes a handshake with the Rust binary', { skip },
     // facts spelled uselessly, and nothing on the host branches on them.
     assert.equal(recorded.platform, process.platform, 'platform uses process.platform spelling')
     assert.equal(recorded.arch, process.arch, 'arch uses process.arch spelling')
-    assert.deepEqual(recorded.capabilities, ['window', 'hotkey', 'tauri', 'approval'])
+    // `question` joined the list on 2026-10-09, when the panel learned to draw the option
+    // widgets: the declaration is a promise that claiming a question will not hide it from
+    // the Harness window for nothing.
+    assert.deepEqual(recorded.capabilities, ['window', 'hotkey', 'tauri', 'approval', 'question'])
     // The same fact through the supervisor, because that is the path the plugin's
     // claim gate reads. A declaration the snapshot failed to carry would silently
     // defer every approval to the Harness window while the real binary was ready to
     // render it.
-    assert.deepEqual(supervisor.snapshot().peerCapabilities, ['window', 'hotkey', 'tauri', 'approval'])
+    assert.deepEqual(supervisor.snapshot().peerCapabilities, ['window', 'hotkey', 'tauri', 'approval', 'question'])
     // The reported flag is the *real* outcome of the grab, which is what makes a
     // conflict visible in the host's settings surface instead of leaving the user
     // pressing a key that does nothing.

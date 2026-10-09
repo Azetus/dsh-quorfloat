@@ -66,13 +66,19 @@ pub mod error_code {
 /// read that one; this list only says which binary is running, which is what a
 /// human reads in diagnostics to confirm the version in front of them.
 ///
-/// `approval` is here rather than in the measured list because it has no runtime
-/// failure mode to measure: this build either renders approval cards and answers
-/// them or it does not, and that is a property of the binary. It is a *separate*
-/// claim from `window` on purpose — a build with no display server still speaks the
-/// protocol, and naming the two things apart keeps a diagnostic reader from
+/// `approval` and `question` are here rather than in the measured list because neither
+/// has a runtime failure mode to measure: this build either renders those cards and
+/// answers them or it does not, and that is a property of the binary. They are
+/// *separate* claims from `window` on purpose — a build with no display server still
+/// speaks the protocol, and naming the things apart keeps a diagnostic reader from
 /// concluding that a missing window means a missing answerer.
-pub const CAPABILITIES: &[&str] = &["window", "hotkey", "tauri", "approval"];
+///
+/// Declaring a kind here is a **binary property**, not a hint: it is the promise that
+/// this build draws that kind's widgets *and* can answer it. Claiming is exclusive — the
+/// host hands the request to the panel that claims it — so a kind must not be named
+/// before both halves are true, or the request is claimed and then handed back with the
+/// turn waiting on it.
+pub const CAPABILITIES: &[&str] = &["window", "hotkey", "tauri", "approval", "question"];
 
 #[cfg(test)]
 mod tests {
@@ -94,8 +100,11 @@ mod tests {
     fn the_build_inventory_names_every_implemented_area() {
         // Read by a human in diagnostics and asserted here so a capability cannot be
         // dropped by accident: a host that trusted `approval` and then saw it vanish
-        // would have to guess whether the panel can still answer.
-        for expected in ["window", "hotkey", "tauri", "approval"] {
+        // would have to guess whether the panel can still answer. `question` is pinned
+        // for the same reason and one more: claiming it is the promise that this build
+        // answers questions, so a change that dropped it while the widgets remained
+        // would leave the host handing requests to a panel that never answers them.
+        for expected in ["window", "hotkey", "tauri", "approval", "question"] {
             assert!(CAPABILITIES.contains(&expected), "{expected} is missing from {CAPABILITIES:?}");
         }
     }

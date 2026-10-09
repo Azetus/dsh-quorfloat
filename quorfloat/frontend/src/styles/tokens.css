@@ -173,7 +173,14 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
 
 /* ── cards (ours: the design draws no approval card) ─────────────────── */
 
-.q-cards { padding: 0 22px; flex: none; display: flex; flex-direction: column; gap: 8px; }
+/* The card strip sits above the thread and does not scroll with it (the design pins it
+   there). A question card can be tall — several questions with their own fields — so the
+   strip may shrink and scroll rather than push the runtime row and the footer off the
+   panel: the thread's `flex: 1` keeps its share, and everything above it stays reachable. */
+.q-cards {
+  padding: 0 22px; flex: 0 1 auto; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 8px;
+}
 .q-card {
   border: 1px solid var(--q-line); border-radius: 10px;
   padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;
@@ -184,13 +191,56 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
 .q-card-reason { font-size: 12px; color: var(--q-muted); overflow-wrap: anywhere; }
 .q-card-state { font-size: 12px; color: var(--q-muted); }
 .q-card-state.q-refused { color: var(--q-bad); }
-.q-card-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.q-card-actions {
+  display: flex; gap: 8px; justify-content: flex-end;
+  /* A tall question card scrolls inside the strip; the verdict has to stay reachable
+     while it does. */
+  position: sticky; bottom: 0; background: var(--q-bg); padding-top: 4px;
+}
 .q-card-actions button {
   font-size: 12px; padding: 5px 12px; border-radius: 5px;
   background: var(--q-soft); border: 1px solid var(--q-line);
 }
 .q-card-actions button.q-allow { background: var(--q-accent); color: var(--q-bg); border-color: transparent; }
 .q-card-actions button:disabled { opacity: 0.5; cursor: default; }
+
+/* The question card's widgets (2026-10-09). The design稿 has no question card — the three
+   built-in presets are the only interaction it draws — so these follow the panel's own card
+   vocabulary above, with every value taken from the design's tokens. */
+.q-question-block { display: flex; flex-direction: column; gap: 6px; }
+.q-question-block + .q-question-block {
+  border-top: 1px solid var(--q-line); padding-top: 10px; margin-top: 2px;
+}
+.q-question-head { font-size: 11px; color: var(--q-muted); letter-spacing: 0.02em; }
+.q-question-text { font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.q-question-detail { font-size: 12px; color: var(--q-muted); overflow-wrap: anywhere; }
+.q-choice {
+  display: flex; align-items: flex-start; gap: 8px; text-align: left;
+  padding: 6px 8px; border-radius: 6px; border: 1px solid transparent;
+  color: var(--q-text); font-size: 12px; line-height: 1.45;
+}
+.q-choice:hover:not(:disabled) { background: var(--q-soft); }
+.q-choice:disabled { cursor: default; }
+.q-choice-on { border-color: var(--q-line); background: var(--q-soft); }
+.q-choice-mark {
+  flex: none; width: 14px; height: 14px; margin-top: 1px;
+  border: 1px solid var(--q-line); border-radius: 4px;
+  display: grid; place-items: center; color: var(--q-accent);
+}
+.q-choice[role='radio'] .q-choice-mark { border-radius: 50%; }
+.q-choice-check { width: 10px; height: 10px; }
+.q-choice-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.q-choice-label { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.q-choice-label small { color: var(--q-muted); font-size: 11px; }
+.q-question-field {
+  width: 100%; box-sizing: border-box; resize: none; overflow: hidden;
+  font: inherit; font-size: 12px; line-height: 1.45; color: var(--q-text);
+  background: var(--q-soft); border: 1px solid var(--q-line); border-radius: 6px;
+  padding: 6px 8px; min-height: 30px;
+}
+.q-question-field::placeholder { color: var(--q-muted); }
+.q-question-field:disabled { opacity: 0.6; }
+.q-question-field-free { min-height: 46px; }
 .q-handoff {
   border: 1px solid var(--q-line); border-radius: 10px;
   padding: 10px 14px; font-size: 12px; color: var(--q-muted);

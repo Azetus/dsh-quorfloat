@@ -60,7 +60,7 @@ export function ConversationPage({
         onSend={onSend}
         onGrow={onGrow}
       />
-      <Cards state={state} />
+      <Cards state={state} onGrow={onGrow} />
       <Thread state={state} folds={folds} onToggleFold={onToggleFold} />
       <RuntimeRow
         state={state}
