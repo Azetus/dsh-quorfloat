@@ -8,13 +8,22 @@
 <body>
   <div class="panel">
     <div class="bar">quorfloat</div>
-    <div class="hint">Tauri shell</div>
+    <div class="hint">Tauri shell · M3 骨架</div>
+    <div class="note" id="summary">等待 shell 状态…</div>
   </div>
   <script>
-    // The shell emits this after every answered frame; the real frontend (M4)
-    // listens and re-renders from the session state. Nothing to do yet.
+    // The shell emits a full snapshot after anything changes; the real frontend
+    // (M4) re-renders from it. The placeholder shows one line as proof the
+    // channel works end to end.
     if (window.__TAURI__) {
-      window.__TAURI__.event.listen('quorfloat/nudge', () => {})
+      window.__TAURI__.event.listen('quorfloat/state', (event) => {
+        const state = event.payload
+        const following = state.session?.following?.sessionId
+        const entries = state.transcript?.entries?.length ?? 0
+        const ready = state.session?.ready ? 'ready' : 'handshake…'
+        document.getElementById('summary').textContent =
+          `${ready} · 跟随 ${following ?? '—'} · 记录 ${entries} 条`
+      })
     }
   </script>
 </body>

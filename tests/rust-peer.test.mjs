@@ -613,3 +613,100 @@ test('the host can ask the sidecar to show and hide its window', { skip }, async
     assert.equal(result.escalated, false)
   }
 })
+
+test('the real sidecar folds a conversation and a stream over the real wire', { skip }, async () => {
+  // The transcript half of the conversation flow, over the real wire: the frames
+  // leave the host's channel, are framed by the real Rust reader, and folded by
+  // the real session into entries — the state the frontend (M4) renders from.
+  // Observed through the marker, the one surface readable after the fact.
+  const { mkdtemp, readFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const directory = await mkdtemp(join(tmpdir(), 'quorfloat-marker-'))
+  const markerPath = join(directory, 'marker.log')
+
+  process.env['DSH_QUORFLOAT_RUST_MARKER'] = markerPath
+  process.env['DSH_QUORFLOAT_HOTKEY'] = 'Alt+Banana'
+  const { QuorfloatSupervisor } = await import(new URL('../lib/host/supervisor.js', import.meta.url))
+  const { HostRouter } = await import(new URL('../lib/bridge/router.js', import.meta.url))
+  const { DEFAULT_CONFIG } = await import(new URL('../lib/config.js', import.meta.url))
+  const effective = {
+    ...DEFAULT_CONFIG,
+    heartbeatMs: 200,
+    heartbeatMissLimit: 3,
+    startupTimeoutMs: 8000,
+    shutdownGraceMs: 1000,
+    logLevel: 'debug',
+  }
+  const supervisor = new QuorfloatSupervisor({
+    config: () => effective,
+    resolveBinary: () => ({ path: binary, args: [], source: 'config', attempts: [] }),
+    createRouter: channelSessionId =>
+      new HostRouter({
+        config: () => effective,
+        channelSessionId: () => channelSessionId,
+        hostVersion: () => 'cross-language-test',
+        listWorkspaces: async () => ({ items: [] }),
+        listSessions: async () => ({ items: [] }),
+        createSession: async () => ({ sessionId: 's' }),
+        attachSession: async sessionId => ({ sessionId }),
+        readHistory: async () => ({ records: [], hasMore: false }),
+        prompt: async () => ({ accepted: true }),
+        cancel: async () => ({ accepted: true }),
+        answerInteraction: async () => ({ accepted: true }),
+        reportPresence: async () => ({ accepted: true }),
+        diagnostics: () => ({}),
+      }),
+    log: { info: () => {}, warn: () => {}, debug: () => {}, error: () => {} },
+    onEvent: () => {},
+  })
+  const breadcrumbs = async () => {
+    try {
+      return await readFile(markerPath, 'utf8')
+    } catch {
+      return ''
+    }
+  }
+
+  try {
+    await supervisor.start()
+    await waitFor('running', async () => supervisor.snapshot().state === 'running', { timeoutMs: 10000 })
+
+    // A snapshot carrying one real user message, in the harness's unwrapped shape.
+    await supervisor.notify('session/snapshot', {
+      sessionId: 'session-cross',
+      generation: 1,
+      cursor: 0,
+      hasMore: false,
+      records: [
+        { type: 'event', event: { type: 'user/message', seq: 0, time: 1,
+          data: { role: 'user', content: [{ type: 'text', text: '跨语言折叠测试' }] } } },
+      ],
+    })
+    await waitFor(
+      'the transcript to fold the record',
+      async () => (await breadcrumbs()).includes('transcript 1 entries cursor=0'),
+      { timeoutMs: 8000 },
+    )
+
+    // And a live stream frame, which must not disturb the folded conversation.
+    await supervisor.notify('session/stream', {
+      sessionId: 'session-cross',
+      generation: 1,
+      frame: { type: 'chunk', revision: 2, index: 1,
+        chunk: { type: 'text-delta', index: 0, text: '正在回答' } },
+    })
+    await waitFor('the session to stay healthy', async () => {
+      const state = supervisor.snapshot()
+      return state.state === 'running' && state.consecutiveMissedHeartbeats === 0
+    }, { timeoutMs: 8000 })
+    const written = await breadcrumbs()
+    assert.ok(written.includes('transcript 1 entries'), 'the folded entry survives the stream')
+  } finally {
+    delete process.env['DSH_QUORFLOAT_RUST_MARKER']
+    delete process.env['DSH_QUORFLOAT_HOTKEY']
+    const result = await supervisor.stop()
+    assert.equal(result.exited, true)
+    assert.equal(result.escalated, false)
+    await rm(directory, { recursive: true, force: true })
+  }
+})
