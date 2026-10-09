@@ -259,6 +259,7 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
   gap: 7px 10px; padding: 9px 22px; color: var(--q-muted); font-size: 11px; flex: none;
 }
 .q-footer kbd { font: inherit; background: var(--q-soft); border: 1px solid var(--q-line); border-radius: 4px; padding: 1px 4px; }
+.q-footer kbd svg { width: 11px; height: 11px; vertical-align: -1.5px; }
 #q-status { flex: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 46%; }
 .q-session-stats {
   display: flex; align-items: center; justify-content: flex-end;

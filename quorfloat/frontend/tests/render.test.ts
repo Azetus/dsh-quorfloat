@@ -116,3 +116,23 @@ describe('reduceMotion', () => {
     expect(document.documentElement.classList.contains('q-reduce-motion')).toBe(false)
   })
 })
+
+describe('the footer key chips', () => {
+  test('the design markup: drawn enter arrow, shift spelling, and esc as text', () => {
+    render.renderState(snapshot())
+    const status = document.getElementById('q-status')!
+    const chips = status.querySelectorAll('kbd')
+    expect(chips).toHaveLength(3)
+    // The enter chip is the drawn ↵ icon (the bundled font lacks the glyph).
+    expect(chips[0]?.querySelector('svg')).not.toBeNull()
+    // Shift+Enter: the ⇧ is text (the font has it), the enter is drawn.
+    expect(chips[1]?.textContent?.trim().startsWith('⇧')).toBe(true)
+    expect(chips[1]?.querySelector('svg')).not.toBeNull()
+    // esc stays text, as the design writes it.
+    expect(chips[2]?.textContent).toBe('esc')
+    expect(chips[2]?.querySelector('svg')).toBeNull()
+    expect(status.textContent).toContain('发送')
+    expect(status.textContent).toContain('换行')
+    expect(status.textContent).toContain('关闭')
+  })
+})

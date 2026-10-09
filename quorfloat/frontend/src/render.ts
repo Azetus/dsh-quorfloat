@@ -662,9 +662,20 @@ function renderConfigMenu(state: Snapshot, menu: HTMLElement): void {
 
 function renderFooter(state: Snapshot): void {
   const status = statusText(state)
-  $('q-status').innerHTML =
-    '<kbd>⏎</kbd> 发送　<kbd>⇧ ⏎</kbd> 换行　<kbd>esc</kbd> 关闭' +
-    (status !== null && status !== '' ? `<span style="margin-left:10px">${escapeHtml(status)}</span>` : '')
+  const statusEl = $('q-status')
+  statusEl.replaceChildren()
+  // The design's own markup: <kbd>↵</kbd> 发送　<kbd>⇧ ↵</kbd> 换行　<kbd>esc</kbd> 关闭.
+  // ↵ is the drawn icon (Bootstrap Icons' arrow-return-left — the bundled font
+  // lacks the glyph); ⇧ and esc are text, exactly as the design writes them.
+  statusEl.append(keyChip('enter'), document.createTextNode(' 发送\u3000'))
+  statusEl.append(keyChip('shift-enter'), document.createTextNode(' 换行\u3000'))
+  statusEl.append(keyChip('esc'), document.createTextNode(' 关闭'))
+  if (status !== null && status !== '') {
+    const span = document.createElement('span')
+    span.style.marginLeft = '10px'
+    span.textContent = status
+    statusEl.append(span)
+  }
 
   const stats = state.session.stats
   const statsEl = $('q-session-stats')
@@ -690,8 +701,17 @@ function renderFooter(state: Snapshot): void {
   }
 }
 
-function escapeHtml(text: string): string {
-  return text.replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]!)
+/** One key chip: the design's kbd box, built from real elements. */
+function keyChip(kind: 'enter' | 'shift-enter' | 'esc'): HTMLElement {
+  const kbd = document.createElement('kbd')
+  if (kind === 'esc') {
+    kbd.textContent = 'esc'
+  } else {
+    if (kind === 'shift-enter') kbd.append(document.createTextNode('⇧ '))
+    const svg = icon('corner-down-left')
+    if (svg !== null) kbd.append(svg)
+  }
+  return kbd
 }
 
 // ── settings ──────────────────────────────────────────────────────────────
