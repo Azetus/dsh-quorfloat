@@ -47,6 +47,11 @@ pub struct ShellView {
     pub hotkey_registered: bool,
     /// Why the last attempt did not become the held one, when it did not.
     pub hotkey_reason: Option<String>,
+    /// The workspace a *new* conversation defaults to (the P0 rung), when there
+    /// is no session pin. With a session pin, this is its projection — the
+    /// pinned conversation's own workspace — and the frontend hides the pin
+    /// control for it.
+    pub pinned_workspace: Option<String>,
     /// Whether the panel's native window is on screen right now.
     ///
     /// Owned by the dispatcher — it is the only thread that touches the window —
@@ -101,6 +106,7 @@ pub fn snapshot(session: &Session, shell: &ShellView) -> Value {
                 "stale": follow.stale(),
             })),
             "pinned": session.pinned_conversation(),
+            "pinnedWorkspace": shell.pinned_workspace,
             "chosen": session.target_conversation(),
             "createFailure": follow.create_failure(),
             "conversations": session
@@ -340,9 +346,14 @@ pub fn start_new(session: &mut Session, sink: &mut dyn FrameSink) -> Value {
 
 /// `pin` — pin one conversation (or stop pinning), and remember it across runs.
 ///
+/// The workspace field in the pin file is the session pin's **projection** (the
+/// 2026-10-09 invariant): pinning a conversation rewrites it to that
+/// conversation's own workspace, so the file can never hold a pinned session
+/// and a different pinned workspace at once.
+///
 /// @param session_id - which one, or `None`.
 /// @param pinned_path - where the pin is remembered; `None` is "nowhere to write".
-/// @returns whether a request was written.
+/// @returns whether a request was written, and the resulting workspace projection.
 #[must_use]
 pub fn pin(
     session: &mut Session,
@@ -351,14 +362,98 @@ pub fn pin(
     pinned_path: Option<&std::path::Path>,
 ) -> Value {
     let accepted = session.pin_conversation(session_id.map(str::to_owned), sink);
+    let mut workspace: Option<String> = None;
     if let Some(path) = pinned_path {
-        // Loaded rather than rebuilt so a workspace pin written elsewhere survives
-        // a session pin.
         let mut pinned = crate::app::pinned::Pinned::load(path);
         pinned.session = session.pinned_conversation().map(str::to_owned);
+        pinned.workspace = pinned
+            .session
+            .as_deref()
+            .and_then(|id| conversation_workspace(session, id));
+        workspace = pinned.workspace.clone();
         pinned.save(path);
     }
-    json!({ "accepted": accepted })
+    json!({ "accepted": accepted, "pinnedWorkspace": workspace })
+}
+
+/// `pin_workspace` — pin the default directory for a new conversation.
+///
+/// This is a *new-conversation-state* action by design: pinning a workspace
+/// leaves the current conversation (with a `session/detach`, per §9/§10) and
+/// clears the session pin — the two fields can never disagree.
+///
+/// @param workspace_id - which workspace, or `None` to stop pinning one.
+/// @param pinned_path - where the pin is remembered; `None` is "nowhere to write".
+/// @returns the resulting workspace projection.
+#[must_use]
+pub fn pin_workspace(
+    session: &mut Session,
+    sink: &mut dyn FrameSink,
+    workspace_id: Option<&str>,
+    pinned_path: Option<&std::path::Path>,
+) -> Value {
+    // Leaving the current conversation is told to the host first: the detach
+    // is what keeps the approval ownership (§10) honest.
+    session.start_new_conversation(sink);
+    let mut workspace: Option<String> = None;
+    if let Some(path) = pinned_path {
+        let mut pinned = crate::app::pinned::Pinned::load(path);
+        pinned.session = None;
+        pinned.workspace = workspace_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        workspace = pinned.workspace.clone();
+        pinned.save(path);
+    }
+    json!({ "pinnedWorkspace": workspace })
+}
+
+/// `on_show` — what a summon means for the conversation, per the 2026-10-09
+/// user decision: **every summon lands on a fresh new-conversation state; the
+/// pin is the user's way of continuing a specific conversation instead.**
+///
+/// - a pinned conversation that the panel is not currently following is
+///   re-attached (the pin is the continuation escape hatch);
+/// - no pin: `start_new_conversation` — the detach leaves the previous
+///   conversation honestly (§10), nothing is created until the user submits.
+///
+/// The dispatcher calls this on the *hotkey* show path only: a show the host
+/// asks for (an approval, say) is the host's intent, not the user's summon.
+///
+/// @returns an empty result — the frame the session may have written is the
+///   outcome, not this value.
+#[must_use]
+pub fn on_show(session: &mut Session, sink: &mut dyn FrameSink) -> Value {
+    match session.pinned_conversation().map(str::to_owned) {
+        Some(pinned) if session.follow().session_id() == Some(pinned.as_str()) => {}
+        Some(pinned) => {
+            session.pin_conversation(Some(pinned), sink);
+        }
+        None => {
+            session.start_new_conversation(sink);
+        }
+    }
+    json!({})
+}
+
+/// The workspace a conversation belongs to, when both lists say so.
+///
+/// @param session - the session, which holds both lists.
+/// @param session_id - the conversation's id.
+/// @returns its workspace id, or `None` when the cwd or the workspace is
+///   unknown — an absent projection is absent, never guessed.
+fn conversation_workspace(session: &Session, session_id: &str) -> Option<String> {
+    let cwd = session
+        .conversations()
+        .iter()
+        .find(|summary| summary.session_id == session_id)
+        .and_then(|summary| summary.cwd.as_deref())?;
+    session
+        .workspaces()
+        .iter()
+        .find(|workspace| workspace.path == cwd)
+        .map(|workspace| workspace.workspace_id.clone())
 }
 
 /// `request_workspaces` — ask the host for the workspace list the picker draws.
@@ -499,6 +594,7 @@ mod tests {
             hotkey_held: Some("Alt+Space".to_owned()),
             hotkey_registered: true,
             hotkey_reason: None,
+            pinned_workspace: None,
             visible: false,
             height: Height::new(),
         }
@@ -642,28 +738,172 @@ mod tests {
     }
 
     #[test]
-    fn pinning_writes_the_pin_file_and_keeps_a_workspace_pin() {
+    fn pinning_writes_the_pin_file_with_the_workspace_projection() {
         let path = std::env::temp_dir().join(format!("quorfloat-bridge-pin-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let (mut session, mut sink) = followed();
-        {
-            let mut pinned = crate::app::pinned::Pinned::default();
-            pinned.workspace = Some("workspace-9".to_owned());
-            pinned.save(&path);
-        }
+        list_workspaces(&mut session, &mut sink);
         let result = pin(&mut session, &mut sink, Some("session-1"), Some(&path));
         assert_eq!(
             result["accepted"], false,
             "pinning the already-attached conversation needs no request",
         );
         assert_eq!(
-            session.pinned_conversation(),
-            Some("session-1"),
-            "the pin itself is recorded regardless",
+            result["pinnedWorkspace"], "ws-project",
+            "the workspace field is the pinned conversation's own workspace",
         );
         let saved = crate::app::pinned::Pinned::load(&path);
-        assert_eq!(saved.session.as_deref(), Some("session-1"), "the session pin is remembered");
-        assert_eq!(saved.workspace.as_deref(), Some("workspace-9"), "the workspace pin survives");
+        assert_eq!(saved.session.as_deref(), Some("session-1"));
+        assert_eq!(saved.workspace.as_deref(), Some("ws-project"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_session_pin_overwrites_an_old_workspace_pin_with_its_projection() {
+        // An older build's file could hold a pinned session and a different
+        // pinned workspace at once; a session pin rewrites the field.
+        let path = std::env::temp_dir().join(format!("quorfloat-bridge-pin2-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let (mut session, mut sink) = followed();
+        list_workspaces(&mut session, &mut sink);
+        {
+            let mut pinned = crate::app::pinned::Pinned::default();
+            pinned.workspace = Some("workspace-9".to_owned());
+            pinned.save(&path);
+        }
+        pin(&mut session, &mut sink, Some("session-1"), Some(&path));
+        let saved = crate::app::pinned::Pinned::load(&path);
+        assert_eq!(saved.workspace.as_deref(), Some("ws-project"), "the stale pin was replaced by the projection");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pinning_a_conversation_with_an_unknown_workspace_leaves_the_projection_empty() {
+        let path = std::env::temp_dir().join(format!("quorfloat-bridge-pin3-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let (mut session, mut sink) = followed();
+        // No workspaces list was received: the cwd cannot be resolved, and an
+        // absent projection is absent, never guessed.
+        pin(&mut session, &mut sink, Some("session-1"), Some(&path));
+        let saved = crate::app::pinned::Pinned::load(&path);
+        assert_eq!(saved.workspace, None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pinning_a_workspace_leaves_the_conversation_and_clears_the_session_pin() {
+        let path = std::env::temp_dir().join(format!("quorfloat-bridge-pin4-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let (mut session, mut sink) = followed();
+        list_workspaces(&mut session, &mut sink);
+        {
+            let mut pinned = crate::app::pinned::Pinned::default();
+            pinned.session = Some("session-1".to_owned());
+            pinned.save(&path);
+        }
+        let result = pin_workspace(&mut session, &mut sink, Some("ws-notes"), Some(&path));
+        assert_eq!(result["pinnedWorkspace"], "ws-notes");
+        // Leaving the conversation is told to the host (§9/§10).
+        let detached = sink
+            .frames
+            .iter()
+            .any(|frame| frame["method"] == "session/detach");
+        assert!(detached, "the detach notification was written: {:?}", sink.frames);
+        assert_eq!(session.pinned_conversation(), None, "the session pin is gone");
+        let saved = crate::app::pinned::Pinned::load(&path);
+        assert_eq!(saved.session, None);
+        assert_eq!(saved.workspace.as_deref(), Some("ws-notes"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_summon_without_a_pin_lands_on_a_new_conversation_state() {
+        let (mut session, mut sink) = followed();
+        on_show(&mut session, &mut sink);
+        assert_eq!(session.follow().session_id(), None, "the panel left the conversation");
+        assert!(sink.frames.iter().any(|frame| frame["method"] == "session/detach"), "the detach was told to the host: {:?}", sink.frames);
+        assert!(!sink.frames.iter().any(|frame| frame["method"] == "session/create"), "nothing is created before a submit: {:?}", sink.frames);
+    }
+
+    #[test]
+    fn a_summon_rejoins_the_pinned_conversation() {
+        let (mut session, mut sink) = followed();
+        session.pin_conversation(Some("session-2".to_owned()), &mut sink);
+        on_show(&mut session, &mut sink);
+        assert!(sink.frames.iter().filter(|frame| frame["method"] == "session/attach").count() >= 1, "the pin re-attached: {:?}", sink.frames);
+        assert!(!sink.frames.iter().any(|frame| frame["method"] == "session/detach"), "no detach on the continuation path: {:?}", sink.frames);
+    }
+
+    #[test]
+    fn a_summon_with_the_pinned_conversation_already_open_changes_nothing() {
+        let (mut session, mut sink) = followed();
+        session.pin_conversation(Some("session-1".to_owned()), &mut sink);
+        let frames_before = sink.frames.len();
+        on_show(&mut session, &mut sink);
+        assert_eq!(sink.frames.len(), frames_before, "no detach, no re-attach");
+    }
+
+    #[test]
+    fn a_summon_after_browsing_away_stays_on_the_pin() {
+        // The user's reported flow: pin session-1, browse to session-2, hide,
+        // summon. The summon must land on the pin and *stay* there — the poll's
+        // target agrees, so no re-attach to session-2 ever happens.
+        let (mut session, mut sink) = followed();
+        session.pin_conversation(Some("session-1".to_owned()), &mut sink);
+        session.choose_conversation("session-2", &mut sink);
+        // Let the browse attach resolve, as it does in real life: the panel is
+        // showing session-2 when the window closes.
+        let attach = sink
+            .frames
+            .iter()
+            .rev()
+            .find(|frame| frame["method"] == "session/attach")
+            .expect("the browse attach was written");
+        session.on_frame(
+            Inbound::Response {
+                id: attach["id"].clone(),
+                outcome: Ok(serde_json::json!({"generation": 2})),
+            },
+            &mut sink,
+        );
+        assert_eq!(session.follow().session_id(), Some("session-2"));
+        on_show(&mut session, &mut sink);
+        let last_attach = sink
+            .frames
+            .iter()
+            .rev()
+            .find(|frame| frame["method"] == "session/attach")
+            .expect("an attach was written");
+        assert_eq!(
+            last_attach["params"]["sessionId"], "session-1",
+            "the last attach is the pin, not the browsing choice: {:?}",
+            sink.frames,
+        );
+        assert_eq!(
+            session.follow().target(),
+            Some("session-1"),
+            "the poll's target agrees with the pin",
+        );
+    }
+
+    /// Deliver a workspaces/list answer naming `/work/project` as `ws-project`.
+    fn list_workspaces(session: &mut Session, sink: &mut RecordingSink) {
+        session.request_workspaces(sink);
+        let request = sink
+            .frames
+            .iter()
+            .rev()
+            .find(|frame| frame["method"] == "workspaces/list")
+            .expect("a workspaces request was written");
+        session.on_frame(
+            Inbound::Response {
+                id: request["id"].clone(),
+                outcome: Ok(serde_json::json!({"items": [
+                    {"workspaceId": "ws-project", "title": "项目", "path": "/work/project"},
+                    {"workspaceId": "ws-notes", "title": "笔记", "path": "/work/notes"},
+                ]})),
+            },
+            sink,
+        );
     }
 }

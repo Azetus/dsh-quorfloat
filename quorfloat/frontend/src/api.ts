@@ -11,6 +11,7 @@ export const api = {
   selectSession: (sessionId: string) => invoke('select_session', { sessionId }),
   startNew: () => invoke('start_new'),
   pin: (sessionId: string | null) => invoke('pin', { sessionId }),
+  pinWorkspace: (workspaceId: string | null) => invoke('pin_workspace', { workspaceId }),
   requestWorkspaces: () => invoke('request_workspaces'),
   selectModel: (provider: string, model: string, effort: string | null) => invoke('select_model', { provider, model, effort }),
   setPermission: (value: string) => invoke('set_permission', { value }),

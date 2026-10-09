@@ -324,8 +324,9 @@ impl Follow {
     /// A pin outranks a choice, and a choice outranks "the newest".
     #[must_use]
     pub fn target(&self) -> Option<&str> {
-        // The choice first, then the pin — and the pin is only ever *adopted into* the choice, at
-        // startup. The other order is a panel that fights its user: picking another conversation
+        // The choice first, then the pin. The pin is only ever *adopted into* the choice, at
+        // startup — and it clears the choice when it is (re)set, because a pin is the latest
+        // decision. The other order is a panel that fights its user: picking another conversation
         // in the picker would last until the next poll, three seconds later, when the pin would
         // take the panel back. The pin means "where to open next time"; the choice means "where I
         // am now", and while the panel is open the second one wins.
@@ -349,6 +350,13 @@ impl Follow {
     /// @returns the request to send, when pinning means switching to it.
     pub fn set_pinned(&mut self, session_id: Option<String>, now: i64) -> Option<Outgoing> {
         self.pinned = session_id;
+        if self.pinned.is_some() {
+            // A pin is the user's *latest* decision about where the panel belongs, so it
+            // supersedes the run-time choice: left in place, the choice would win at the next
+            // poll (see `target`) and pull the panel back off the just-pinned conversation —
+            // both for a picker pin and for the summon that returns to the pin.
+            self.choice = None;
+        }
         // Pinning what is already on screen changes nothing about the subscription.
         match self.pinned.clone() {
             Some(pinned) if self.session_id.as_deref() != Some(pinned.as_str()) => self.attach_now(&pinned, now),
@@ -990,6 +998,30 @@ mod tests {
         follow.next(2 + POLL_INTERVAL_MS);
         let _ = follow.resolve(Ok(sessions(&[("session-1", 10), ("session-2", 20)])), 3 + POLL_INTERVAL_MS, &mut sink);
         assert_eq!(follow.target(), Some("session-2"), "and the poll leaves it alone");
+    }
+
+    /// Pinning is the latest decision: it supersedes the run-time choice, or the next poll
+    /// would bounce the panel back off the just-pinned conversation.
+    #[test]
+    fn pinning_supersedes_the_run_time_choice() {
+        let mut follow = started();
+        follow.choose("session-2", 0);
+        assert_eq!(follow.target(), Some("session-2"));
+        follow.set_pinned(Some("session-1".to_owned()), 0);
+        assert_eq!(follow.target(), Some("session-1"), "the pin is the latest decision");
+        // The superseded choice is gone, not parked: unpinning now means nothing is
+        // pinned and nothing chosen — the new-conversation state.
+        follow.set_pinned(None, 0);
+        assert_eq!(follow.target(), None, "nothing is pinned or chosen after the pin is off");
+    }
+
+    /// Unpinning *without* ever pinning leaves the run-time choice in place.
+    #[test]
+    fn unpinning_without_a_pin_keeps_the_run_time_choice() {
+        let mut follow = started();
+        follow.choose("session-2", 0);
+        follow.set_pinned(None, 0);
+        assert_eq!(follow.target(), Some("session-2"));
     }
 
     /// Creating a conversation means being in it, without waiting for the next poll.

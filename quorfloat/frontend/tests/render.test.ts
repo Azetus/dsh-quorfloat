@@ -46,6 +46,7 @@ function snapshot(overrides: Partial<Snapshot> = {}): Snapshot {
       ready: true,
       following: null,
       pinned: null,
+      pinnedWorkspace: null,
       chosen: null,
       createFailure: null,
       conversations: [],
@@ -134,5 +135,52 @@ describe('the footer key chips', () => {
     expect(status.textContent).toContain('发送')
     expect(status.textContent).toContain('换行')
     expect(status.textContent).toContain('关闭')
+  })
+})
+
+describe('the workspace pin (direction A)', () => {
+  const workspaces = [{ workspaceId: 'ws-1', title: '项目', path: '/work/project' }]
+  const following = {
+    sessionId: 's-1',
+    label: '项目',
+    generation: 1,
+    events: 0,
+    streams: 0,
+    resyncs: 0,
+    stale: 0,
+  }
+  const withWorkspaces = (following: Snapshot['session']['following']) =>
+    snapshot({ session: { ...snapshot().session, workspaces, following } })
+
+  test('the pin button exists only in new-conversation state', () => {
+    render.renderState(withWorkspaces(following))
+    render.toggleMenu(withWorkspaces(following), 'q-workspace')
+    expect(document.querySelectorAll('#q-workspace-menu .q-pin')).toHaveLength(0)
+
+    render.renderState(withWorkspaces(null))
+    render.toggleMenu(withWorkspaces(null), 'q-workspace')
+    expect(document.querySelectorAll('#q-workspace-menu .q-pin')).toHaveLength(1)
+  })
+
+  test('choosing a workspace while following leaves the conversation first', () => {
+    const state = withWorkspaces(following)
+    render.renderState(state)
+    render.toggleMenu(state, 'q-workspace')
+    invocations.length = 0
+    document.querySelector<HTMLButtonElement>('#q-workspace-menu .q-option')?.click()
+    expect(invocations.some(invocation => invocation.cmd === 'start_new')).toBe(true)
+  })
+
+  test('pinning a workspace asks the shell for pin_workspace', () => {
+    const state = withWorkspaces(null)
+    render.renderState(state)
+    render.toggleMenu(state, 'q-workspace')
+    invocations.length = 0
+    document.querySelector<HTMLButtonElement>('#q-workspace-menu .q-pin')?.click()
+    expect(
+      invocations.some(
+        invocation => invocation.cmd === 'pin_workspace' && invocation.args.workspaceId === 'ws-1',
+      ),
+    ).toBe(true)
   })
 })

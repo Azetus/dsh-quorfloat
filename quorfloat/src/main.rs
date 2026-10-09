@@ -131,6 +131,18 @@ fn run() -> Result<SessionExit, String> {
             registered: hotkey.is_active(),
         },
     })));
+    // The pin file, read once: its session half is adopted by the follow layer
+    // (which validates it against the list it will receive), its workspace half
+    // seeds the new-conversation default (P0). The two are one fact, not two —
+    // see `app/pinned.rs`.
+    let pinned = pinned_path
+        .as_deref()
+        .map(dsh_quorfloat::app::pinned::Pinned::load)
+        .unwrap_or_default();
+    {
+        let mut session = lock(&session);
+        session.adopt_pinned(pinned.session.clone());
+    }
 
     // Shared with the sink, so a breadcrumb written from inside the session (an
     // approval arriving, an answer being applied) lands in the same file as the
@@ -152,6 +164,7 @@ fn run() -> Result<SessionExit, String> {
         hotkey_registered: hotkey.is_active(),
         hotkey_reason: hotkey.reason().map(str::to_owned),
         preferences,
+        pinned_workspace: pinned.workspace.clone(),
         visible: settings.start_visible,
         height: Height::new(),
     }));
@@ -321,6 +334,7 @@ fn run() -> Result<SessionExit, String> {
             select_session,
             start_new,
             pin,
+            pin_workspace,
             request_workspaces,
             select_model,
             set_permission,
@@ -401,12 +415,45 @@ fn start_new(state: tauri::State<'_, ShellRuntime>) -> Value {
 }
 
 /// `pin` — pin one conversation (or stop pinning), remembered across runs.
+///
+/// The workspace projection the bridge computed is put into the shell's view
+/// *before* the snapshot is emitted, so the frontend sees the pin and its
+/// projection in one state.
 #[tauri::command]
 fn pin(state: tauri::State<'_, ShellRuntime>, session_id: Option<String>) -> Value {
     let pinned_path = state.pinned_path.clone();
-    with_session(&state, |session, sink| {
-        bridge::pin(session, sink, session_id.as_deref(), pinned_path.as_deref())
-    })
+    let mut session = lock(&state.session);
+    let result = state.sink.with(|sink| {
+        bridge::pin(&mut session, sink, session_id.as_deref(), pinned_path.as_deref())
+    });
+    drop(session);
+    apply_pinned_workspace(&state.view, &result);
+    (state.emit)();
+    result
+}
+
+/// `pin_workspace` — pin the default directory for a new conversation, leaving
+/// the current one (a new-conversation-state action by design).
+#[tauri::command]
+fn pin_workspace(state: tauri::State<'_, ShellRuntime>, workspace_id: Option<String>) -> Value {
+    let pinned_path = state.pinned_path.clone();
+    let mut session = lock(&state.session);
+    let result = state.sink.with(|sink| {
+        bridge::pin_workspace(&mut session, sink, workspace_id.as_deref(), pinned_path.as_deref())
+    });
+    drop(session);
+    apply_pinned_workspace(&state.view, &result);
+    (state.emit)();
+    result
+}
+
+/// Put the bridge's workspace projection into the shell's view.
+fn apply_pinned_workspace(view: &Arc<Mutex<ShellView>>, result: &Value) {
+    let mut view = lock(view);
+    view.pinned_workspace = result
+        .get("pinnedWorkspace")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
 }
 
 /// `request_workspaces` — ask the host for the workspace list.
@@ -614,6 +661,14 @@ fn spawn_dispatcher(
                         } else {
                             apply_window_command(&window, WindowCommand::Show, &mut visible);
                             set_view_visible(&view, visible);
+                            // A summon means a fresh conversation, unless the pin
+                            // says "continue this one" (user decision 2026-10-09).
+                            // The host's own shows (`window/visibility` on Frames)
+                            // do not reset — that is the host's intent, not a summon.
+                            {
+                                let mut session = lock(&session);
+                                let _ = sink.with(|sink| bridge::on_show(&mut session, sink));
+                            }
                             report_visibility(&session, &sink, visible, &capabilities);
                             emit();
                         }

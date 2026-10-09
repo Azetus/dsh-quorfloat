@@ -27,6 +27,8 @@ let draft = ''
 let lastSent: { text: string; restored: boolean } | null = null
 /** The workspace a new conversation will be created in (frontend choice). */
 let workspaceChoice: string | null = null
+/** Whether the choice has been seeded from the shell's pinned workspace yet. */
+let workspaceChoiceSeeded = false
 /** Which page is up: the conversation or the settings. */
 let page: 'main' | 'settings' = 'main'
 /** Which popover is open, if any (the trigger's id). */
@@ -152,7 +154,7 @@ function renderTop(state: Snapshot): void {
   } else {
     $('q-session-pinmark').hidden = true
   }
-  if (state.session.following === null && workspaceChoice !== null) {
+  if (state.session.following === null && pinnedWorkspaceMark(state)) {
     const mark = icon('pin')
     if (mark !== null) $('q-workspace-pinmark').replaceChildren(mark)
     $('q-workspace-pinmark').hidden = false
@@ -555,6 +557,14 @@ export function closeMenu(): void {
   closeMenus()
 }
 
+/** Whether the top bar marks the current workspace choice as pinned. */
+function pinnedWorkspaceMark(state: Snapshot): boolean {
+  return (
+    state.session.pinnedWorkspace !== null &&
+    workspaceChoice === state.session.pinnedWorkspace
+  )
+}
+
 function renderWorkspaceMenu(state: Snapshot, menu: HTMLElement): void {
   popHead(menu, '工作区')
   for (const workspace of state.session.workspaces) {
@@ -569,6 +579,10 @@ function renderWorkspaceMenu(state: Snapshot, menu: HTMLElement): void {
       workspaceLabel(workspace.title, workspace.path),
       selected,
       () => {
+        // Choosing a workspace while following a conversation is the
+        // new-conversation action (2026-10-09): leave the conversation (with a
+        // detach), preselect this directory. The pin button is what persists.
+        if (state.session.following !== null) void api.startNew()
         workspaceChoice = workspace.workspaceId
         closeMenus()
         render(state)
@@ -578,11 +592,16 @@ function renderWorkspaceMenu(state: Snapshot, menu: HTMLElement): void {
     )
     entry.title = workspace.path
     row.append(entry)
-    row.append(pinButton(`工作区 ${workspaceLabel(workspace.title, workspace.path)}`, workspaceChoice === workspace.workspaceId, () => {
-      workspaceChoice = workspaceChoice === workspace.workspaceId ? null : workspace.workspaceId
-      closeMenus()
-      render(state)
-    }))
+    // The workspace pin exists only in new-conversation state: with a session
+    // pin the workspace field is that session's projection, not a choice.
+    if (state.session.following === null) {
+      const pinned = state.session.pinnedWorkspace === workspace.workspaceId
+      row.append(pinButton(`工作区 ${workspaceLabel(workspace.title, workspace.path)}`, pinned, () => {
+        void api.pinWorkspace(pinned ? null : workspace.workspaceId)
+        closeMenus()
+        render(state)
+      }))
+    }
     menu.append(row)
   }
   separator(menu)
@@ -786,6 +805,17 @@ function render(state: Snapshot): void {
   // The host's reduceMotion preference drives the same CSS switch the OS's
   // prefers-reduced-motion media query does.
   document.documentElement.classList.toggle('q-reduce-motion', state.settings.reduceMotion)
+  // The workspace choice is seeded once from the shell's pin: with a session
+  // pin the projection is informational; in new-conversation state it is the
+  // P0 default. An invalid pin (no longer listed) seeds nothing.
+  if (!workspaceChoiceSeeded) {
+    workspaceChoiceSeeded = true
+    const pinned = state.session.pinnedWorkspace
+    workspaceChoice =
+      pinned !== null && state.session.workspaces.some(workspace => workspace.workspaceId === pinned)
+        ? pinned
+        : null
+  }
 
   if (page === 'settings') $('q-settings').hidden = false, $('q-main').hidden = true
   else $('q-settings').hidden = true, $('q-main').hidden = false
