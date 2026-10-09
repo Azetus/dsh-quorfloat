@@ -115,16 +115,20 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
 
 /* ── composer ────────────────────────────────────────────────────────── */
 
-.q-compose { display: flex; align-items: flex-start; gap: 14px; padding: 21px 22px 14px; flex: none; }
-.q-search { color: var(--q-accent); padding-top: 6px; flex: none; }
+.q-compose { display: flex; align-items: flex-start; gap: 14px; padding: 14px 22px 12px; flex: none; }
+/* The magnifier's visual centre sits on the input's first line (14px/1.5 ⇒ the
+   line centre is 17px from the box top), matching the 34px send button. */
+.q-search { color: var(--q-accent); padding-top: 9px; flex: none; }
 .q-compose textarea {
   display: block; min-width: 0; flex: 1; width: 100%;
-  height: 38px; resize: none; overflow: hidden;
+  height: 34px; resize: none; overflow: hidden;
   border: 0; background: transparent; color: var(--q-text);
   /* 14px, the model reply's body size — a 2026-10-09 user polish: the input
      reads like the conversation it feeds, not like a title (the design's own
-     token is 20px; the deviation is deliberate and on the record). */
-  font-size: 14px; line-height: 1.5; padding: 0;
+     token is 20px; the deviation is deliberate and on the record).
+     The 34px box with 6.5px vertical padding centres one line (21px) on the
+     send button; further lines grow the box down from there. */
+  font-size: 14px; line-height: 1.5; padding: 6.5px 0;
 }
 .q-compose textarea::placeholder { color: var(--q-muted); }
 .q-submit {

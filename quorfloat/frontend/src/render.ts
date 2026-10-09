@@ -173,8 +173,10 @@ function renderComposer(state: Snapshot): void {
 }
 
 function resizeComposer(): void {
-  input.style.height = '38px'
-  input.style.height = `${Math.min(input.scrollHeight || 38, 120)}px`
+  // The box's single-line height, matching the CSS (`.q-compose textarea`).
+  const base = 34
+  input.style.height = `${base}px`
+  input.style.height = `${Math.min(input.scrollHeight || base, 120)}px`
   input.style.overflowY = input.scrollHeight > 120 ? 'auto' : 'hidden'
 }
 
