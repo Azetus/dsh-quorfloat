@@ -10,6 +10,7 @@ import { useDocumentPreferences } from '../hooks/useDocumentPreferences'
 import { useFlight } from '../hooks/useFlight'
 import { useGlobalKeys } from '../hooks/useGlobalKeys'
 import { useViewportHeight } from '../hooks/useViewportHeight'
+import { pinToBottom } from '../lib/bottom-pin'
 import { usePanelDynamics } from '../hooks/usePanelDynamics'
 import { SHADOW_ROOM, type Painted } from '../lib/panel'
 import type { Snapshot } from '../lib/state'
@@ -117,7 +118,7 @@ export function App({ state }: AppProps) {
     lastSent.current = { text, restored: false }
     draft.current = ''
     if (input !== null) input.value = ''
-    remeasure()
+    onComposerGrow()
   }, [state, workspaceChoice, remeasure])
 
   const toggleMenu = useCallback((id: string): void => {
@@ -145,6 +146,15 @@ export function App({ state }: AppProps) {
     })
   }, [])
   const onDraft = useCallback((text: string): void => { draft.current = text }, [])
+
+  // The composer grew or shrank. Re-measure first (the probe moves the panel's box once more),
+  // then hold the reader at the bottom: the composer's growth comes out of the thread's box
+  // while the panel is capped, and that happens outside React's render cycle — without this the
+  // bottom slipped a line away per keystroke and snapped back on the next render.
+  const onComposerGrow = useCallback((): void => {
+    remeasure()
+    pinToBottom()
+  }, [remeasure])
 
   useGlobalKeys({
     recording,
@@ -188,7 +198,7 @@ export function App({ state }: AppProps) {
         draft={draft.current}
         onDraft={onDraft}
         onSend={submit}
-        onGrow={remeasure}
+        onGrow={onComposerGrow}
         inputRef={inputRef}
         folds={folds}
         onToggleFold={toggleFold}
