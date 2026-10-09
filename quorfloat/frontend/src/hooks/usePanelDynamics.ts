@@ -73,6 +73,15 @@ export function usePanelDynamics(
     // between, so nothing flashes.
     const running = pinned.current
     if (running !== null) element.style.height = ''
+    // The probe grows the panel by a pixel so a capped panel can still say what it wants. For a
+    // reader at the very bottom that pixel comes out of the scrollable extent: the browser
+    // clamps the offset to the new maximum, and nothing gives it back — because a child's
+    // layout effect (the thread's own pin) runs *before* this one, the clamp lands after the
+    // pin and survives. The result was a one-pixel up-and-down on every keystroke, visible only
+    // at the bottom, where the offset is at the maximum (2026-10-09). Put the reader back
+    // exactly where they were; where they should be is the pin's decision, not this one's.
+    const thread = element.querySelector<HTMLElement>('#q-thread-scroll')
+    const keptScrollTop = thread?.scrollTop ?? null
     element.style.maxHeight = `${settings.maxHeight + 1}px`
     const natural = element.offsetHeight
     const desired = Math.max(1, Math.min(natural, settings.maxHeight))
@@ -80,6 +89,7 @@ export function usePanelDynamics(
     // content reveals itself once the shell has made room. `available` is the same number
     // the panel is styled with, so the probe below measures the real thing.
     element.style.maxHeight = `${Math.min(settings.maxHeight, available)}px`
+    if (thread !== null && keptScrollTop !== null) thread.scrollTop = keptScrollTop
 
     // A panel on its way out has nobody watching it, and a transition left running across
     // the native hide is exactly the one whose end event never arrives (2026-10-09: the
