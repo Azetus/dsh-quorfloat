@@ -13,7 +13,7 @@ import { useViewportHeight } from '../hooks/useViewportHeight'
 import { usePanelDynamics } from '../hooks/usePanelDynamics'
 import { SHADOW_ROOM, type Painted } from '../lib/panel'
 import type { Snapshot } from '../lib/state'
-import { isBusy } from '../lib/view-text'
+import { isBusy, targetWorkspace } from '../lib/view-text'
 import { ConversationPage } from './conversation/ConversationPage'
 import { Footer } from './footer/Footer'
 import { Panel } from './Panel'
@@ -45,15 +45,11 @@ export function App({ state }: AppProps) {
   const [recording, setRecording] = useState(false)
   const [transientError, setTransientError] = useState<string | null>(null)
   const [folds, setFolds] = useState<ReadonlyMap<string, boolean>>(() => new Map())
-  // The workspace a new conversation will be created in. Seeded once from the shell's pin
-  // — the P0 default — and never written back to the host: the pin is the host's, this is
-  // the frontend's own pending choice.
-  const [workspaceChoice, setWorkspaceChoice] = useState<string | null>(() => {
-    const pinned = state.session.pinnedWorkspace
-    return pinned !== null && state.session.workspaces.some(w => w.workspaceId === pinned)
-      ? pinned
-      : null
-  })
+  // The workspace the user picked for this visit, if they picked one. It is never seeded from
+  // the shell's pin: `state.session.createWorkspace` already carries the ladder's answer (P0
+  // is that pin, validated), so seeding would only add a second copy that can go stale when
+  // the pin moves.
+  const [workspaceChoice, setWorkspaceChoice] = useState<string | null>(null)
 
   useDocumentPreferences(state.settings)
 
@@ -64,6 +60,9 @@ export function App({ state }: AppProps) {
   const viewport = useViewportHeight()
   const available = Math.max(80, viewport - SHADOW_ROOM)
   const maxHeight = Math.min(state.settings.maxHeight, available)
+
+  // What the top bar names: the user's pick, or where the shell would create the conversation.
+  const target = targetWorkspace(state, workspaceChoice)
 
   const arrived: Painted = { page, session: state.transcript.sessionId }
   const { remeasure } = usePanelDynamics(panelRef, state, arrived, available)
@@ -164,7 +163,7 @@ export function App({ state }: AppProps) {
     <Panel panelRef={panelRef} hiding={flight.hiding} maxHeight={maxHeight}>
       <TopBar
         state={state}
-        workspaceChoice={workspaceChoice}
+        targetWorkspace={target}
         openMenu={openMenu}
         settingsOpen={page === 'settings'}
         onToggleMenu={toggleMenu}

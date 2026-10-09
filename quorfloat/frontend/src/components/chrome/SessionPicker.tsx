@@ -10,8 +10,8 @@ import { SessionMenu } from '../menus/SessionMenu'
 export interface SessionPickerProps {
   /** The snapshot. */
   readonly state: Snapshot
-  /** The frontend's own workspace preselect, for the menu's heading context. */
-  readonly workspaceChoice: string | null
+  /** The workspace the next conversation would use, for the menu's heading context. */
+  readonly targetWorkspace: string | null
   /** Whether this popover is the open one. */
   readonly open: boolean
   /** Toggle request from the trigger. */
@@ -26,7 +26,7 @@ export interface SessionPickerProps {
  * @param props - snapshot and handlers.
  * @returns the picker.
  */
-export function SessionPicker({ state, workspaceChoice, open, onToggle, onClose }: SessionPickerProps) {
+export function SessionPicker({ state, targetWorkspace, open, onToggle, onClose }: SessionPickerProps) {
   const pinned = state.session.pinned !== null
   return (
     <PickerPopover
@@ -49,7 +49,7 @@ export function SessionPicker({ state, workspaceChoice, open, onToggle, onClose 
         </>
       }
     >
-      <SessionMenu state={state} workspaceChoice={workspaceChoice} onClose={onClose} />
+      <SessionMenu state={state} targetWorkspace={targetWorkspace} onClose={onClose} />
     </PickerPopover>
   )
 }

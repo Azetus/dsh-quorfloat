@@ -14,8 +14,8 @@ import { PinButton } from './PinButton'
 export interface SessionMenuProps {
   /** The snapshot. */
   readonly state: Snapshot
-  /** The frontend's own preselect, for the heading's context. */
-  readonly workspaceChoice: string | null
+  /** The workspace the next conversation would use, for the heading's context. */
+  readonly targetWorkspace: string | null
   /** Close the menu after an action that should close it. */
   readonly onClose: () => void
 }
@@ -30,12 +30,12 @@ export interface SessionMenuProps {
  * @param props - snapshot and the close handler.
  * @returns the menu contents.
  */
-export function SessionMenu({ state, workspaceChoice, onClose }: SessionMenuProps) {
+export function SessionMenu({ state, targetWorkspace, onClose }: SessionMenuProps) {
   const pinned = state.session.pinned
   const conversations = state.session.conversations.filter(c => !c.blank)
   return (
     <>
-      <MenuHeading title="会话" detail={workspaceTitle(state, workspaceChoice)} />
+      <MenuHeading title="会话" detail={workspaceTitle(state, targetWorkspace)} />
       <MenuOption
         label="新建会话"
         selected={state.session.following === null}

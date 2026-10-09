@@ -15,8 +15,8 @@ import { PinButton } from './PinButton'
 export interface WorkspaceMenuProps {
   /** The snapshot. */
   readonly state: Snapshot
-  /** The frontend's own preselect for a new conversation. */
-  readonly workspaceChoice: string | null
+  /** The workspace the next conversation would use (the user's pick, or the shell's). */
+  readonly targetWorkspace: string | null
   /** Adopt a workspace as the new-conversation target. */
   readonly onChoose: (workspaceId: string) => void
   /** Close the menu after an action that should close it. */
@@ -34,13 +34,13 @@ export interface WorkspaceMenuProps {
  * @param props - snapshot, preselect, and handlers.
  * @returns the menu contents.
  */
-export function WorkspaceMenu({ state, workspaceChoice, onChoose, onClose }: WorkspaceMenuProps) {
+export function WorkspaceMenu({ state, targetWorkspace, onChoose, onClose }: WorkspaceMenuProps) {
   return (
     <>
-      <MenuHeading title="工作区" detail={workspaceTitle(state, workspaceChoice)} />
+      <MenuHeading title="工作区" detail={workspaceTitle(state, targetWorkspace)} />
       {state.session.workspaces.map(workspace => {
         const label = workspaceLabel(workspace.title, workspace.path)
-        const selected = state.session.following === null && workspaceChoice === workspace.workspaceId
+        const selected = state.session.following === null && targetWorkspace === workspace.workspaceId
         const pinned = state.session.pinnedWorkspace === workspace.workspaceId
         return (
           <MenuRow key={workspace.workspaceId}>
@@ -68,7 +68,9 @@ export function WorkspaceMenu({ state, workspaceChoice, onChoose, onClose }: Wor
         )
       })}
       <MenuSeparator />
-      <MenuHint text="选择工作区后，新会话在此开始。" />
+      <MenuHint text={state.session.workspaces.length === 0
+        ? '工作区列表还没到。'
+        : '选择工作区后，新会话在此开始。'} />
     </>
   )
 }

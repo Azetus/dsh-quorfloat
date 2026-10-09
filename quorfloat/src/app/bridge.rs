@@ -14,6 +14,7 @@
 use serde_json::{json, Value};
 
 use crate::app::height::Height;
+use crate::app::workspace;
 use crate::app::preferences::Preferences;
 use crate::app::session::interaction::{
     ApprovalVerdict, Interaction, InteractionState, Question, QuestionAnswer, SentAnswer,
@@ -109,6 +110,12 @@ pub fn snapshot(session: &Session, shell: &ShellView) -> Value {
             })),
             "pinned": session.pinned_conversation(),
             "pinnedWorkspace": shell.pinned_workspace,
+            // Where a conversation submitted right now would be created. The panel shows it in
+            // its workspace field, so that state and the ladder cannot disagree: without it the
+            // field said "选择工作区" while the create was already resolved to a real one
+            // (2026-10-09). It is the same resolution `submit` uses, with no panel choice to
+            // prefer — the panel's own pick is not the shell's to know.
+            "createWorkspace": create_workspace(session, None, shell.pinned_workspace.as_deref()),
             "chosen": session.target_conversation(),
             "createFailure": follow.create_failure(),
             "conversations": session
@@ -345,8 +352,9 @@ fn theme_name(theme: crate::app::theme::Preference) -> &'static str {
 /// @param session - the session.
 /// @param sink - where the request goes.
 /// @param text - the user's text; blank input is refused by the session.
-/// @param workspace_id - the workspace to create in, when the panel is in
-///   "new conversation" mode and the user has picked one.
+/// @param workspace_id - the workspace the panel chose for a new conversation, if any.
+/// @param pinned_workspace - the workspace this window last chose: the ladder's P0 rung,
+///   which the shell owns and the panel cannot see.
 /// @returns the delivery, in the frontend's vocabulary.
 #[must_use]
 pub fn submit(
@@ -354,9 +362,39 @@ pub fn submit(
     sink: &mut dyn FrameSink,
     text: &str,
     workspace_id: Option<&str>,
+    pinned_workspace: Option<&str>,
 ) -> Value {
-    let delivery = session.send_prompt(text, workspace_id, sink);
+    let workspace_id = create_workspace(session, workspace_id, pinned_workspace);
+    let delivery = session.send_prompt(text, workspace_id.as_deref(), sink);
     json!({ "delivery": delivery_view(&delivery) })
+}
+
+/// Which workspace a new conversation is created in.
+///
+/// The panel's own choice wins while it still names one of the host's workspaces — the
+/// picker only offers those, so a value the list no longer has is a stale snapshot rather
+/// than an instruction. Everything else falls to the ladder in [`crate::app::workspace`],
+/// which validates its own rungs: P0 is this window's own choice, P3 is the most recently
+/// active workspace, and `None` is P4 — nothing to go on, so the panel has to ask the user.
+///
+/// This exists because the ladder had no caller (2026-10-09): the panel sends its choice
+/// when it has one, and in the new-conversation state it usually has none, so a submit was
+/// failing with "choose a workspace" while the host was listing several.
+///
+/// @param session - the session, which holds the host's lists.
+/// @param chosen - what the panel sent, if anything.
+/// @param pinned - this window's P0 rung, if any.
+/// @returns the workspace to ask for, or `None` when only the user can decide.
+fn create_workspace(session: &Session, chosen: Option<&str>, pinned: Option<&str>) -> Option<String> {
+    let follow = session.follow();
+    let workspaces = follow.workspaces();
+    chosen
+        .filter(|id| !id.trim().is_empty())
+        .filter(|id| workspaces.iter().any(|workspace| workspace.workspace_id == *id))
+        .map(str::to_owned)
+        // Nothing is on screen in the new-conversation state, so the ladder's P1 (the running
+        // conversation's directory) cannot apply: this is P0, then P3, then the user.
+        .or_else(|| workspace::to_create_in(pinned, None, false, workspaces, follow.sessions()))
 }
 
 /// `cancel` — stop the turn being generated.
@@ -657,7 +695,7 @@ fn is_bare_typing_key(key: global_hotkey::hotkey::Code) -> bool {
 mod tests {
     use super::*;
     use crate::app::session::test_support::{
-        approval_open, follow_a_conversation, identity, RecordingSink,
+        approval_open, follow_a_conversation, hello_ok, identity, RecordingSink,
     };
     use crate::app::session::interaction::QuestionAnswer;
     use crate::ipc::rpc::Inbound;
@@ -751,14 +789,85 @@ mod tests {
     }
 
     #[test]
+    fn the_snapshot_says_where_a_new_conversation_would_be_created() {
+        // The panel's workspace field reads this, so a submit cannot land in a workspace the
+        // field never named.
+        let (mut session, mut sink) = followed();
+        list_workspaces(&mut session, &mut sink);
+        start_new(&mut session, &mut sink);
+        let mut shell = view();
+        assert_eq!(
+            snapshot(&session, &shell)["session"]["createWorkspace"], "ws-project",
+            "P3: the workspace holding the newest conversation",
+        );
+
+        // A pinned workspace is the P0 rung and outranks it; a pin the host no longer lists is
+        // not a workspace at all, so the ladder carries on without it.
+        shell.pinned_workspace = Some("ws-notes".to_owned());
+        assert_eq!(snapshot(&session, &shell)["session"]["createWorkspace"], "ws-notes");
+        shell.pinned_workspace = Some("ws-gone".to_owned());
+        assert_eq!(snapshot(&session, &shell)["session"]["createWorkspace"], "ws-project");
+    }
+
+    #[test]
     fn submit_sends_the_prompt_and_reports_its_delivery() {
         let (mut session, mut sink) = followed();
-        let result = submit(&mut session, &mut sink, "第一句", None);
+        let result = submit(&mut session, &mut sink, "第一句", None, None);
         assert_eq!(result["delivery"]["state"], "sending");
         let frame = sink.frames.last().expect("a prompt request");
         assert_eq!(frame["method"], "session/prompt");
         assert_eq!(frame["params"]["sessionId"], "session-1");
         assert_eq!(frame["params"]["text"], "第一句");
+    }
+
+    #[test]
+    fn a_submit_with_nothing_chosen_creates_in_the_ladders_workspace() {
+        // The bug (2026-10-09): submitting in the new-conversation state failed with "choose a
+        // workspace" whenever the panel had nothing of its own to send — which is the normal
+        // case, since the panel's field is only a P0 projection. The ladder existed, with its
+        // own tests, and had no caller.
+        let (mut session, mut sink) = lists_without_a_conversation();
+
+        let result = submit(&mut session, &mut sink, "在吗", None, None);
+        assert_eq!(
+            result["delivery"]["state"], "sending",
+            "the panel is working on it: {}",
+            result["delivery"],
+        );
+        let create = sink
+            .frames
+            .iter()
+            .rev()
+            .find(|frame| frame["method"] == "session/create")
+            .expect("a create request");
+        assert_eq!(
+            create["params"]["workspaceId"], "ws-project",
+            "P3: the workspace holding the newest conversation",
+        );
+    }
+
+    #[test]
+    fn the_panels_own_choice_outranks_the_ladder_and_a_stale_one_falls_through() {
+        let created_in = |chosen: Option<&str>| {
+            let (mut session, mut sink) = lists_without_a_conversation();
+            submit(&mut session, &mut sink, "在吗", chosen, None);
+            let create = sink
+                .frames
+                .iter()
+                .rev()
+                .find(|frame| frame["method"] == "session/create")
+                .expect("a create request");
+            create["params"]["workspaceId"].clone()
+        };
+
+        assert_eq!(
+            created_in(Some("ws-notes")), "ws-notes",
+            "the user's own pick wins while the host still lists it",
+        );
+        assert_eq!(
+            created_in(Some("ws-gone")), "ws-project",
+            "a choice the list no longer has is a stale snapshot, not an instruction",
+        );
     }
 
     #[test]
@@ -1079,5 +1188,19 @@ mod tests {
             },
             sink,
         );
+    }
+
+    /// A session in the new-conversation state, holding the host's two lists.
+    ///
+    /// `follow_a_conversation` is what loads the conversation list (the pump's own
+    /// answer), and the workspace list is requested on top of it; `start_new` is the user's
+    /// "新建会话", which is what leaves nothing to attach to without dropping either list.
+    fn lists_without_a_conversation() -> (Session, RecordingSink) {
+        let (mut session, mut sink) = followed();
+        list_workspaces(&mut session, &mut sink);
+        start_new(&mut session, &mut sink);
+        assert!(session.follow().session_id().is_none(), "new-conversation state");
+        assert!(!session.follow().workspaces().is_empty(), "the lists survive the detach");
+        (session, sink)
     }
 }

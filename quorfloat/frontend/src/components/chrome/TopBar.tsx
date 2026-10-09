@@ -9,8 +9,8 @@ import { WorkspacePicker } from './WorkspacePicker'
 export interface TopBarProps {
   /** The snapshot. */
   readonly state: Snapshot
-  /** The frontend's own workspace preselect. */
-  readonly workspaceChoice: string | null
+  /** The workspace the next conversation would use (the user's pick, or the shell's). */
+  readonly targetWorkspace: string | null
   /** Which popover is open, if any. */
   readonly openMenu: string | null
   /** Whether the settings page is up. */
@@ -37,7 +37,7 @@ export interface TopBarProps {
  * @returns the top bar.
  */
 export function TopBar({
-  state, workspaceChoice, openMenu, settingsOpen, onToggleMenu, onCloseMenu,
+  state, targetWorkspace, openMenu, settingsOpen, onToggleMenu, onCloseMenu,
   onChooseWorkspace, onToggleSettings, onHide,
 }: TopBarProps) {
   return (
@@ -46,7 +46,7 @@ export function TopBar({
       <div className="q-context">
         <WorkspacePicker
           state={state}
-          workspaceChoice={workspaceChoice}
+          targetWorkspace={targetWorkspace}
           open={openMenu === 'q-workspace'}
           onToggle={() => { onToggleMenu('q-workspace') }}
           onClose={onCloseMenu}
@@ -55,7 +55,7 @@ export function TopBar({
         <span className="q-divider" aria-hidden="true">/</span>
         <SessionPicker
           state={state}
-          workspaceChoice={workspaceChoice}
+          targetWorkspace={targetWorkspace}
           open={openMenu === 'q-session'}
           onToggle={() => { onToggleMenu('q-session') }}
           onClose={onCloseMenu}

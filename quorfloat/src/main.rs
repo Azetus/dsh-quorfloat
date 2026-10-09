@@ -382,7 +382,10 @@ fn submit(
     workspace_id: Option<String>,
 ) -> Value {
     with_session(&state, |session, sink| {
-        bridge::submit(session, sink, &text, workspace_id.as_deref())
+        // The ladder's P0 rung is the shell's fact. It is read inside the closure so the lock
+        // order stays session-then-view, exactly as `with_session`'s own `emit` takes it.
+        let pinned = lock(&state.view).pinned_workspace.clone();
+        bridge::submit(session, sink, &text, workspace_id.as_deref(), pinned.as_deref())
     })
 }
 
