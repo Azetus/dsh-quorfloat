@@ -70,10 +70,10 @@ export function TopBar({
           aria-pressed={settingsOpen}
           onClick={onToggleSettings}
         >
-          <span id="q-settings-open-icon"><Icon name="settings-2" /></span>
+          <Icon name="settings-2" />
         </button>
         <button id="q-close" type="button" className="q-close" aria-label="收起悬浮窗" onClick={onHide}>
-          <span id="q-close-icon"><Icon name="x" /></span>
+          <Icon name="x" />
         </button>
       </div>
     </div>

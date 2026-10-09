@@ -74,7 +74,7 @@ export function Composer({ inputRef, busy, hasEntries, draft, onDraft, onSend, o
         aria-label={busy ? '停止生成' : '发送问题'}
         onClick={onSend}
       >
-        <span id="q-send-icon"><Icon name={busy ? 'square' : 'arrow-up'} /></span>
+        <Icon name={busy ? 'square' : 'arrow-up'} />
       </button>
     </div>
   )
