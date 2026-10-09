@@ -662,7 +662,7 @@ fn spawn_dispatcher(
                         let mut changed = false;
                         for command in commands {
                             changed = true;
-                            apply_window_command(&window, command, &mut visible);
+                            apply_window_command(&window, command, &mut visible, &marker);
                         }
                         if changed {
                             set_view_visible(&view, visible);
@@ -681,7 +681,7 @@ fn spawn_dispatcher(
                             // force-hide through `window/visibility` on Frames.
                             let _ = handle.emit("quorfloat/hotkey-hide", ());
                         } else {
-                            apply_window_command(&window, WindowCommand::Show, &mut visible);
+                            apply_window_command(&window, WindowCommand::Show, &mut visible, &marker);
                             set_view_visible(&view, visible);
                             // A summon means a fresh conversation, unless the pin
                             // says "continue this one" (user decision 2026-10-09).
@@ -699,7 +699,7 @@ fn spawn_dispatcher(
                         apply_height(&window, &view, &marker, &emit, panel_height);
                     }
                     Ok(Wake::Visibility(command)) => {
-                        apply_window_command(&window, command, &mut visible);
+                        apply_window_command(&window, command, &mut visible, &marker);
                         set_view_visible(&view, visible);
                         report_visibility(&session, &sink, visible, &capabilities);
                         emit();
@@ -753,26 +753,72 @@ fn set_view_visible(view: &Arc<Mutex<ShellView>>, visible: bool) {
 /// @param window - the panel's window.
 /// @param command - what the host or the hotkey asked for.
 /// @param visible - the dispatcher's record of the current state.
-fn apply_window_command(window: &WebviewWindow, command: WindowCommand, visible: &mut bool) {
+fn apply_window_command(
+    window: &WebviewWindow,
+    command: WindowCommand,
+    visible: &mut bool,
+    marker: &Marker,
+) {
     match command {
         WindowCommand::Show => {
+            resume_activation(window);
             let _ = window.show();
             let _ = window.set_focus();
             *visible = true;
         }
         WindowCommand::Hide => {
             let _ = window.hide();
+            yield_activation(window, marker);
             *visible = false;
         }
         WindowCommand::Toggle => {
             *visible = !*visible;
             if *visible {
+                resume_activation(window);
                 let _ = window.show();
                 let _ = window.set_focus();
             } else {
                 let _ = window.hide();
+                yield_activation(window, marker);
             }
         }
+    }
+}
+
+/// Put the application back in a state where its window can take the keyboard.
+///
+/// [`yield_activation`] hides the *application*, so a later `window.show()` has to lift that
+/// first — otherwise the panel would come back visible but unable to take focus.
+#[cfg(target_os = "macos")]
+fn resume_activation(window: &WebviewWindow) {
+    let _ = window.app_handle().show();
+}
+
+/// Nothing to do where the platform has no application-level hide (see below).
+#[cfg(not(target_os = "macos"))]
+fn resume_activation(_window: &WebviewWindow) {}
+
+/// Hand the keyboard back to whatever the user came from.
+///
+/// The panel is an accessory application (`set_activation_policy(Accessory)`), the way a launcher
+/// is, so summoning it deactivates whatever the user was typing in. Hiding only the *window* left
+/// that application deactivated with no window of ours to type into: close the panel and the caret
+/// is nowhere — the reported symptom (2026-10-09, the user's focus was in the Harness input).
+/// `App::hide()` is `[NSApp hide:nil]`: it hides the application and macOS activates the
+/// application that was active before it, which is the move a launcher makes.
+///
+/// It is safe on every path: when the panel is not the active application (the click-away blur,
+/// or a hide after the user switched somewhere else) hiding an inactive application changes no
+/// activation, so nobody gets pulled back.
+fn yield_activation(window: &WebviewWindow, marker: &Marker) {
+    #[cfg(target_os = "macos")]
+    {
+        marker.write("window hide: yielding activation to the previous app");
+        let _ = window.app_handle().hide();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, marker);
     }
 }
 
