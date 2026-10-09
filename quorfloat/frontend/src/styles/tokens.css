@@ -264,6 +264,26 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
   scrollbar-gutter: stable;
 }
 .q-thread { border-top: 1px solid var(--q-line); padding: 20px 24px 22px; }
+
+/* The way back down (2026-10-09): the harness's `ChatView` arrangement — a sticky, zero-height
+   slot inside the scroller so the control floats over the last lines instead of scrolling with
+   them, with the button pulled up out of the slot by its own height. The slot itself must not
+   eat clicks; only the button does. */
+.q-jump {
+  position: sticky; bottom: 12px; height: 0; z-index: 2;
+  display: flex; justify-content: flex-end;
+  padding-right: 20px; pointer-events: none;
+}
+.q-jump button {
+  display: flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px; margin-top: -44px; padding: 0;
+  border-radius: 100px; border: 1px solid var(--q-line);
+  background: var(--q-soft); color: var(--q-muted);
+  box-shadow: 0 2px 10px var(--q-shadow);
+  pointer-events: auto;
+}
+.q-jump button:hover { color: var(--q-text); background: var(--q-line); }
+.q-jump button svg { width: 15px; height: 15px; }
 .q-thread:empty { border-top-color: transparent; }
 
 /* The separator between turns.

@@ -6,11 +6,12 @@
 // rows inside the viewport (plus a few) are mounted now, and a row's height is measured
 // rather than guessed, because an answer is as tall as its Markdown says.
 
-import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { setBottomPin } from '../../lib/bottom-pin'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { Snapshot } from '../../lib/state'
 import { foldTurns, type Turn as TurnModel } from '../../lib/turns'
+import { JumpToBottom } from './JumpToBottom'
 import { Turn } from './Turn'
 
 /** Props for {@link Thread}. */
@@ -51,6 +52,8 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
   // Whether the reader is at the bottom. Starts true: the first paint should show the end
   // of the conversation, which is what a chat panel is for.
   const follow = useRef(true)
+  // The same fact as state, because the way back down is a control the reader has to see.
+  const [following, setFollowing] = useState(true)
   /** The box height at the last pin: what a change in it has to be taken out of. */
   const lastHeight = useRef<number | null>(null)
 
@@ -156,7 +159,10 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
       ref={scrollRef}
       onScroll={event => {
         const el = event.currentTarget
-        follow.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 4
+        const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 4
+        follow.current = atBottom
+        // Only on a change: a scroll event per keystroke would otherwise re-render the thread.
+        setFollowing(current => (current === atBottom ? current : atBottom))
       }}
     >
       <div id="q-thread" className="q-thread">
@@ -189,6 +195,26 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
           </div>
         )}
       </div>
+      {/* The way back down — the harness's own arrangement (`ChatView`): a sticky, zero-height
+          slot inside the scroller, so the control floats over the last lines instead of
+          scrolling with them, and it exists only while the reader is looking at something
+          other than the end. Pressing it re-enters the follow state, which is what makes the
+          rest of the panel keep them there (user request 2026-10-09). */}
+      {!following && (
+        <JumpToBottom
+          onPress={() => {
+            const scroll = scrollRef.current
+            follow.current = true
+            setFollowing(true)
+            if (scroll === null) return
+            scroll.scrollTo({
+              top: scroll.scrollHeight,
+              // The panel's own motion preference, like every other transition it draws.
+              behavior: state.settings.reduceMotion ? 'auto' : 'smooth',
+            })
+          }}
+        />
+      )}
     </div>
   )
 }
