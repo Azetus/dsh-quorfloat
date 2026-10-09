@@ -10,6 +10,7 @@
 
 import { api } from './api'
 import { icon, ring } from './lib/icons'
+import { workspaceLabel } from './lib/labels'
 import { renderMarkdown } from './lib/markdown'
 import { keepOpenChecked, themeColorScheme } from './lib/settings'
 import { cacheLabel, contextLabel, roundsLabel, tokensLabel } from './lib/stats'
@@ -89,12 +90,12 @@ function workspaceTitle(state: Snapshot): string {
     const byCwd = state.session.conversations.find(c => c.sessionId === following.sessionId)?.cwd
     if (byCwd !== undefined && byCwd !== null) {
       const match = state.session.workspaces.find(w => w.path === byCwd)
-      if (match !== undefined) return match.title
+      if (match !== undefined) return workspaceLabel(match.title, match.path)
     }
     return following.label ?? '工作区'
   }
   const chosen = state.session.workspaces.find(w => w.workspaceId === workspaceChoice)
-  return chosen?.title ?? '选择工作区'
+  return chosen !== undefined ? workspaceLabel(chosen.title, chosen.path) : '选择工作区'
 }
 
 function sessionTitle(state: Snapshot): string {
@@ -560,12 +561,24 @@ function renderWorkspaceMenu(state: Snapshot, menu: HTMLElement): void {
     const row = document.createElement('div')
     row.className = 'q-option-row'
     const selected = state.session.following === null && workspaceChoice === workspace.workspaceId
-    row.append(option(workspace.title, selected, () => {
-      workspaceChoice = workspace.workspaceId
-      closeMenus()
-      render(state)
-    }, workspace.path, 'folder'))
-    row.append(pinButton(`工作区 ${workspace.title}`, workspaceChoice === workspace.workspaceId, () => {
+    // The row shows the title only: the panel cannot create workspaces (that
+    // is the Harness's job, and it always names them), and a long path in the
+    // row would cover the check and pin icons. The path rides on the native
+    // tooltip instead.
+    const entry = option(
+      workspaceLabel(workspace.title, workspace.path),
+      selected,
+      () => {
+        workspaceChoice = workspace.workspaceId
+        closeMenus()
+        render(state)
+      },
+      '',
+      'folder',
+    )
+    entry.title = workspace.path
+    row.append(entry)
+    row.append(pinButton(`工作区 ${workspaceLabel(workspace.title, workspace.path)}`, workspaceChoice === workspace.workspaceId, () => {
       workspaceChoice = workspaceChoice === workspace.workspaceId ? null : workspace.workspaceId
       closeMenus()
       render(state)
