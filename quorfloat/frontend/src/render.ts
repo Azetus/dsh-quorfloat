@@ -799,6 +799,158 @@ function renderSettings(state: Snapshot): void {
 
 // ── the whole panel ───────────────────────────────────────────────────────
 
+/** What one render painted, so the next one can tell a switch from a repaint. */
+export interface Painted {
+  /** Which page was up. */
+  readonly page: 'main' | 'settings'
+  /** The conversation on screen, or null in new-conversation state. */
+  readonly session: string | null
+}
+
+/** What the last render painted, or null before the first one. */
+let painted: Painted | null = null
+
+/** The class that plays the entrance; its keyframes live in tokens.css. */
+const SWAP = 'q-swap'
+
+/**
+ * Which content this render swaps in.
+ *
+ * The snapshots arrive on every transcript event while a turn streams, so the fade
+ * cannot be tied to "a render happened" — it has to be tied to the content moving.
+ * A page change outranks a conversation change: one 180ms fade can only say one
+ * thing, and the settings page is the bigger move.
+ *
+ * @param previous - what the last render painted, or null before the first one.
+ * @param next - what this render is about to paint.
+ * @returns the content to animate, or null when nothing moved.
+ */
+export function swapFor(previous: Painted | null, next: Painted): 'page' | 'session' | null {
+  if (previous === null) return null
+  if (previous.page !== next.page) return 'page'
+  if (previous.session !== next.session) return 'session'
+  return null
+}
+
+/**
+ * Play the entrance animation on the content a swap brought in.
+ *
+ * Purely an entrance: the outgoing content is out of the layout before the first
+ * frame of it, because two pages in this flex column at once would report the sum
+ * of their heights to the shell's height machine and the window would jump before
+ * it eased. The class is the animation, and `animationend` takes it off again (see
+ * `bindStatic`) so that showing the element later cannot replay it by accident.
+ *
+ * @param where - which content arrived.
+ */
+function playSwap(where: 'page' | 'session'): void {
+  const candidates = [$('q-settings'), $('q-main'), threadScroll, cardsEl]
+  const arriving = where === 'page'
+    ? [page === 'settings' ? candidates[0] : candidates[1]]
+    : [threadScroll, cardsEl]
+  for (const candidate of candidates) candidate.classList.remove(SWAP)
+  // The class has to leave and come back for a second swap to replay it, and the style
+  // change has to be flushed before it does — otherwise the browser sees one class list
+  // and one unchanged animation.
+  void arriving[0]?.offsetWidth
+  for (const element of arriving) element?.classList.add(SWAP)
+}
+
+/**
+ * Deciding half of the panel's height animation: what to report, and whether the box
+ * has to be pinned for a transition.
+ *
+ * The panel is content-sized, so its height follows the DOM instantly — a page or a
+ * conversation swap therefore *snaps* unless it is pinned between two explicit heights
+ * (`height: auto` is not interpolable). Two rules come from the shell's side of the
+ * contract (`quorfloat/src/app/height.rs`):
+ *
+ * - **growing** reports the new height at once: the shell makes room first and the panel
+ *   reveals itself into it;
+ * - **shrinking** keeps reporting the room it still occupies until the collapse has
+ *   finished — the shell shrinks the native window *immediately*, and a window that
+ *   shrank first would trim the panel instead of letting it be seen to close.
+ *
+ * @param from - the panel height the swap started at, or null when this is not a swap.
+ * @param desired - the panel height the content now wants.
+ * @param animate - whether the panel may animate at all: not under reduceMotion, and not
+ *  while it is on its way out (see `measureAndReport`).
+ * @returns whether to pin the box for the transition, and the height to report.
+ */
+export function heightPlan(
+  { from, desired, animate }:
+  { from: number | null; desired: number; animate: boolean },
+): { pin: boolean; report: number } {
+  if (from === null || !animate || Math.abs(from - desired) < 1) {
+    return { pin: false, report: desired }
+  }
+  return { pin: true, report: Math.max(from, desired) }
+}
+
+/** The height the panel is pinned to while a swap's height transition runs, or null
+ *  while it is content-sized. */
+let pinnedHeight: number | null = null
+
+/** The height a swap started from, read by `render` *before* it changes the DOM. */
+let swapFromHeight: number | null = null
+
+/** The deadline on the running transition, when one is armed. */
+let settleTimer: number | undefined
+
+/**
+ * The duration the stylesheet gives one token, in milliseconds.
+ *
+ * The panel's timings live in `tokens.css`; this reads them so the deadline below cannot
+ * drift from the transition it is a deadline for.
+ *
+ * @param name - the custom property, e.g. `--q-height`.
+ * @param fallback - what to use when the token cannot be read (a page without the
+ *  stylesheet, as in the tests).
+ * @returns the duration in milliseconds.
+ */
+function tokenMs(name: string, fallback: number): number {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+  const value = raw.endsWith('ms') ? Number.parseFloat(raw) : Number.parseFloat(raw) * 1000
+  return Number.isFinite(value) && value > 0 ? value : fallback
+}
+
+/**
+ * Give the height transition an end even when its own event never arrives.
+ *
+ * `transitionend` is the fast path. It is not the guarantee: a webview that stops
+ * rendering frames — the window was hidden or occluded mid-transition — never delivers
+ * it, and an abandoned pin is a panel stuck at the wrong height with no report left to
+ * correct it (2026-10-09: the new-session switch was pinned, the panel was hidden 90ms
+ * later, and the panel stayed at the old height). A deadline is what the shell's own
+ * height machine does with the platform's silence (`WAIT_FOR_NATIVE_ROOM_MS`), for the
+ * same reason.
+ */
+function armSettleTimer(): void {
+  if (settleTimer !== undefined) window.clearTimeout(settleTimer)
+  settleTimer = window.setTimeout(
+    settleHeight,
+    tokenMs('--q-height', 220) + SETTLE_MARGIN_MS,
+  )
+}
+
+/** Extra room after the transition's own duration before giving up on its event. */
+const SETTLE_MARGIN_MS = 150
+
+/**
+ * The panel is content-sized again, and one fresh report goes out — which is also where a
+ * *shrink* finally tells the shell it may shrink the window.
+ */
+function settleHeight(): void {
+  if (settleTimer !== undefined) {
+    window.clearTimeout(settleTimer)
+    settleTimer = undefined
+  }
+  if (pinnedHeight === null) return
+  pinnedHeight = null
+  windowEl.style.height = ''
+  if (lastState !== null) measureAndReport(lastState)
+}
+
 /**
  * Measure what the panel wants to be, and report it to the shell's height
  * machine — the half of the contract the machine cannot see from its side.
@@ -810,6 +962,12 @@ function renderSettings(state: Snapshot): void {
  * @param state - the snapshot the settings come from.
  */
 export function measureAndReport(state: Snapshot): void {
+  // While a swap's height transition runs the panel carries an explicit height. It is
+  // lifted for the read below and put straight back: the specified value never changes
+  // between two style recalcs, so the transition is not restarted, and nothing is
+  // painted in between, so nothing flashes.
+  const running = pinnedHeight
+  if (running !== null) windowEl.style.height = ''
   windowEl.style.maxHeight = `${state.settings.maxHeight + 1}px`
   const natural = windowEl.offsetHeight
   const desired = Math.max(1, Math.min(natural, state.settings.maxHeight))
@@ -817,7 +975,33 @@ export function measureAndReport(state: Snapshot): void {
   // currently provides: content reveals itself once the shell has made room.
   const available = Math.max(80, window.innerHeight - SHADOW_ROOM)
   windowEl.style.maxHeight = `${Math.min(state.settings.maxHeight, available)}px`
-  void api.reportContentHeight(Math.round(desired))
+
+  const from = swapFromHeight
+  swapFromHeight = null
+  // A panel on its way out has nobody watching it, and a transition left running across
+  // the native hide is exactly the one whose end event never arrives (see the deadline):
+  // it goes straight to the new height instead.
+  const leaving = windowEl.classList.contains('q-away')
+  const plan = heightPlan({
+    from,
+    desired,
+    animate: !state.settings.reduceMotion && !leaving,
+  })
+  if (plan.pin && from !== null) {
+    // Both ends, in one task: pin where the swap started, then let the transition carry
+    // the panel to where it now belongs. `settleHeight` takes the pin off again — on the
+    // transition's own event, or on the deadline.
+    windowEl.style.height = `${from}px`
+    void windowEl.offsetHeight
+    windowEl.style.height = `${desired}px`
+    pinnedHeight = desired
+    armSettleTimer()
+  } else if (running !== null) {
+    // No new swap, and the panel is still mid-collapse: put its own pin back.
+    windowEl.style.height = `${running}px`
+  }
+
+  void api.reportContentHeight(Math.round(plan.report))
 }
 
 function render(state: Snapshot): void {
@@ -840,6 +1024,17 @@ function render(state: Snapshot): void {
 
   if (page === 'settings') $('q-settings').hidden = false, $('q-main').hidden = true
   else $('q-settings').hidden = true, $('q-main').hidden = false
+
+  // After the visibility above, so the element that animates is the one now on screen.
+  const arrived: Painted = { page, session: state.transcript.sessionId }
+  const swap = swapFor(painted, arrived)
+  if (swap !== null) {
+    // Read *before* the DOM changes: a moment later the panel has already collapsed and
+    // the height its transition has to start from is gone.
+    swapFromHeight = windowEl.offsetHeight
+    playSwap(swap)
+  }
+  painted = arrived
 
   // The refusal recovery rule: the composer clears on send, and when the shell
   // later refuses, the words come back — only into an empty input.
@@ -938,6 +1133,21 @@ export function focusComposer(): void {
 
 export function bindStatic(): void {
   fillStaticIcons()
+  // The swap class *is* the animation; take it off when the animation is over. A class
+  // left behind would be replayed by the browser the next time the element goes from
+  // `hidden` to shown, which is not a swap.
+  for (const element of [$('q-settings'), $('q-main'), threadScroll, cardsEl]) {
+    element.addEventListener('animationend', event => {
+      if (event.animationName === 'q-swap-in') element.classList.remove(SWAP)
+    })
+  }
+  // The height transition's own end (or its cancellation) is the fast path to settling;
+  // the deadline armed with the pin is what makes it a guarantee.
+  for (const event of ['transitionend', 'transitioncancel'] as const) {
+    windowEl.addEventListener(event, transition => {
+      if (transition.propertyName === 'height') settleHeight()
+    })
+  }
   $('q-send').addEventListener('click', () => {
     if (lastState !== null) submitDraft(lastState)
   })

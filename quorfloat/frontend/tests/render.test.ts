@@ -8,7 +8,7 @@
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { beforeEach, describe, expect, test } from 'vitest'
+import { beforeEach, describe, expect, test, vi } from 'vitest'
 import { ICONS } from '../src/lib/icons'
 import type { PermissionOption, Snapshot } from '../src/lib/state'
 
@@ -355,5 +355,173 @@ describe('the model and reasoning lists', () => {
     expect(rows[0]?.getAttribute('aria-pressed')).toBe('true')
     expect(rows[1]?.getAttribute('aria-pressed')).toBe('true')
     expect(rows[2]?.getAttribute('aria-pressed')).toBe('false')
+  })
+})
+
+describe('swapFor', () => {
+  const painted = { page: 'main' as const, session: 'session-1' }
+
+  test('the first paint is the panel appearing, not a swap', () => {
+    expect(render.swapFor(null, painted)).toBeNull()
+  })
+
+  test('a repaint of the same content is not a swap', () => {
+    // The snapshots arrive on every transcript event while a turn streams, so a fade
+    // tied to "a render happened" would strobe.
+    expect(render.swapFor(painted, { page: 'main', session: 'session-1' })).toBeNull()
+  })
+
+  test('a conversation change is a session swap, including back to new-conversation', () => {
+    expect(render.swapFor(painted, { page: 'main', session: 'session-2' })).toBe('session')
+    expect(render.swapFor(painted, { page: 'main', session: null })).toBe('session')
+  })
+
+  test('a page change outranks a conversation change', () => {
+    // One fade can only say one thing; the settings page is the bigger move.
+    expect(render.swapFor(painted, { page: 'settings', session: 'session-2' })).toBe('page')
+  })
+})
+
+describe('the content swap on screen', () => {
+  const SWAP = 'q-swap'
+  const hasSwap = (id: string) => document.getElementById(id)?.classList.contains(SWAP) ?? false
+
+  test('the first paint animates nothing', () => {
+    render.renderState(snapshot())
+    expect(document.querySelectorAll(`.${SWAP}`)).toHaveLength(0)
+  })
+
+  test('the arriving page carries the swap, and the one it replaced does not', () => {
+    const state = snapshot()
+    render.renderState(state)
+
+    render.openSettings(state)
+    expect(hasSwap('q-settings')).toBe(true)
+    expect(hasSwap('q-main')).toBe(false)
+
+    render.backFromSettings(state)
+    expect(hasSwap('q-main')).toBe(true)
+    expect(hasSwap('q-settings')).toBe(false)
+  })
+
+  test('a conversation switch animates the thread, not the page around it', () => {
+    const base = snapshot()
+    render.renderState(base)
+    render.renderState(snapshot({ transcript: { ...base.transcript, sessionId: 'session-2' } }))
+    expect(hasSwap('q-thread-scroll')).toBe(true)
+    expect(hasSwap('q-main')).toBe(false)
+    expect(hasSwap('q-settings')).toBe(false)
+  })
+})
+
+describe('heightPlan', () => {
+  test('no swap: report what was measured, pin nothing', () => {
+    expect(render.heightPlan({ from: null, desired: 400, animate: true }))
+      .toEqual({ pin: false, report: 400 })
+  })
+
+  test('a height that did not move is not an animation', () => {
+    expect(render.heightPlan({ from: 400, desired: 400.4, animate: true }))
+      .toEqual({ pin: false, report: 400.4 })
+  })
+
+  test('growing reports the new height at once, so the shell can make room first', () => {
+    expect(render.heightPlan({ from: 200, desired: 400, animate: true }))
+      .toEqual({ pin: true, report: 400 })
+  })
+
+  test('shrinking keeps the room until the panel has finished collapsing', () => {
+    // Reporting the smaller height immediately would shrink the native window at once and
+    // the window would cut the collapse off mid-flight: the panel would be trimmed, not
+    // seen to close. This is the "grow reserves room, shrink releases at the end" half of
+    // the contract in `quorfloat/src/app/height.rs`.
+    expect(render.heightPlan({ from: 400, desired: 200, animate: true }))
+      .toEqual({ pin: true, report: 400 })
+  })
+
+  test('reduceMotion jumps to the new height, and says so at once', () => {
+    expect(render.heightPlan({ from: 400, desired: 200, animate: false }))
+      .toEqual({ pin: false, report: 200 })
+  })
+})
+
+describe('the panel height a swap animates', () => {
+  const panel = () => document.getElementById('q-window') as HTMLElement
+
+  // The markup starts the panel hidden (`.q-away`); the shell takes that class off when it
+  // shows the window, and every case here is about a panel somebody can see.
+  beforeEach(() => { panel().classList.remove('q-away') })
+
+  /**
+   * Settle a running height pin the way the browser does it — jsdom has no transitions,
+   * so the event the panel listens for has to be delivered by hand.
+   */
+  function settle(): void {
+    const event = new Event('transitionend') as Event & { propertyName: string }
+    Object.defineProperty(event, 'propertyName', { value: 'height' })
+    panel().dispatchEvent(event)
+  }
+
+  /**
+   * Put the panel back on the conversation page, settled, so that the swap a case is
+   * about is the next thing that happens.
+   * @param state - the snapshot to render with.
+   */
+  function onTheConversation(state: Snapshot): void {
+    render.renderState(state)
+    // Whatever an earlier case left on screen may itself be a swap; settle it, then make
+    // sure the page is the conversation so `openSettings` below is a page change.
+    render.backFromSettings(state)
+    settle()
+  }
+
+  test('a swap pins both ends, and the transition ending releases the pin', () => {
+    // `height: auto` is not interpolable, so both ends have to be told. (jsdom has no
+    // layout, so the numbers here are degenerate; `heightPlan` pins the policy.)
+    const state = snapshot()
+    onTheConversation(state)
+    expect(panel().style.height).toBe('')
+
+    render.openSettings(state)
+    expect(panel().style.height).not.toBe('')
+
+    settle()
+    expect(panel().style.height).toBe('')
+  })
+
+  test('a transition whose end never arrives is released by its deadline', () => {
+    // The failure this guards (2026-10-09): the panel was pinned, the window was hidden
+    // 90ms later, and a webview that stops rendering frames never delivers
+    // `transitionend` — the panel stayed at the old height and the shell was never told
+    // the new one, so nothing could correct it.
+    vi.useFakeTimers()
+    try {
+      const state = snapshot()
+      onTheConversation(state)
+      render.openSettings(state)
+      expect(panel().style.height).not.toBe('')
+
+      vi.advanceTimersByTime(2000)
+      expect(panel().style.height).toBe('')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  test('a panel on its way out is not pinned at all', () => {
+    const state = snapshot()
+    onTheConversation(state)
+    panel().classList.add('q-away')
+
+    render.openSettings(state)
+    expect(panel().style.height).toBe('')
+  })
+
+  test('reduceMotion leaves the panel content-sized', () => {
+    const state = snapshot()
+    state.settings.reduceMotion = true
+    onTheConversation(state)
+    render.openSettings(state)
+    expect(panel().style.height).toBe('')
   })
 })

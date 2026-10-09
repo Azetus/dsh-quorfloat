@@ -25,6 +25,17 @@
   --q-speed: 180ms;
   /* Ours: the design has no opinion about an error colour. */
   --q-bad: light-dark(#b3261e, #ff8a80);
+  /* Ours: how long the panel's own box takes to follow a swap's height change (see
+     `.q-window`). The shell waits `2 ×` this for the platform to make room
+     (`WAIT_FOR_NATIVE_ROOM_MS` in `quorfloat/src/app/height.rs`), so the two move
+     together and this number is half of that contract. */
+  --q-height: 220ms;
+  /* Ours: how long swapped-in content takes to land (see `.q-swap`). Longer than
+     `--q-speed` on purpose — the chrome moves in 180ms, but a page or a
+     conversation *arriving* should settle after the shell has finished easing the
+     window to its new height (220ms), not race it. User asked for the slower,
+     gentler transition on 2026-10-09. */
+  --q-swap: 260ms;
 }
 
 html,
@@ -56,13 +67,21 @@ button:hover { background: var(--q-soft); }
 .q-window {
   width: 100%;
   max-width: 640px;
-  margin: auto;
+  /* Anchored to the top, not centred: the panel grows and shrinks downward from there
+     (dsh-quorfloat.md §11), so a height change never also moves the top edge — and during
+     a swap's collapse the box closes in place instead of drifting. In the steady state the
+     native window is exactly panel + shadow room, so the two are the same thing; they
+     differ only while a resize is in flight. */
+  margin: 0 auto;
   background: var(--q-bg);
   border: 1px solid var(--q-line);
   border-radius: 18px;
   box-shadow: 0 16px 42px var(--q-shadow), 0 3px 8px var(--q-shadow);
   transform-origin: 50% 0;
-  transition: opacity var(--q-speed), transform var(--q-speed);
+  /* `height` is in here for the swap's own box animation (`--q-height`): the panel is
+     content-sized, so `render.ts` pins both ends for the transition and releases the pin
+     when it ends. Without an explicit height there is nothing to interpolate. */
+  transition: opacity var(--q-speed), transform var(--q-speed), height var(--q-height);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -78,6 +97,20 @@ button:hover { background: var(--q-soft); }
   transform: translateY(-6px) scale(0.985);
   pointer-events: none;
 }
+
+/* ── content swaps (ours) ────────────────────────────────────────────── */
+
+/* A page or a conversation arriving: the panel's own enter motion (`.q-window`
+   settles down from 6px up) at content scale, so the new content lands the same
+   way the panel itself does while the shell eases the native window to the new
+   height. Entrance only — `render.ts` puts the class on the arriving element and
+   the outgoing one is out of the layout before the first frame. `--q-swap` rather
+   than `--q-speed`: this one is meant to be the gentler of the two. */
+@keyframes q-swap-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+.q-swap { animation: q-swap-in var(--q-swap) ease; }
 
 /* ── top bar ─────────────────────────────────────────────────────────── */
 
@@ -364,7 +397,9 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
   .q-window { transition: none; }
   .q-switch { transition: none; }
   .q-spin svg { animation: none; }
+  .q-swap { animation: none; }
 }
 .q-reduce-motion .q-window { transition: none; }
 .q-reduce-motion .q-switch { transition: none; }
 .q-reduce-motion .q-spin svg { animation: none; }
+.q-reduce-motion .q-swap { animation: none; }
