@@ -695,7 +695,7 @@ fn is_bare_typing_key(key: global_hotkey::hotkey::Code) -> bool {
 mod tests {
     use super::*;
     use crate::app::session::test_support::{
-        approval_open, follow_a_conversation, hello_ok, identity, RecordingSink,
+        approval_open, follow_a_conversation, identity, notification, RecordingSink,
     };
     use crate::app::session::interaction::QuestionAnswer;
     use crate::ipc::rpc::Inbound;
@@ -821,6 +821,33 @@ mod tests {
     }
 
     #[test]
+    fn a_new_conversation_has_no_statistics_to_show() {
+        // The reported bug (2026-10-09): after "新建会话" the footer kept drawing the last
+        // session's token counts and cache hits under an empty panel. The figures are a
+        // conversation's, so an empty panel has none.
+        let (mut session, mut sink) = followed();
+        session.on_frame(
+            notification(
+                "session/stats",
+                serde_json::json!({"sessionId": "session-1",
+                    "stats": {"turns": 2, "steps": 2, "totalTokens": 15_600, "cacheHitPercent": 50.0}}),
+            ),
+            &mut sink,
+        );
+        assert!(
+            snapshot(&session, &view())["session"]["stats"].is_object(),
+            "the followed conversation has figures",
+        );
+
+        let _ = start_new(&mut session, &mut sink);
+        assert_eq!(
+            snapshot(&session, &view())["session"]["stats"],
+            Value::Null,
+            "and a panel with no conversation has none",
+        );
+    }
+
+    #[test]
     fn a_submit_with_nothing_chosen_creates_in_the_ladders_workspace() {
         // The bug (2026-10-09): submitting in the new-conversation state failed with "choose a
         // workspace" whenever the panel had nothing of its own to send — which is the normal
@@ -850,7 +877,7 @@ mod tests {
     fn the_panels_own_choice_outranks_the_ladder_and_a_stale_one_falls_through() {
         let created_in = |chosen: Option<&str>| {
             let (mut session, mut sink) = lists_without_a_conversation();
-            submit(&mut session, &mut sink, "在吗", chosen, None);
+            let _ = submit(&mut session, &mut sink, "在吗", chosen, None);
             let create = sink
                 .frames
                 .iter()
@@ -1198,7 +1225,7 @@ mod tests {
     fn lists_without_a_conversation() -> (Session, RecordingSink) {
         let (mut session, mut sink) = followed();
         list_workspaces(&mut session, &mut sink);
-        start_new(&mut session, &mut sink);
+        let _ = start_new(&mut session, &mut sink);
         assert!(session.follow().session_id().is_none(), "new-conversation state");
         assert!(!session.follow().workspaces().is_empty(), "the lists survive the detach");
         (session, sink)

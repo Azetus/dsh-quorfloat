@@ -310,6 +310,9 @@ pub struct Session {
     setting_failure: Option<String>,
     /// The conversation's statistics, as the host last reported them.
     stats: Option<Stats>,
+    /// Which conversation those statistics describe. `stats` outlives a detach (nothing else
+    /// needs to forget it), so the pair is what makes [`Session::stats`] answerable.
+    stats_session: Option<String>,
     next_request_id: i64,
     handshake_sent: bool,
     handshake_done: bool,
@@ -435,6 +438,7 @@ impl Session {
             options: None,
             setting_failure: None,
             stats: None,
+            stats_session: None,
             next_request_id: 1,
             handshake_sent: false,
             handshake_done: false,
@@ -1160,6 +1164,7 @@ impl Session {
             options.current_permission = None;
         }
         self.stats = None;
+        self.stats_session = None;
         self.setting_failure = None;
     }
 
@@ -1175,9 +1180,18 @@ impl Session {
         self.setting_failure.as_deref()
     }
 
-    /// The conversation's statistics, if the host has reported any.
+    /// The statistics of the conversation on screen, if there is one and the host reported any.
+    ///
+    /// The numbers are a *conversation's* — token counts and cache hits describe the turns that
+    /// happened in it — so this answers `None` twice over: while nothing is followed (the
+    /// new-conversation state after "新建会话" keeps the last session's figures in hand, and the
+    /// footer drew them under an empty panel — 2026-10-09), and while they belong to a session
+    /// other than the one on screen.
     #[must_use]
     pub fn stats(&self) -> Option<Stats> {
+        if self.follow.session_id() != self.stats_session.as_deref() {
+            return None;
+        }
         self.stats
     }
 
@@ -1206,6 +1220,7 @@ impl Session {
         };
         let ran = recorded.steps > 0;
         self.stats = Some(recorded);
+        self.stats_session = session_id.map(str::to_owned);
 
         // A conversation this panel created is attached the moment it exists, so the options read
         // that follows the attach arrives *before* Harness has recorded what the conversation will
