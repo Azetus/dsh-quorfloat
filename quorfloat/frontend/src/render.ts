@@ -691,12 +691,16 @@ function renderConfigMenu(state: Snapshot, menu: HTMLElement): void {
   })
   menu.append(back)
   popHead(menu, '模型')
+  // The host's catalog carries a description per model and per effort, and the
+  // design's own sub-list deliberately spends no line on it (`option(label, selected,
+  // onPick)`): a list of names is scanned, a list of paragraphs is read. User decided
+  // on 2026-10-09 to drop them from both lists (see progress.md).
   for (const model of options.models) {
     const selected = current?.model === model.id && current?.provider === model.provider
     menu.append(option(model.name, selected, () => {
       closeMenus()
       void api.selectModel(model.provider, model.id, current?.reasoningEffort ?? model.defaultEffort ?? null)
-    }, model.description ?? ''))
+    }))
   }
   separator(menu)
   popHead(menu, '推理等级')
@@ -704,7 +708,7 @@ function renderConfigMenu(state: Snapshot, menu: HTMLElement): void {
     menu.append(option(effort.name, current?.reasoningEffort === effort.id, () => {
       closeMenus()
       if (current !== null) void api.selectModel(current.provider, current.model, effort.id)
-    }, effort.description ?? ''))
+    }))
   }
   if ((currentModel?.efforts ?? []).length === 0) hint(menu, '当前模型没有可选档位。')
 }

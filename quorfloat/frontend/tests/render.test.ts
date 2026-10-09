@@ -300,3 +300,60 @@ describe('the footer permission entry', () => {
     expect(entryGlyph()).toBe(assetBody('shield-check'))
   })
 })
+
+describe('the model and reasoning lists', () => {
+  // A catalog with descriptions on both levels: the host sends them, and the design's
+  // own model/effort sub-list drops them (`option(label, selected, onPick)`), so the
+  // panel must not grow a second text line the design never had.
+  const models = [{
+    provider: 'deepseek',
+    providerName: 'DeepSeek',
+    id: 'v41-flash',
+    name: 'DeepSeek-V41-Flash',
+    description: '面向日常对话的快速模型',
+    efforts: [
+      { id: 'high', name: '高', description: '更慢，也更仔细' },
+      { id: 'low', name: '低', description: null },
+    ],
+    defaultEffort: 'high',
+  }]
+
+  function configState(): Snapshot {
+    const base = snapshot()
+    return snapshot({
+      session: {
+        ...base.session,
+        options: {
+          models,
+          current: { provider: 'deepseek', model: 'v41-flash', reasoningEffort: 'high' },
+          permissions: [],
+          permission: null,
+        },
+      },
+    })
+  }
+
+  function openConfigMenu(): HTMLElement[] {
+    const state = configState()
+    render.renderState(state)
+    render.closeMenu()
+    render.toggleMenu(state, 'q-config')
+    return [...document.querySelectorAll<HTMLElement>('#q-config-menu .q-option')]
+  }
+
+  test('every model and reasoning row is one line of text', () => {
+    const rows = openConfigMenu()
+    // One model plus its two efforts.
+    expect(rows).toHaveLength(3)
+    expect(rows.every(row => row.querySelector('small') === null)).toBe(true)
+    expect(rows.map(row => row.querySelector('.q-option-main')?.textContent))
+      .toEqual(['DeepSeek-V41-Flash', '高', '低'])
+  })
+
+  test('the row still marks the model and the effort in force', () => {
+    const rows = openConfigMenu()
+    expect(rows[0]?.getAttribute('aria-pressed')).toBe('true')
+    expect(rows[1]?.getAttribute('aria-pressed')).toBe('true')
+    expect(rows[2]?.getAttribute('aria-pressed')).toBe('false')
+  })
+})
