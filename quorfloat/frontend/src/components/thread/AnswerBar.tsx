@@ -4,8 +4,6 @@ import { useState } from 'react'
 
 /** Props for {@link AnswerBar}. */
 export interface AnswerBarProps {
-  /** Whether the turn is still being worked on. */
-  readonly working: boolean
   /** The answer's raw Markdown, for the clipboard. */
   readonly markdown: string
 }
@@ -13,18 +11,21 @@ export interface AnswerBarProps {
 /**
  * Render the answer bar.
  *
+ * It is the answer's own footer, so it exists only once the answer is finished: while the text
+ * streams there is nothing to report and a row below the text would only jitter.
+ *
  * The answer is copied as the raw Markdown, not the rendered text — that is what a reader
  * pasting it somewhere else wants back.
  *
- * @param props - working state and the raw Markdown.
+ * @param props - the raw Markdown.
  * @returns the bar.
  */
-export function AnswerBar({ working, markdown }: AnswerBarProps) {
+export function AnswerBar({ markdown }: AnswerBarProps) {
   const [note, setNote] = useState<string | null>(null)
   return (
     <div className="q-answerbar">
-      <span>{working ? '正在生成' : '回答完成'}</span>
-      {!working && markdown.trim() !== '' && (
+      <span>回答完成</span>
+      {markdown.trim() !== '' && (
         <button
           type="button"
           onClick={() => {

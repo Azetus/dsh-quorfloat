@@ -46,7 +46,11 @@ export function Turn({ turn, open, onToggle, sep = false }: TurnProps) {
       {turn.answer !== null && (
         <>
           <AnswerBody markdown={raw} />
-          <AnswerBar working={turn.inProgress} markdown={raw} />
+          {/* No bar while the answer streams (user decision 2026-10-09): a row that grows under
+              the streaming text jitters — and "正在生成" is something the turn's own fold row
+              already says. The completion line appears with the answer's end, where it states a
+              fact instead of forecasting one. */}
+          {!turn.inProgress && <AnswerBar markdown={raw} />}
         </>
       )}
     </article>
