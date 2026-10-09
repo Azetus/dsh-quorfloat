@@ -3,11 +3,15 @@
 // them back to the Rust snake_case names.
 
 import { invoke } from '@tauri-apps/api/core'
+import type { QuestionAnswer } from './lib/questions'
 
 export const api = {
   submit: (text: string, workspaceId: string | null) => invoke('submit', { text, workspaceId }),
   cancel: () => invoke('cancel'),
   answerApproval: (interactionId: string, allow: boolean) => invoke('answer_approval', { interactionId, allow }),
+  /** Answer a model question: one entry per question, `selected` holding option labels. */
+  answerQuestion: (interactionId: string, answers: readonly QuestionAnswer[]) =>
+    invoke('answer_question', { interactionId, answers }),
   selectSession: (sessionId: string) => invoke('select_session', { sessionId }),
   startNew: () => invoke('start_new'),
   pin: (sessionId: string | null) => invoke('pin', { sessionId }),

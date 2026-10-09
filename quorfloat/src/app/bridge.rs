@@ -15,7 +15,9 @@ use serde_json::{json, Value};
 
 use crate::app::height::Height;
 use crate::app::preferences::Preferences;
-use crate::app::session::interaction::{ApprovalVerdict, Interaction, InteractionState};
+use crate::app::session::interaction::{
+    ApprovalVerdict, Interaction, InteractionState, Question, QuestionAnswer, SentAnswer,
+};
 use crate::app::session::transcript::{Block, Entry};
 use crate::app::session::{Delivery, FrameSink, Session, SessionOptions, Stats};
 use crate::app::window_settings::WindowSettings;
@@ -184,12 +186,23 @@ fn block_view(block: &Block) -> Value {
 }
 
 /// One card, in the frontend's vocabulary.
+///
+/// `answers` is what *this panel* sent for a question card, not the host's copy: it is
+/// empty while the card is pending, and it is carried for `submitting` and `applied` so
+/// the card can still show the user what they chose after the widgets are gone. The
+/// verdict fields stay approval-only, exactly as they were.
 fn interaction_view(interaction: &Interaction) -> Value {
-    let (state, verdict, refusal) = match interaction.state() {
-        InteractionState::Pending => ("pending", None, None),
-        InteractionState::Submitting { verdict } => ("submitting", Some(verdict.wire()), None),
-        InteractionState::Applied { verdict } => ("applied", Some(verdict.wire()), None),
-        InteractionState::Refused { reason } => ("refused", None, Some(reason.as_str())),
+    let (state, verdict, refusal, answers) = match interaction.state() {
+        InteractionState::Pending => ("pending", None, None, &[][..]),
+        InteractionState::Submitting { answer } => {
+            let (verdict, answers) = sent_view(answer);
+            ("submitting", verdict, None, answers)
+        }
+        InteractionState::Applied { answer } => {
+            let (verdict, answers) = sent_view(answer);
+            ("applied", verdict, None, answers)
+        }
+        InteractionState::Refused { reason } => ("refused", None, Some(reason.as_str()), &[][..]),
     };
     json!({
         "id": interaction.id(),
@@ -201,9 +214,52 @@ fn interaction_view(interaction: &Interaction) -> Value {
         "actionable": interaction.is_actionable(),
         "toolName": interaction.tool_name(),
         "detail": interaction.detail(DISPLAY_LOCALE),
-        "questions": interaction.questions(),
+        "questions": interaction.questions().iter().map(question_view).collect::<Vec<_>>(),
+        "answers": answers.iter().map(answer_view).collect::<Vec<_>>(),
         "questionCount": interaction.question_count(),
     })
+}
+
+/// What a settled answer consisted of, split into the two fields the frontend reads.
+///
+/// An approval carries a verdict and no answers; a question carries answers and no
+/// verdict. Both live in one match so a new kind of answer cannot be half-projected.
+///
+/// @param answer - what was sent.
+/// @returns the `verdict` field and the answers to show, in that order.
+fn sent_view(answer: &SentAnswer) -> (Option<&'static str>, &[QuestionAnswer]) {
+    match answer {
+        SentAnswer::Approval(verdict) => (Some(verdict.wire()), &[]),
+        SentAnswer::Question(answers) => (None, answers.as_slice()),
+    }
+}
+
+/// One question, in the frontend's vocabulary.
+///
+/// Every optional field is written as an explicit `null` rather than omitted, because
+/// the frontend's type says `string | null` and a missing key would be a different type
+/// to it than an absent heading.
+fn question_view(question: &Question) -> Value {
+    json!({
+        "id": question.id,
+        "header": question.header,
+        "question": question.question,
+        "detail": question.detail,
+        "options": question
+            .options
+            .iter()
+            .map(|option| json!({ "label": option.label, "description": option.description }))
+            .collect::<Vec<_>>(),
+        "multiSelect": question.multi_select,
+    })
+}
+
+/// One answer this panel sent, in the frontend's vocabulary.
+///
+/// `custom` is `null` rather than a missing key, matching the `custom?: string` the
+/// frontend sends and the nullability it reads back.
+fn answer_view(answer: &QuestionAnswer) -> Value {
+    json!({ "id": answer.id, "selected": answer.selected, "custom": answer.custom })
 }
 
 /// What became of an outbound request, in the frontend's vocabulary.
@@ -327,6 +383,26 @@ pub fn answer_approval(
 ) -> Value {
     let verdict = if allow { ApprovalVerdict::AllowOnce } else { ApprovalVerdict::Reject };
     json!({ "sent": session.answer_interaction(interaction_id, verdict, sink) })
+}
+
+/// `answer_question` — settle one question card with what the user chose.
+///
+/// A thin call, like [`answer_approval`]: the caps, the validation and the frame all
+/// belong to the session, so the bridge cannot grow a second opinion about what a
+/// complete answer is.
+///
+/// @param interaction_id - which card.
+/// @param answers - one answer per question, `selected` holding option **labels**.
+/// @returns whether an answer was sent (the session refuses stale, resolved,
+///   over-large, and incomplete answers, logging why).
+#[must_use]
+pub fn answer_question(
+    session: &mut Session,
+    sink: &mut dyn FrameSink,
+    interaction_id: &str,
+    answers: Vec<QuestionAnswer>,
+) -> Value {
+    json!({ "sent": session.answer_question(interaction_id, answers, sink) })
 }
 
 /// `select_session` — follow a different conversation.
@@ -583,6 +659,7 @@ mod tests {
     use crate::app::session::test_support::{
         approval_open, follow_a_conversation, identity, RecordingSink,
     };
+    use crate::app::session::interaction::QuestionAnswer;
     use crate::ipc::rpc::Inbound;
 
     /// The shell view the snapshot tests read through.
@@ -706,6 +783,103 @@ mod tests {
     }
 
     #[test]
+    fn a_question_card_is_projected_with_objects_and_empty_answers() {
+        // The frontend half is written against this shape right now: `questions` is an
+        // array of objects (not `[header, text]` pairs), every optional field is an
+        // explicit null, and `answers` is what this panel sent — empty while pending.
+        let (mut session, mut sink) = followed();
+        session.on_frame(question_open(), &mut sink);
+        let value = snapshot(&session, &view());
+        let card = &value["interactions"][0];
+        assert_eq!(card["id"], "question-1");
+        assert_eq!(card["kind"], "question");
+        assert_eq!(card["state"], "pending");
+        assert_eq!(card["actionable"], true);
+        assert_eq!(card["verdict"], Value::Null, "a verdict is approval-only");
+        assert_eq!(card["refusalReason"], Value::Null);
+        assert_eq!(card["toolName"], Value::Null);
+        assert_eq!(card["detail"], Value::Null);
+        assert_eq!(card["questionCount"], 2);
+        assert_eq!(card["answers"], json!([]));
+        assert_eq!(
+            card["questions"],
+            json!([
+                {
+                    "id": "q1",
+                    "header": "部署目标",
+                    "question": "部署到哪个环境？",
+                    "detail": "发布前的最后一个确认",
+                    "options": [
+                        {"label": "staging", "description": "预发"},
+                        {"label": "production", "description": null},
+                    ],
+                    "multiSelect": false,
+                },
+                {
+                    "id": "q2",
+                    "header": null,
+                    "question": "需要通知谁？",
+                    "detail": null,
+                    "options": [{"label": "ops", "description": null}],
+                    "multiSelect": true,
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn answering_a_question_sends_the_wire_answers_and_shows_them_back() {
+        let (mut session, mut sink) = followed();
+        session.on_frame(question_open(), &mut sink);
+        let answers = vec![
+            QuestionAnswer { id: "q1".to_owned(), selected: vec!["staging".to_owned()], custom: None },
+            QuestionAnswer { id: "q2".to_owned(), selected: vec!["ops".to_owned()], custom: Some("值班群".to_owned()) },
+        ];
+        let result = answer_question(&mut session, &mut sink, "question-1", answers);
+        assert_eq!(result["sent"], true);
+        let frame = sink.frames.last().expect("an answer");
+        assert_eq!(frame["method"], "interaction/answer");
+        assert_eq!(frame["params"]["interactionId"], "question-1");
+        assert_eq!(
+            frame["params"]["answer"]["answers"],
+            json!([
+                {"id": "q1", "selected": ["staging"]},
+                {"id": "q2", "selected": ["ops"], "custom": "值班群"},
+            ])
+        );
+        let value = snapshot(&session, &view());
+        assert_eq!(value["interactions"][0]["state"], "submitting");
+        assert_eq!(value["interactions"][0]["verdict"], Value::Null);
+        assert_eq!(
+            value["interactions"][0]["answers"],
+            json!([
+                {"id": "q1", "selected": ["staging"], "custom": null},
+                {"id": "q2", "selected": ["ops"], "custom": "值班群"},
+            ]),
+            "the card still says what the user chose",
+        );
+    }
+
+    /// The host's `interaction/open` for the two-question fixture the tests above read.
+    fn question_open() -> Inbound {
+        Inbound::Notification {
+            method: "interaction/open".to_owned(),
+            params: Some(serde_json::json!({
+                "interactionId": "question-1",
+                "sessionId": "session-1",
+                "kind": "question",
+                "payload": {"questions": [
+                    {"id": "q1", "header": "部署目标", "question": "部署到哪个环境？",
+                     "detail": "发布前的最后一个确认",
+                     "options": [{"label": "staging", "description": "预发"}, {"label": "production"}]},
+                    {"id": "q2", "question": "需要通知谁？", "options": [{"label": "ops"}],
+                     "multiSelect": true},
+                ]},
+            })),
+        }
+    }
+
+    #[test]
     fn the_settings_page_cannot_set_a_bare_typing_key() {
         let error = validate_hotkey("M").expect_err("a bare letter is refused");
         assert!(error.contains("裸按键"), "{error}");
@@ -771,7 +945,7 @@ mod tests {
             pinned.workspace = Some("workspace-9".to_owned());
             pinned.save(&path);
         }
-        pin(&mut session, &mut sink, Some("session-1"), Some(&path));
+        let _ = pin(&mut session, &mut sink, Some("session-1"), Some(&path));
         let saved = crate::app::pinned::Pinned::load(&path);
         assert_eq!(saved.workspace.as_deref(), Some("ws-project"), "the stale pin was replaced by the projection");
         let _ = std::fs::remove_file(&path);
@@ -784,7 +958,7 @@ mod tests {
         let (mut session, mut sink) = followed();
         // No workspaces list was received: the cwd cannot be resolved, and an
         // absent projection is absent, never guessed.
-        pin(&mut session, &mut sink, Some("session-1"), Some(&path));
+        let _ = pin(&mut session, &mut sink, Some("session-1"), Some(&path));
         let saved = crate::app::pinned::Pinned::load(&path);
         assert_eq!(saved.workspace, None);
         let _ = std::fs::remove_file(&path);
@@ -819,7 +993,7 @@ mod tests {
     #[test]
     fn a_summon_without_a_pin_lands_on_a_new_conversation_state() {
         let (mut session, mut sink) = followed();
-        on_show(&mut session, &mut sink);
+        let _ = on_show(&mut session, &mut sink);
         assert_eq!(session.follow().session_id(), None, "the panel left the conversation");
         assert!(sink.frames.iter().any(|frame| frame["method"] == "session/detach"), "the detach was told to the host: {:?}", sink.frames);
         assert!(!sink.frames.iter().any(|frame| frame["method"] == "session/create"), "nothing is created before a submit: {:?}", sink.frames);
@@ -829,7 +1003,7 @@ mod tests {
     fn a_summon_rejoins_the_pinned_conversation() {
         let (mut session, mut sink) = followed();
         session.pin_conversation(Some("session-2".to_owned()), &mut sink);
-        on_show(&mut session, &mut sink);
+        let _ = on_show(&mut session, &mut sink);
         assert!(sink.frames.iter().filter(|frame| frame["method"] == "session/attach").count() >= 1, "the pin re-attached: {:?}", sink.frames);
         assert!(!sink.frames.iter().any(|frame| frame["method"] == "session/detach"), "no detach on the continuation path: {:?}", sink.frames);
     }
@@ -839,7 +1013,7 @@ mod tests {
         let (mut session, mut sink) = followed();
         session.pin_conversation(Some("session-1".to_owned()), &mut sink);
         let frames_before = sink.frames.len();
-        on_show(&mut session, &mut sink);
+        let _ = on_show(&mut session, &mut sink);
         assert_eq!(sink.frames.len(), frames_before, "no detach, no re-attach");
     }
 
@@ -867,7 +1041,7 @@ mod tests {
             &mut sink,
         );
         assert_eq!(session.follow().session_id(), Some("session-2"));
-        on_show(&mut session, &mut sink);
+        let _ = on_show(&mut session, &mut sink);
         let last_attach = sink
             .frames
             .iter()

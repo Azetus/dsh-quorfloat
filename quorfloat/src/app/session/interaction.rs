@@ -5,24 +5,28 @@
 //! try again, and it can expire. This module owns that lifetime, which is why it is
 //! separate from [`super::Session`] — whose job is the wire, not the rules.
 //!
-//! Two kinds arrive, and this build claims only one of them:
+//! Two kinds arrive, and this build answers both:
 //!
-//! - an **approval**, which a click can settle;
-//! - a **question**, which needs option widgets this build does not have yet, so it is
-//!   reported and handed back to the Harness window (`docs/dsh-quorfloat.md` §6).
+//! - an **approval**, settled with one word from a closed vocabulary;
+//! - a **question**, settled with the option labels the user selected — but only when
+//!   the request is well-formed and small enough that nothing has to be hidden or
+//!   guessed at (see [`Interaction::is_actionable`]). A request outside those caps is
+//!   still reported so the user can see what was asked, and is handed back to the
+//!   Harness window to answer there.
 //!
-//! The kind therefore travels on the wire instead of being inferred, and
-//! [`InteractionKind::Approval`] is the one this build names in
-//! [`crate::ipc::protocol::CAPABILITIES`].
+//! The kind therefore travels on the wire instead of being inferred, and both
+//! [`InteractionKind::Approval`] and [`InteractionKind::Question`] are what this build
+//! names in [`crate::ipc::protocol::CAPABILITIES`].
 
 use serde_json::Value;
 
 /// Which waterfall an interaction came from.
 ///
 /// The two are not variations of one thing: an approval is answered with a word
-/// from a closed vocabulary, while a question is answered with selected option ids.
-/// That difference is why this build can answer the first and can only *report* the
-/// second, and why the kind travels on the wire instead of being inferred.
+/// from a closed vocabulary, while a question is answered with the labels of the
+/// options the user picked. That difference is why the kind travels on the wire
+/// instead of being inferred, and why each kind has its own answer type
+/// ([`ApprovalVerdict`] against [`QuestionAnswer`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InteractionKind {
     /// A tool call is asking permission — in practice, to escalate its sandbox.
@@ -79,6 +83,88 @@ impl ApprovalVerdict {
     }
 }
 
+/// One option a question offered.
+///
+/// The **label** is what travels back, not an id: the upstream answer shape carries
+/// the text the user saw, so a renumbered option list cannot silently move an answer
+/// onto a different choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionOption {
+    /// The option's own text, which is also its wire value.
+    pub label: String,
+    /// The asker's explanation of the option, when it wrote one.
+    pub description: Option<String>,
+}
+
+/// One question of a request, as the panel shows and answers it.
+///
+/// Only the fields an answer needs are modelled. Everything here is bounded by
+/// `MAX_TEXT_CHARS` on the way in, because this text came from a model or a hook and
+/// the panel is the surface that has to lay it out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Question {
+    /// The id the answer must name.
+    pub id: String,
+    /// A short heading over the question, when the asker wrote one.
+    pub header: Option<String>,
+    /// The question itself.
+    pub question: String,
+    /// Extra context for the question, when the asker wrote any.
+    pub detail: Option<String>,
+    /// The options the answer may select from.
+    pub options: Vec<QuestionOption>,
+    /// Whether more than one option may be selected. Single-select is the default.
+    pub multi_select: bool,
+}
+
+/// What the panel sent as the answer to one question.
+///
+/// This is the type the UI's choice is carried in, and it is separate from
+/// [`Question`] because a question is what was *asked* while this is what was
+/// *answered* — validation compares the two, which it could not do if they shared a
+/// type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionAnswer {
+    /// The id of the question this answers.
+    pub id: String,
+    /// The labels of the options the user selected.
+    pub selected: Vec<String>,
+    /// Free text for an "Other" answer, when the user typed one.
+    pub custom: Option<String>,
+}
+
+/// What an answer this panel sent consisted of.
+///
+/// [`InteractionState::Submitting`] and [`InteractionState::Applied`] carry this rather
+/// than a bare verdict so that a card can still say *what* was sent for either kind —
+/// an approval can be re-read from one word, but a question's answer would otherwise be
+/// lost the moment the frame left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SentAnswer {
+    /// An approval decision.
+    Approval(ApprovalVerdict),
+    /// The answers to a question card's questions.
+    Question(Vec<QuestionAnswer>),
+}
+
+impl SentAnswer {
+    /// How this answer reads in a breadcrumb.
+    ///
+    /// Public because both the marker written when the answer goes out and the one
+    /// written when the host settles it must say the same thing about the same send —
+    /// two summaries would be two chances to disagree.
+    ///
+    /// @returns a short, log-safe summary — the approval term, or how many questions
+    ///   were answered, because a marker must not carry a model's text.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Approval(verdict) => verdict.wire().to_owned(),
+            Self::Question(answers) => format!("{} answered", answers.len()),
+        }
+    }
+}
+
 /// Where one interaction stands, from this panel's point of view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InteractionState {
@@ -87,12 +173,12 @@ pub enum InteractionState {
     /// The answer was sent; the host has not said what it did with it yet.
     Submitting {
         /// What was sent, kept so the card can still say what it asked for.
-        verdict: ApprovalVerdict,
+        answer: SentAnswer,
     },
     /// The host applied the answer. The end of the line: the grant is one-shot.
     Applied {
         /// What was applied.
-        verdict: ApprovalVerdict,
+        answer: SentAnswer,
     },
     /// The host refused the answer — another surface answered first, the asker
     /// withdrew, or the claim expired. **Not an error and not retryable**: the
@@ -123,8 +209,25 @@ pub struct Interaction {
 /// the window an unbounded string to lay out.
 const MAX_TEXT_CHARS: usize = 600;
 
-/// How many questions of one request are summarised for display.
+/// How many questions of one request are summarised for a card that cannot be answered.
+///
+/// A report-only card is there to be *read*, so every extra question is height the user
+/// scrolls past for a request they cannot settle anyway. Answerable cards use
+/// `MAX_QUESTIONS_ANSWERED`, which is a correctness bound rather than a display one.
 const MAX_QUESTIONS_SHOWN: usize = 3;
+
+/// How many questions this build will answer in one card.
+///
+/// An answer has to cover everything the user was shown, and a form longer than this
+/// stops being something a floating panel can present honestly. A request that exceeds
+/// it is reported and handed back to the Harness window rather than half-answered.
+const MAX_QUESTIONS_ANSWERED: usize = 4;
+
+/// How many options one question may offer and still be answered here.
+///
+/// Beyond this the option list is truncated for layout, and answering a truncated list
+/// would mean sending an answer to a question the user never fully saw.
+const MAX_OPTIONS_PER_QUESTION: usize = 12;
 
 /// How many pending cards are kept.
 ///
@@ -160,9 +263,20 @@ impl Interaction {
     }
 
     /// Whether the user can still act on this card.
+    ///
+    /// An approval is always actionable while it is pending — one word settles it and
+    /// nothing about the payload can make that word a guess. A question is actionable
+    /// only when it is **well-formed and small enough**; see [`Interaction::question_problem`]
+    /// for what is checked and why an awkward request is refused rather than trimmed.
+    ///
+    /// @returns whether a click on this card can send an answer.
     #[must_use]
     pub fn is_actionable(&self) -> bool {
-        self.kind == InteractionKind::Approval && self.state == InteractionState::Pending
+        self.state == InteractionState::Pending
+            && match self.kind {
+                InteractionKind::Approval => true,
+                InteractionKind::Question => self.question_problem().is_none(),
+            }
     }
 
     /// The tool whose call is asking for permission.
@@ -202,42 +316,92 @@ impl Interaction {
         Some(truncate(reason))
     }
 
-    /// Up to `MAX_QUESTIONS_SHOWN` of the questions being asked, as display text.
+    /// The questions this card shows, bounded to what the panel can lay out.
     ///
-    /// This build has no way to *answer* a question (see [`super::Session::answer_interaction`]),
-    /// but it can still tell the user enough to decide whether to switch to the
-    /// Harness window — which is the entire reason the host announces questions to
-    /// the panel instead of staying silent.
+    /// A card this build can answer is shown with **all** of its questions (capped at
+    /// `MAX_QUESTIONS_ANSWERED`, which is also the answering cap, so an answer always
+    /// covers exactly what the user saw). A card that cannot be answered is shown with
+    /// at most `MAX_QUESTIONS_SHOWN`, because it exists to tell the user what was
+    /// asked before they switch to the Harness window.
     ///
-    /// @returns `(header, text)` pairs, skipping entries without readable text.
+    /// @returns the questions in display order, capped as described; empty for an
+    ///   approval or an unreadable payload.
     #[must_use]
-    pub fn questions(&self) -> Vec<(Option<String>, String)> {
-        let Some(items) = self.payload.get("questions").and_then(Value::as_array) else {
-            return Vec::new();
+    pub fn questions(&self) -> Vec<Question> {
+        let cap = if self.question_problem().is_none() {
+            MAX_QUESTIONS_ANSWERED
+        } else {
+            MAX_QUESTIONS_SHOWN
         };
-        items
-            .iter()
-            .filter_map(|item| {
-                let text = item.get("question").and_then(Value::as_str)?.trim();
-                if text.is_empty() {
-                    return None;
-                }
-                let header = item
-                    .get("header")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(truncate);
-                Some((header, truncate(text)))
-            })
-            .take(MAX_QUESTIONS_SHOWN)
-            .collect()
+        parse_questions(self.payload.get("questions")).into_iter().take(cap).collect()
     }
 
     /// How many questions the request contains, including ones not shown.
+    ///
+    /// @returns the raw count from the payload, or zero when it has no question list.
     #[must_use]
     pub fn question_count(&self) -> usize {
         self.payload.get("questions").and_then(Value::as_array).map_or(0, Vec::len)
+    }
+
+    /// Why this card's questions cannot be answered here, if they cannot.
+    ///
+    /// A question card is answerable only when nothing has to be hidden or guessed at:
+    /// 1..=`MAX_QUESTIONS_ANSWERED` questions, every question carrying a non-empty id
+    /// and non-empty question text, no two questions sharing an id, and at most
+    /// `MAX_OPTIONS_PER_QUESTION` options per question. The rule behind all of them is
+    /// the same — **an answer must cover what the user was shown** — so a request that
+    /// would need a trimmed list, an invented id, or a guess at which of two
+    /// identically-numbered questions was meant is handed back to the Harness window
+    /// instead of being answered partially.
+    ///
+    /// @returns a marker line naming the reason, or `None` when the card is answerable.
+    ///   The line is written to be read in a marker file: short, and never the model's
+    ///   own text.
+    #[must_use]
+    pub fn question_problem(&self) -> Option<String> {
+        let entries = match self.payload.get("questions") {
+            Some(Value::Array(entries)) => entries,
+            _ => return Some("no question list".to_owned()),
+        };
+        let mut problems: Vec<String> = Vec::new();
+        if entries.is_empty() {
+            problems.push("no questions".to_owned());
+        } else if entries.len() > MAX_QUESTIONS_ANSWERED {
+            problems.push(format!("{} questions (max {MAX_QUESTIONS_ANSWERED})", entries.len()));
+        }
+        for (index, entry) in entries.iter().enumerate() {
+            let position = index + 1;
+            let id = entry.get("id").and_then(Value::as_str).map(str::trim).unwrap_or_default();
+            if id.is_empty() {
+                problems.push(format!("question {position} has no id"));
+            } else if entries[..index]
+                .iter()
+                .any(|earlier| earlier.get("id").and_then(Value::as_str).map(str::trim) == Some(id))
+            {
+                // Two questions under one id cannot be answered apart: the answer would
+                // land on whichever was matched first, and the user's choice for the
+                // other would silently vanish.
+                problems.push(format!("id {id} is used twice"));
+            }
+            match entry.get("question").and_then(Value::as_str) {
+                Some(text) if !text.trim().is_empty() => {}
+                _ => problems.push(format!("question {position} has no text")),
+            }
+            if let Some(options) = entry.get("options").and_then(Value::as_array) {
+                if options.len() > MAX_OPTIONS_PER_QUESTION {
+                    problems.push(format!(
+                        "question {position} offers {} options (max {MAX_OPTIONS_PER_QUESTION})",
+                        options.len(),
+                    ));
+                }
+            }
+        }
+        if problems.is_empty() {
+            None
+        } else {
+            Some(problems.join("; "))
+        }
     }
 }
 
@@ -293,6 +457,191 @@ fn truncate(text: &str) -> String {
     shortened.push('…');
     shortened
 }
+
+/// Read one bounded, non-empty string, or `None`.
+///
+/// Anything that cannot be read as text with content in it is absent rather than an
+/// empty string: the panel must not show a heading that is really whitespace, and
+/// validation must not accept a question id of `""`.
+///
+/// @param value - the field, if any.
+/// @returns the trimmed text, truncated for display.
+#[must_use]
+fn text(value: Option<&Value>) -> Option<String> {
+    let text = value.and_then(Value::as_str)?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(truncate(text))
+}
+
+/// Read the questions out of a payload's `questions` field.
+///
+/// The list is built here, once, and both the display path and the validation path read
+/// the same result — a validator that re-parsed the payload could disagree with what was
+/// drawn, which is exactly the failure an answer must not be able to cause.
+///
+/// @param questions - the `questions` field, if any.
+/// @returns every entry that can be built, in payload order. Entries are kept even when
+///   they are unanswerable (a missing id, a missing question text): they are still what
+///   the asker asked, and dropping them would make the card misreport the request.
+///   Report-only cards are capped by [`Interaction::questions`], not here.
+#[must_use]
+fn parse_questions(questions: Option<&Value>) -> Vec<Question> {
+    questions
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| {
+                    let options = entry
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(|options| {
+                            options
+                                .iter()
+                                .filter_map(|option| {
+                                    Some(QuestionOption {
+                                        label: text(option.get("label"))?,
+                                        description: text(option.get("description")),
+                                    })
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Question {
+                        id: entry.get("id").and_then(Value::as_str).unwrap_or_default().trim().to_owned(),
+                        header: text(entry.get("header")),
+                        question: text(entry.get("question")).unwrap_or_default(),
+                        detail: text(entry.get("detail")),
+                        options,
+                        multi_select: entry.get("multiSelect").and_then(Value::as_bool).unwrap_or(false),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Parse the answer list a frontend or a peer sent.
+///
+/// Deliberately total: an unreadable answer becomes an empty selection rather than a
+/// dropped question, so the answer is refused by validation *by name* ("q2 has no
+/// selection and no custom text") instead of silently arriving short. The wire omits
+/// `custom` when there is none, so an absent and a null `custom` mean the same thing.
+///
+/// @param answers - the `answers` array, if any.
+/// @returns one [`QuestionAnswer`] per readable entry, in order.
+#[must_use]
+pub fn parse_answers(answers: Option<&Value>) -> Vec<QuestionAnswer> {
+    answers
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .map(|entry| QuestionAnswer {
+                    id: entry.get("id").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                    selected: entry
+                        .get("selected")
+                        .and_then(Value::as_array)
+                        .map(|labels| {
+                            labels.iter().filter_map(Value::as_str).map(str::to_owned).collect()
+                        })
+                        .unwrap_or_default(),
+                    custom: entry
+                        .get("custom")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                        .map(str::to_owned),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether one answer to one question covers it.
+///
+/// Three checks, all of them about the answer meaning what it says: the labels must be
+/// ones this question offered (an unoffered label would tell the model the user chose
+/// something that was never on screen), single-select questions must not carry several
+/// labels at once, and the answer must not be empty. **`custom` may substitute for a
+/// selection** — that is the "Other" answer — but the two together are still just one
+/// answer.
+///
+/// @param question - the question that was asked.
+/// @param answer - the answer to check.
+/// @returns a marker line naming the first problem, or `None` when the answer is sound.
+#[must_use]
+fn answer_problem(question: &Question, answer: &QuestionAnswer) -> Option<String> {
+    if answer.selected.is_empty() && answer.custom.is_none() {
+        return Some(format!("question {} has no selection and no custom text", question.id));
+    }
+    if !question.multi_select && answer.selected.len() > 1 {
+        return Some(format!("question {} is single-select but {} labels were sent", question.id, answer.selected.len()));
+    }
+    for label in &answer.selected {
+        if !question.options.iter().any(|option| option.label == *label) {
+            return Some(format!("question {} was not offered the label {label:?}", question.id));
+        }
+    }
+    None
+}
+
+/// Check a whole answer list against the questions of the card it answers.
+///
+/// The UI requires a complete, offered answer before it enables the send button; this is
+/// defence in depth for the same rule, because the frontend is not the only possible
+/// caller of `answer_question`. Four refusals, in the order that makes the message most
+/// useful:
+///
+/// - the card holds no answerable questions (report-only, or not a question at all);
+/// - an answer names an id that is not one of the card's questions (a stale widget, or a
+///   caller answering a different card);
+/// - the same question is answered twice (two answers for one question would leave the
+///   model to pick one);
+/// - the answer does not cover its question — see `answer_problem`;
+/// - the card has a question nothing answered.
+///
+/// @param questions - the card's questions, as parsed for display.
+/// @param answers - what was sent.
+/// @returns a marker line naming the first problem, or `None` when the answer is sound.
+#[must_use]
+pub fn validate_answers(questions: &[Question], answers: &[QuestionAnswer]) -> Option<String> {
+    if questions.is_empty() {
+        return Some("the card holds no answerable questions".to_owned());
+    }
+    if answers.is_empty() {
+        return Some("no answers were sent".to_owned());
+    }
+    for (index, answer) in answers.iter().enumerate() {
+        let Some(question) = questions.iter().find(|question| question.id == answer.id) else {
+            return Some(format!("{:?} is not a question of this card", answer.id));
+        };
+        if answers[..index].iter().any(|earlier| earlier.id == answer.id) {
+            return Some(format!("question {} was answered twice", answer.id));
+        }
+        if let Some(problem) = answer_problem(question, answer) {
+            return Some(problem);
+        }
+    }
+    for question in questions {
+        if !answers.iter().any(|answer| answer.id == question.id) {
+            return Some(format!("question {} was not answered", question.id));
+        }
+    }
+    None
+}
+
+/// What [`Interaction::questions`] assumes about its two caps.
+///
+/// A card is treated as answerable only when it has at most `MAX_QUESTIONS_ANSWERED`
+/// questions, so the answering view must never end up shorter than the reporting one —
+/// otherwise a report-only card would show *more* questions than an answerable one, and
+/// a user could be shown a question no answer can reach. Checked at compile time
+/// because both bounds are constants and a broken relation is a build error, not a
+/// runtime surprise.
+const _: () = assert!(MAX_QUESTIONS_ANSWERED >= MAX_QUESTIONS_SHOWN);
 
 #[cfg(test)]
 mod tests {
@@ -471,7 +820,7 @@ mod tests {
         );
         assert_eq!(
             session.interactions()[0].state(),
-            &InteractionState::Applied { verdict: ApprovalVerdict::AllowOnce }
+            &InteractionState::Applied { answer: SentAnswer::Approval(ApprovalVerdict::AllowOnce) }
         );
         assert!(!session.interactions()[0].is_actionable());
         assert!(sink.marks.iter().any(|line| line == "interaction approval-1 applied allowed-once"));
@@ -561,11 +910,11 @@ mod tests {
         session.on_frame(Inbound::Response { id: first, outcome: Ok(json!({"accepted": true})) }, &mut sink);
         assert_eq!(
             session.interactions()[0].state(),
-            &InteractionState::Applied { verdict: ApprovalVerdict::AllowOnce }
+            &InteractionState::Applied { answer: SentAnswer::Approval(ApprovalVerdict::AllowOnce) }
         );
         assert_eq!(
             session.interactions()[1].state(),
-            &InteractionState::Applied { verdict: ApprovalVerdict::Reject }
+            &InteractionState::Applied { answer: SentAnswer::Approval(ApprovalVerdict::Reject) }
         );
     }
 
@@ -604,44 +953,384 @@ mod tests {
     }
 
     #[test]
-    fn a_question_is_reported_but_not_answerable_by_this_build() {
-        // The answer shape is a list of selected option ids. This build has no widget
-        // for that, and inventing an answer would tell the model the user chose
-        // something they never saw, so the refusal is deliberate.
+    fn a_question_card_is_reported_with_ids_options_and_answerability() {
+        // The shape the panel draws and the frontend types against: ids decide which
+        // question an answer names, `multiSelect` decides whether more than one option
+        // may be picked, and `actionable` is what tells the page to draw widgets at all.
         let mut session = Session::new(identity());
         let mut sink = RecordingSink::default();
-        deliver(
-            &mut session,
-            vec![notification(
-                "interaction/open",
-                json!({
-                    "interactionId": "question-1",
-                    "sessionId": "session-1",
-                    "kind": "question",
-                    "payload": {"questions": [
-                        {"id": "q1", "header": "部署目标", "question": "部署到哪个环境？",
-                         "options": [{"label": "staging"}, {"label": "production"}]},
-                        {"id": "q2", "question": "需要通知谁？"},
-                    ]},
-                }),
-            )],
-            &mut sink,
-        );
+        deliver(&mut session, vec![well_formed_question_open()], &mut sink);
         let card = &session.interactions()[0];
         assert_eq!(card.kind(), InteractionKind::Question);
-        assert!(!card.is_actionable());
+        assert!(card.is_actionable(), "a well-formed small request is answerable here");
+        assert_eq!(card.question_problem(), None);
         assert_eq!(card.question_count(), 2);
         assert_eq!(
             card.questions(),
             vec![
-                (Some("部署目标".to_owned()), "部署到哪个环境？".to_owned()),
-                (None, "需要通知谁？".to_owned()),
+                Question {
+                    id: "q1".to_owned(),
+                    header: Some("部署目标".to_owned()),
+                    question: "部署到哪个环境？".to_owned(),
+                    detail: Some("发布前的最后一个确认".to_owned()),
+                    options: vec![
+                        QuestionOption { label: "staging".to_owned(), description: Some("预发".to_owned()) },
+                        QuestionOption { label: "production".to_owned(), description: None },
+                    ],
+                    multi_select: false,
+                },
+                Question {
+                    id: "q2".to_owned(),
+                    header: None,
+                    question: "需要通知谁？".to_owned(),
+                    detail: None,
+                    options: vec![QuestionOption { label: "ops".to_owned(), description: None }],
+                    multi_select: true,
+                },
             ]
         );
-        assert!(!session.answer_interaction("question-1", ApprovalVerdict::AllowOnce, &mut sink));
-        assert!(sink.logs.join("\n").contains("cannot answer a question"));
+        assert_eq!(sink.marks, vec!["interaction question-1 question arrived".to_owned()]);
+    }
+
+    #[test]
+    fn a_question_is_answered_with_labels_and_the_card_settles() {
+        // The exact frame, because the host validates its shape: the answers array names
+        // the question ids and carries option **labels**, and `custom` is present only
+        // when the user typed free text.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        deliver(&mut session, vec![well_formed_question_open()], &mut sink);
+        let answers = vec![
+            QuestionAnswer {
+                id: "q1".to_owned(),
+                selected: vec!["staging".to_owned()],
+                custom: None,
+            },
+            QuestionAnswer {
+                id: "q2".to_owned(),
+                selected: vec!["ops".to_owned()],
+                custom: Some("值班群".to_owned()),
+            },
+        ];
+        assert!(session.answer_question("question-1", answers, &mut sink));
+        let frame = sink.frames.last().expect("an answer was sent");
+        assert_eq!(frame["method"], "interaction/answer");
+        assert!(frame["id"].is_number(), "an answer is a request, so it carries an id");
+        assert_eq!(frame["params"]["interactionId"], "question-1");
+        assert_eq!(
+            frame["params"]["answer"]["answers"],
+            json!([
+                {"id": "q1", "selected": ["staging"]},
+                {"id": "q2", "selected": ["ops"], "custom": "值班群"},
+            ])
+        );
+        assert!(
+            frame["params"]["answer"]["answers"][0].get("custom").is_none(),
+            "no custom text means the key is absent, not null: {frame}",
+        );
+        assert_eq!(
+            session.interactions()[0].state(),
+            &InteractionState::Submitting {
+                answer: SentAnswer::Question(vec![
+                    QuestionAnswer {
+                        id: "q1".to_owned(),
+                        selected: vec!["staging".to_owned()],
+                        custom: None,
+                    },
+                    QuestionAnswer {
+                        id: "q2".to_owned(),
+                        selected: vec!["ops".to_owned()],
+                        custom: Some("值班群".to_owned()),
+                    },
+                ]),
+            }
+        );
+        assert!(sink.marks.iter().any(|line| line == "interaction question-1 answering 2 answered"));
+        let id = frame["id"].clone();
+        session.on_frame(Inbound::Response { id, outcome: Ok(json!({"accepted": true})) }, &mut sink);
+        assert!(matches!(
+            session.interactions()[0].state(),
+            InteractionState::Applied { answer: SentAnswer::Question(_) }
+        ));
+        assert!(sink.marks.iter().any(|line| line == "interaction question-1 applied 2 answered"));
+    }
+
+    #[test]
+    fn one_answer_per_question_card_is_sent_once() {
+        // A question request is settled once upstream just like an approval, so the
+        // second click must not become a second decision.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        deliver(&mut session, vec![well_formed_question_open()], &mut sink);
+        assert!(session.answer_question("question-1", answers_for("q1", "staging", "q2", "ops"), &mut sink));
+        let sent = sink.frames.len();
+        assert!(!session.answer_question("question-1", answers_for("q1", "production", "q2", "ops"), &mut sink));
+        assert_eq!(sink.frames.len(), sent, "no second answer went out");
+        assert!(sink.logs.join("\n").contains("already in flight"));
+        // And once the host has accepted it, the id stays closed even after the send
+        // is no longer in flight.
+        let id = sink.frames.last().expect("the answer")["id"].clone();
+        session.on_frame(Inbound::Response { id, outcome: Ok(json!({"accepted": true})) }, &mut sink);
+        assert!(!session.answer_question("question-1", answers_for("q1", "staging", "q2", "ops"), &mut sink));
+        assert!(sink.logs.join("\n").contains("already resolved"));
+    }
+
+    #[test]
+    fn an_answer_that_does_not_match_the_card_is_refused() {
+        // Four ways an answer can fail to mean what it says. The UI refuses all four
+        // before the button is enabled; this is the same rule behind the UI, because the
+        // page is not the only possible caller.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        deliver(&mut session, vec![well_formed_question_open()], &mut sink);
+        let frames = sink.frames.len();
+        // A label no question offered: it would tell the model the user chose a row that
+        // was never on screen.
+        assert!(!session.answer_question("question-1", answers_for("q1", "开发", "q2", "ops"), &mut sink));
+        // An id that is not part of this card: a stale widget, or answers for another one.
+        assert!(!session.answer_question("question-1", answers_for("q9", "staging", "q2", "ops"), &mut sink));
+        // A question left empty: a partial answer for a request shown in full.
+        assert!(!session.answer_question(
+            "question-1",
+            vec![
+                QuestionAnswer { id: "q1".to_owned(), selected: vec!["staging".to_owned()], custom: None },
+                QuestionAnswer { id: "q2".to_owned(), selected: Vec::new(), custom: None },
+            ],
+            &mut sink,
+        ));
+        // The same question twice: the model would have to pick one.
+        assert!(!session.answer_question(
+            "question-1",
+            vec![
+                QuestionAnswer { id: "q1".to_owned(), selected: vec!["staging".to_owned()], custom: None },
+                QuestionAnswer { id: "q1".to_owned(), selected: vec!["production".to_owned()], custom: None },
+                QuestionAnswer { id: "q2".to_owned(), selected: vec!["ops".to_owned()], custom: None },
+            ],
+            &mut sink,
+        ));
+        assert_eq!(sink.frames.len(), frames, "nothing was sent for any of them");
+        let logs = sink.logs.join("\n");
+        assert!(logs.contains("was not offered the label \"开发\""), "{logs}");
+        assert!(logs.contains("\"q9\" is not a question of this card"), "{logs}");
+        assert!(logs.contains("question q2 has no selection and no custom text"), "{logs}");
+        assert!(logs.contains("question q1 was answered twice"), "{logs}");
+    }
+
+    #[test]
+    fn a_question_card_too_large_to_answer_is_reported_instead() {
+        // Five questions is one more than this build will present as a form. The card is
+        // still reported — the user is owed what was asked — but it is not actionable,
+        // and the refusal says why: an answer must cover what the user was shown, so
+        // this build hands the request back rather than half-answering it.
+        let questions: Vec<Value> = (0..MAX_QUESTIONS_ANSWERED + 1)
+            .map(|index| {
+                json!({"id": format!("q{index}"), "question": format!("question {index}"),
+                       "options": [{"label": "yes"}]})
+            })
+            .collect();
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        deliver(
+            &mut session,
+            vec![question_open(json!({"questions": questions}))],
+            &mut sink,
+        );
+        let card = &session.interactions()[0];
+        assert!(!card.is_actionable());
+        assert_eq!(card.question_count(), MAX_QUESTIONS_ANSWERED + 1, "the count is the real total");
+        assert_eq!(card.questions().len(), MAX_QUESTIONS_SHOWN, "and the DOM is bounded");
+        let problem = card.question_problem().expect("a reason was recorded");
+        assert!(problem.contains("5 questions"), "{problem}");
+        let answers: Vec<QuestionAnswer> = card
+            .questions()
+            .iter()
+            .map(|question| QuestionAnswer {
+                id: question.id.clone(),
+                selected: vec!["yes".to_owned()],
+                custom: None,
+            })
+            .collect();
+        assert!(!session.answer_question("question-1", answers, &mut sink));
+        assert!(sink.frames.is_empty());
+        assert!(sink.logs.join("\n").contains("cannot answer it here (5 questions"), "{:?}", sink.logs);
+    }
+
+    #[test]
+    fn a_question_without_an_id_is_reported_but_not_answerable() {
+        // An answer names a question by id, so a question with no id can never be
+        // answered unambiguously — and an empty string is no id at all.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        deliver(
+            &mut session,
+            vec![question_open(json!({"questions": [
+                {"id": "  ", "question": "谁负责？", "options": [{"label": "我"}]},
+            ]}))],
+            &mut sink,
+        );
+        let card = &session.interactions()[0];
+        assert!(!card.is_actionable());
+        assert_eq!(card.questions().len(), 1, "the question is still shown");
+        assert_eq!(card.questions()[0].id, "", "whitespace is not an id");
+        assert_eq!(card.questions()[0].question, "谁负责？");
+        let problem = card.question_problem().expect("a reason was recorded");
+        assert!(problem.contains("question 1 has no id"), "{problem}");
+        assert!(!session.answer_question(
+            "question-1",
+            vec![QuestionAnswer { id: String::new(), selected: vec!["我".to_owned()], custom: None }],
+            &mut sink,
+        ));
+        assert!(sink.frames.is_empty());
+        assert!(sink.logs.join("\n").contains("cannot answer it here"), "{:?}", sink.logs);
+    }
+
+    #[test]
+    fn a_question_offering_too_many_options_is_reported_but_not_answerable() {
+        // Past the option cap the list would have to be trimmed for layout, and an
+        // answer to a trimmed list is an answer to a question the user never fully saw.
+        let options: Vec<Value> = (0..MAX_OPTIONS_PER_QUESTION + 1)
+            .map(|index| json!({"label": format!("option {index}")}))
+            .collect();
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        deliver(
+            &mut session,
+            vec![question_open(json!({"questions": [
+                {"id": "q1", "question": "选一个？", "options": options},
+            ]}))],
+            &mut sink,
+        );
+        let card = &session.interactions()[0];
+        assert!(!card.is_actionable());
+        let problem = card.question_problem().expect("a reason was recorded");
+        assert!(problem.contains("offers 13 options"), "{problem}");
         assert!(session.dismiss_interaction("question-1"));
         assert!(session.interactions().is_empty());
+    }
+
+    #[test]
+    fn a_card_that_asks_two_things_under_one_id_is_not_answerable() {
+        // An answer names a question by id, so two questions sharing one id cannot be
+        // answered apart: the answer would land on whichever was matched first, which is
+        // the "guess" this build refuses to make. The card is still reported.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        deliver(
+            &mut session,
+            vec![question_open(json!({"questions": [
+                {"id": "q1", "question": "部署到哪个环境？", "options": [{"label": "staging"}]},
+                {"id": "q1", "question": "需要通知谁？", "options": [{"label": "ops"}]},
+            ]}))],
+            &mut sink,
+        );
+        let card = &session.interactions()[0];
+        assert!(!card.is_actionable());
+        assert_eq!(card.questions().len(), 2, "both questions are still shown");
+        let problem = card.question_problem().expect("a reason was recorded");
+        assert!(problem.contains("q1 is used twice"), "{problem}");
+        assert!(!session.answer_question(
+            "question-1",
+            vec![QuestionAnswer {
+                id: "q1".to_owned(),
+                selected: vec!["staging".to_owned()],
+                custom: None,
+            }],
+            &mut sink,
+        ));
+        assert!(sink.frames.is_empty());
+        assert!(sink.logs.join("\n").contains("cannot answer it here"), "{:?}", sink.logs);
+    }
+
+    #[test]
+    fn an_approval_verdict_cannot_settle_a_question_card() {
+        // Both kinds share the answer path, so the kind is checked before the shared
+        // guards: a verdict is not an answer to a question.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        deliver(&mut session, vec![well_formed_question_open()], &mut sink);
+        assert!(!session.answer_interaction("question-1", ApprovalVerdict::AllowOnce, &mut sink));
+        assert!(sink.frames.is_empty());
+        assert!(sink.logs.join("\n").contains("not an approval card"), "{:?}", sink.logs);
+    }
+
+    #[test]
+    fn a_question_the_host_refuses_says_why_and_cannot_be_retried() {
+        // `accepted:false` is the host settling the request elsewhere, and a question is
+        // settled exactly as an approval is — through the same id-uniqueness, so the card
+        // can never be answered twice for one request.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        deliver(&mut session, vec![well_formed_question_open()], &mut sink);
+        assert!(session.answer_question("question-1", answers_for("q1", "staging", "q2", "ops"), &mut sink));
+        let id = sink.frames.last().expect("the answer")["id"].clone();
+        session.on_frame(
+            Inbound::Response {
+                id,
+                outcome: Ok(json!({"accepted": false, "reason": "another surface answered first"})),
+            },
+            &mut sink,
+        );
+        assert_eq!(
+            session.interactions()[0].state(),
+            &InteractionState::Refused { reason: "another surface answered first".to_owned() }
+        );
+        assert!(!session.interactions()[0].is_actionable());
+        assert!(!session.answer_question("question-1", answers_for("q1", "staging", "q2", "ops"), &mut sink));
+        assert!(sink.logs.join("\n").contains("already resolved"));
+    }
+
+    #[test]
+    fn a_response_that_is_not_in_flight_does_not_settle_a_card() {
+        // The refusal path is reached through the same attribution as an approval, so the
+        // "not in flight" guard is exercised for a question card too.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        deliver(&mut session, vec![well_formed_question_open()], &mut sink);
+        session.on_response(&json!(999), Ok(json!({"accepted": true})), &mut sink);
+        assert!(matches!(session.interactions()[0].state(), InteractionState::Pending));
+    }
+
+    /// The host's `interaction/open` for a well-formed two-question request.
+    fn well_formed_question_open() -> Inbound {
+        question_open(json!({"questions": [
+            {
+                "id": "q1",
+                "header": "部署目标",
+                "question": "部署到哪个环境？",
+                "detail": "发布前的最后一个确认",
+                "options": [
+                    {"label": "staging", "description": "预发"},
+                    {"label": "production"},
+                ],
+            },
+            {
+                "id": "q2",
+                "question": "需要通知谁？",
+                "options": [{"label": "ops"}],
+                "multiSelect": true,
+            },
+        ]}))
+    }
+
+    /// The host's `interaction/open` for a question request with the given payload.
+    fn question_open(payload: Value) -> Inbound {
+        notification(
+            "interaction/open",
+            json!({
+                "interactionId": "question-1",
+                "sessionId": "session-1",
+                "kind": "question",
+                "payload": payload,
+            }),
+        )
+    }
+
+    /// One single-select answer for each of `q1` and `q2`, for the two-question fixture.
+    fn answers_for(q1: &str, first: &str, q2: &str, second: &str) -> Vec<QuestionAnswer> {
+        vec![
+            QuestionAnswer { id: q1.to_owned(), selected: vec![first.to_owned()], custom: None },
+            QuestionAnswer { id: q2.to_owned(), selected: vec![second.to_owned()], custom: None },
+        ]
     }
 
     #[test]
@@ -730,13 +1419,16 @@ mod tests {
         let detail = cards[0].detail("zh").expect("a reason");
         assert_eq!(detail.chars().count(), MAX_TEXT_CHARS + 1, "600 characters plus the ellipsis");
         assert!(detail.ends_with('…'));
-        let question = &cards[1].questions()[0].1;
+        let question = &cards[1].questions()[0].question;
         assert_eq!(question.chars().count(), MAX_TEXT_CHARS + 1);
         assert!(question.ends_with('…'), "a multi-byte cut lands on a character boundary");
     }
 
     #[test]
     fn only_the_first_few_questions_are_summarised() {
+        // Eight questions is over the answering cap, so this is a report-only card and
+        // only the first few are read out — the rest would be scroll for a form the user
+        // cannot submit here anyway.
         let questions: Vec<Value> = (0..8)
             .map(|index| json!({"id": format!("q{index}"), "question": format!("question {index}")}))
             .collect();
@@ -753,6 +1445,33 @@ mod tests {
         let card = &session.interactions()[0];
         assert_eq!(card.question_count(), 8, "the count is the real total");
         assert_eq!(card.questions().len(), MAX_QUESTIONS_SHOWN, "but only a few are read out");
+    }
+
+    #[test]
+    fn an_answerable_card_shows_every_question_it_will_answer() {
+        // The other side of the same rule: an answer must cover what the user was shown,
+        // so a card at (but not over) the answering cap is shown in full even when that
+        // is more than a report-only card would show.
+        let questions: Vec<Value> = (0..MAX_QUESTIONS_ANSWERED)
+            .map(|index| {
+                json!({"id": format!("q{index}"), "question": format!("question {index}"),
+                       "options": [{"label": "yes"}]})
+            })
+            .collect();
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        deliver(
+            &mut session,
+            vec![question_open(json!({"questions": questions}))],
+            &mut sink,
+        );
+        let card = &session.interactions()[0];
+        assert!(card.is_actionable());
+        assert_eq!(card.questions().len(), MAX_QUESTIONS_ANSWERED);
+        assert!(
+            card.questions().len() > MAX_QUESTIONS_SHOWN,
+            "the fixture must be larger than the report-only cap to prove the difference",
+        );
     }
 
     #[test]

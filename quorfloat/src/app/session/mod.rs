@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use crate::app::session::follow::{Follow, Outgoing};
 use crate::app::session::interaction::{
     ApprovalVerdict, Handoff, Interaction, InteractionKind, InteractionState, MAX_INTERACTIONS,
+    QuestionAnswer, SentAnswer, validate_answers,
 };
 use crate::app::session::transcript::Transcript;
 
@@ -1271,12 +1272,11 @@ impl Session {
     /// Refuses in four cases, each deliberately rather than by omission:
     ///
     /// - the id is not held (a stale card, or one from a previous process);
+    /// - the request is not an **approval** — a question has its own answer shape and
+    ///   its own entry point ([`Session::answer_question`]), and sending a verdict for a
+    ///   question would tell the model the user chose something they never saw;
     /// - the request is already in flight or already resolved — the grant is
     ///   one-shot, so a second send would be a second decision for one question;
-    /// - the request is a **question**, whose answer shape is a list of selected
-    ///   option ids (`{answers:[{id,selected}]}`). This build has no widget for that
-    ///   yet, and inventing an answer would tell the model the user chose something
-    ///   they never saw;
     /// - the frame could not be written, in which case the state is put back so the
     ///   card does not claim a send that did not happen.
     ///
@@ -1288,6 +1288,81 @@ impl Session {
         &mut self,
         interaction_id: &str,
         verdict: ApprovalVerdict,
+        sink: &mut dyn FrameSink,
+    ) -> bool {
+        if let Some(card) = self.interactions.iter().find(|held| held.id() == interaction_id) {
+            if card.kind() != InteractionKind::Approval {
+                // A verdict is not an answer to a question. Checked here rather than in
+                // `answer` because only the caller knows which shape it is holding, and
+                // a question must travel through `answer_question` or not at all.
+                sink.log(&format!("not answering {interaction_id}: it is not an approval card"));
+                return false;
+            }
+        }
+        self.answer(interaction_id, SentAnswer::Approval(verdict), sink)
+    }
+
+    /// Answer the questions of one question card.
+    ///
+    /// The questions this build will answer are exactly the ones [`Interaction::questions`]
+    /// showed (see [`Interaction::question_problem`] for the caps), so the answer is
+    /// checked against those before anything is sent. Refuses in four cases:
+    ///
+    /// - the id is not held;
+    /// - the request is already in flight or already resolved, for the same reason an
+    ///   approval is: the host settles a request once;
+    /// - the card is an approval, or a question this build cannot answer in full —
+    ///   the answer would be a partial one for a request the user saw in part;
+    /// - the answer itself does not cover the questions, per
+    ///   [`crate::app::session::interaction::validate_answers`].
+    ///
+    /// @param interaction_id - which card to answer.
+    /// @param answers - one answer per question, naming the options by label.
+    /// @param sink - where the answer goes.
+    /// @returns whether an answer was sent.
+    pub fn answer_question(
+        &mut self,
+        interaction_id: &str,
+        answers: Vec<QuestionAnswer>,
+        sink: &mut dyn FrameSink,
+    ) -> bool {
+        let Some(index) = self.interactions.iter().position(|held| held.id() == interaction_id) else {
+            sink.log(&format!("not answering {interaction_id}: this panel is not holding it"));
+            return false;
+        };
+        if self.interactions[index].kind() != InteractionKind::Question {
+            sink.log(&format!("not answering {interaction_id}: it is not a question card"));
+            return false;
+        }
+        if let Some(problem) = self.interactions[index].question_problem() {
+            sink.log(&format!(
+                "not answering {interaction_id}: this build cannot answer it here ({problem})",
+            ));
+            return false;
+        }
+        if let Some(problem) = validate_answers(&self.interactions[index].questions(), &answers) {
+            sink.log(&format!("refusing the answer for {interaction_id}: {problem}"));
+            return false;
+        }
+        self.answer(interaction_id, SentAnswer::Question(answers), sink)
+    }
+
+    /// Send one answer frame and record that it is in flight.
+    ///
+    /// The shared half of [`Session::answer_interaction`] and [`Session::answer_question`]:
+    /// the guards are the same for both kinds (the request must be pending, the frame
+    /// must be attributable, a failed write must leave the card actionable), and the only
+    /// difference is the shape of `answer` on the wire. Splitting it this way keeps those
+    /// guards in one place instead of two copies that can drift apart.
+    ///
+    /// @param interaction_id - which request to answer.
+    /// @param answer - what was decided.
+    /// @param sink - where the answer goes.
+    /// @returns whether an answer was sent.
+    fn answer(
+        &mut self,
+        interaction_id: &str,
+        answer: SentAnswer,
         sink: &mut dyn FrameSink,
     ) -> bool {
         let Some(index) = self.interactions.iter().position(|held| held.id() == interaction_id) else {
@@ -1305,24 +1380,21 @@ impl Session {
                 return false;
             }
         }
-        if self.interactions[index].kind() != InteractionKind::Approval {
-            sink.log(&format!(
-                "not answering {interaction_id}: this build cannot answer a question, only report it",
-            ));
-            return false;
-        }
         let request_id = self.take_request_id();
-        let frame = rpc::request(
-            request_id,
-            "interaction/answer",
-            json!({
+        let body = match &answer {
+            SentAnswer::Approval(verdict) => {
+                json!({ "interactionId": interaction_id, "answer": { "outcome": verdict.wire() } })
+            }
+            SentAnswer::Question(answers) => json!({
                 "interactionId": interaction_id,
-                "answer": { "outcome": verdict.wire() },
+                "answer": { "answers": answers.iter().map(answer_json).collect::<Vec<_>>() },
             }),
-        );
-        self.interactions[index].state = InteractionState::Submitting { verdict };
+        };
+        let frame = rpc::request(request_id, "interaction/answer", body);
+        let summary = answer.summary();
+        self.interactions[index].state = InteractionState::Submitting { answer };
         self.answers_in_flight.insert(request_id, interaction_id.to_owned());
-        sink.mark(&format!("interaction {interaction_id} answering {}", verdict.wire()));
+        sink.mark(&format!("interaction {interaction_id} answering {summary}"));
         if let Err(error) = sink.send(&frame) {
             self.interactions[index].state = InteractionState::Pending;
             self.answers_in_flight.remove(&request_id);
@@ -1332,14 +1404,6 @@ impl Session {
         true
     }
 
-    /// Drop one interaction from the panel.
-    ///
-    /// Local only, and honest about what it does not do: the host still holds the
-    /// request until its own deadline. It exists for cards that cannot be acted on
-    /// (a reported question) and for resolved ones the user has read.
-    ///
-    /// @param interaction_id - which card to drop.
-    /// @returns whether a card was dropped.
     /// Send what the user typed to the conversation this panel follows.
     ///
     /// The key is generated here and is one-shot: the host admits a given key once, and a
@@ -1600,6 +1664,14 @@ impl Session {
         }
     }
 
+    /// Drop one interaction from the panel.
+    ///
+    /// Local only, and honest about what it does not do: the host still holds the
+    /// request until its own deadline. It exists for cards that cannot be acted on — a
+    /// question too large to answer here, say — and for resolved ones the user has read.
+    ///
+    /// @param interaction_id - which card to drop.
+    /// @returns whether a card was dropped.
     pub fn dismiss_interaction(&mut self, interaction_id: &str) -> bool {
         let before = self.interactions.len();
         self.interactions.retain(|held| held.id() != interaction_id);
@@ -1684,8 +1756,12 @@ impl Session {
         ));
         self.handoff = Some(Handoff { kind, reason, surfaces });
     }
-
     /// Apply the host's verdict on an answer this panel sent.
+    ///
+    /// Both kinds of answer are matched the same way — by the id-uniqueness recorded in
+    /// [`Session::answers_in_flight`] — because the host's response carries nothing but
+    /// the request id, so the kind of the answer is read back from the card rather than
+    /// assumed. A question card and an approval card settle through this one path.
     ///
     /// @param interaction_id - the interaction the response belongs to.
     /// @param outcome - the response, or the error that came back instead.
@@ -1700,14 +1776,15 @@ impl Session {
             sink.log(&format!("a response arrived for interaction {interaction_id}, which is not held"));
             return;
         };
-        let InteractionState::Submitting { verdict } = self.interactions[index].state else {
+        let InteractionState::Submitting { answer } = self.interactions[index].state.clone() else {
             sink.log(&format!("a response arrived for interaction {interaction_id}, which is not in flight"));
             return;
         };
         match outcome {
             Ok(result) if result.get("accepted").and_then(Value::as_bool) == Some(true) => {
-                self.interactions[index].state = InteractionState::Applied { verdict };
-                sink.mark(&format!("interaction {interaction_id} applied {}", verdict.wire()));
+                let summary = answer.summary();
+                self.interactions[index].state = InteractionState::Applied { answer };
+                sink.mark(&format!("interaction {interaction_id} applied {summary}"));
             }
             Ok(result) => {
                 // `accepted:false` is a normal answer, not a failure: another surface
@@ -1747,6 +1824,24 @@ impl Session {
         self.next_request_id += 1;
         id
     }
+    }
+
+/// One entry of the `answer.answers` array on the wire.
+///
+/// `custom` is **omitted**, not nulled, when there is no free text: the upstream answer
+/// shape treats an absent `custom` as "no Other answer", and an explicit null is a
+/// distinction the host would have to interpret. Kept here rather than inline in the
+/// frame so the omission is a property of the type that knows what a custom answer is.
+///
+/// @param answer - the answer to encode.
+/// @returns the JSON object for one question's answer.
+#[must_use]
+fn answer_json(answer: &QuestionAnswer) -> Value {
+    let mut value = json!({ "id": answer.id, "selected": answer.selected });
+    if let (Some(custom), Some(object)) = (answer.custom.as_ref(), value.as_object_mut()) {
+        object.insert("custom".to_owned(), Value::String(custom.clone()));
+    }
+    value
 }
 
 
@@ -1881,7 +1976,7 @@ mod tests {
         assert_eq!(params["quorfloatVersion"], "0.0.1");
         assert_eq!(params["platform"], "darwin");
         assert_eq!(params["arch"], "arm64");
-        assert_eq!(params["capabilities"], json!(["window", "hotkey", "tauri", "approval"]));
+        assert_eq!(params["capabilities"], json!(["window", "hotkey", "tauri", "approval", "question"]));
         assert_eq!(params["hotkey"]["requested"], "Alt+Space");
         assert_eq!(params["hotkey"]["registered"], true);
     }

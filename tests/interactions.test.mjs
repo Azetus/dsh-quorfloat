@@ -75,9 +75,12 @@ function fakeContext() {
 const PANEL_DECIDES = { authority: 'panel', reason: 'harness-not-visible', fresh: [] }
 
 /**
- * What the peer declared in `hello`, as the behaviour tests assume it: the panel
- * answers approvals. A panel that claims a question it cannot render hides it from
- * the Harness window for the whole claim deadline, so claiming is gated on this.
+ * What a peer declared in `hello`, as the behaviour tests assume it: one that answers
+ * approvals only. A panel that claims a question it cannot render hides it from the
+ * Harness window for the whole claim deadline, so claiming is gated on this — and the
+ * shipping build stopped being this peer on 2026-10-09, when it learned to draw the
+ * option widgets and declared `question` too (`quorfloat/src/ipc/protocol.rs`). The
+ * tests keep the narrower peer on purpose: it is the case that must stay safe.
  */
 const PANEL_ANSWERS = kind => kind === 'approval'
 
