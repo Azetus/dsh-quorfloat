@@ -403,9 +403,14 @@ pub fn dismiss_handoff(session: &mut Session) -> Value {
 }
 
 /// `log` — put one frontend breadcrumb on the record.
+///
+/// Written to the **marker**, not stderr: the host swallows the sidecar's
+/// stderr, so a line there would be exactly as invisible as the bug the
+/// frontend is trying to report. The marker is the one surface a developer
+/// (or a test) reads afterwards.
 #[must_use]
 pub fn log(sink: &mut dyn FrameSink, line: &str) -> Value {
-    sink.log(line);
+    sink.mark(line);
     json!({})
 }
 
