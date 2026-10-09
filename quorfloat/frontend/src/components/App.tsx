@@ -14,11 +14,11 @@ import { usePanelDynamics } from '../hooks/usePanelDynamics'
 import { SHADOW_ROOM, type Painted } from '../lib/panel'
 import type { Snapshot } from '../lib/state'
 import { isBusy } from '../lib/view-text'
-import { ConversationPage } from './ConversationPage'
-import { Footer } from './Footer'
+import { ConversationPage } from './conversation/ConversationPage'
+import { Footer } from './footer/Footer'
 import { Panel } from './Panel'
-import { SettingsPage } from './SettingsPage'
-import { TopBar } from './TopBar'
+import { SettingsPage } from './settings/SettingsPage'
+import { TopBar } from './chrome/TopBar'
 
 /** Props for {@link App}. */
 export interface AppProps {

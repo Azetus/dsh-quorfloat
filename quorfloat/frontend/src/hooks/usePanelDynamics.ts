@@ -178,6 +178,14 @@ export function usePanelDynamics(
     return () => { window.removeEventListener('resize', onResize) }
   }, [measure])
 
+  // The font finishing loading moves every metric in the panel: the first measurement can
+  // land before it, and the height it reported would then belong to the fallback face.
+  useEffect(() => {
+    let live = true
+    void document.fonts.ready.then(() => { if (live) measure(null) })
+    return () => { live = false }
+  }, [measure])
+
   // The composer grows as the user types, without a snapshot to render from: it asks for
   // a remeasure instead of forcing a tree re-render per keystroke.
   const remeasure = useCallback((): void => { measure(null) }, [measure])
