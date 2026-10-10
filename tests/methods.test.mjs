@@ -33,6 +33,7 @@ function stubHost() {
     cancel: async () => ({ accepted: true }),
     answerInteraction: async () => ({ accepted: true }),
     reportPresence: async () => ({ accepted: true }),
+    panelLifecycle: async action => ({ action, accepted: true }),
     diagnostics: () => ({}),
   }
 }
@@ -51,6 +52,7 @@ const PARAMS = {
   'session/permission': { sessionId: 'session-1', value: 'read-only' },
   'interaction/answer': { interactionId: 'i-1', answer: {} },
   'presence/report': { surface: 'panel', visible: true, focused: true, seq: 1 },
+  'panel/lifecycle': { action: 'restart' },
 }
 
 test('every method in the table is answered by the router', async () => {
@@ -95,5 +97,38 @@ test('the new session methods are in the table', () => {
   // these three are what the panel's footer is built on.
   for (const method of ['session/options', 'session/select', 'session/permission']) {
     assert.ok(METHODS.includes(method), `${method} must be answerable`)
+  }
+})
+
+test('panel/lifecycle forwards the requested action and reports it', async () => {
+  // The panel's tray menu is the caller, and the action reaches the supervisor as the action word the
+  // peer sent — not a pre-cooked decision. The reply names both the request and its acceptance, which
+  // is all a fire-and-forget caller could ever act on.
+  const seen = []
+  const host = stubHost()
+  host.panelLifecycle = async action => {
+    seen.push(action)
+    return { action, accepted: true }
+  }
+  const router = new HostRouter(host)
+  assert.deepEqual(await router.handle('panel/lifecycle', { action: 'restart' }), { action: 'restart', accepted: true })
+  assert.deepEqual(await router.handle('panel/lifecycle', { action: 'stop' }), { action: 'stop', accepted: true })
+  assert.deepEqual(seen, ['restart', 'stop'], 'both actions were passed through unchanged, in order')
+})
+
+test('panel/lifecycle refuses a missing or unknown action', async () => {
+  // A closed set, because the effect is a process-level one no caller can take back: anything that is
+  // not `restart` or `stop` must stop at validation rather than reach the supervisor.
+  const router = new HostRouter(stubHost())
+  for (const params of [{ action: 'reboot' }, { action: '' }, {}]) {
+    await assert.rejects(
+      () => router.handle('panel/lifecycle', params),
+      error => {
+        assert.equal(error.code, 'unavailable')
+        assert.match(error.message, /panel\/lifecycle: action/)
+        return true
+      },
+      `${JSON.stringify(params)} must be refused`,
+    )
   }
 })

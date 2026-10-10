@@ -27,7 +27,9 @@ serde_json = "1"
 # rounded corners — see docs/tauri-shell-spike.md §1. The frontend is embedded at
 # compile time through `tauri::generate_context!`, so the staged binary stays a
 # single self-contained executable for the host supervisor.
-tauri = { version = ">=2.12.1, <3" }
+# `tray-icon` puts the panel in the menu bar (the accessory application has no Dock icon on
+# purpose); `image-png` decodes the embedded template image at startup.
+tauri = { version = ">=2.12.1, <3", features = ["tray-icon", "image-png"] }
 
 # Global hotkey. This is the only way to summon the panel while Harness itself is
 # not focused, so it cannot be a window-local key binding. Kept as a plain crate

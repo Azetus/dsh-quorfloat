@@ -28,6 +28,8 @@ pub enum Wake {
     Height(f32),
     /// The frontend asks the window to show or hide (after its own transition).
     Visibility(crate::app::session::WindowCommand),
+    /// The user picked something in the menu bar (`runtime/tray.rs`).
+    Tray(crate::runtime::tray::TrayAction),
     /// The host asked this process to stop, or the channel ended.
     Exit(SessionExit),
 }

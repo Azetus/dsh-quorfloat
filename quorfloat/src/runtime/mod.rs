@@ -6,3 +6,5 @@
 
 pub mod diag;
 pub mod hotkey;
+
+pub mod tray;

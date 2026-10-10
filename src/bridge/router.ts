@@ -60,6 +60,9 @@ export type InteractionAnswer =
   | { readonly kind: 'approval'; readonly outcome: 'allowed-once' | 'rejected' }
   | { readonly kind: 'question'; readonly answers: readonly { readonly id: string; readonly selected: readonly string[]; readonly custom?: string }[] }
 
+/** What the panel can ask the host to do to the process that hosts it. */
+export type PanelLifecycleAction = 'restart' | 'stop'
+
 /** Everything the router needs from the rest of the host plugin. */
 export interface RouterHost {
   /** Effective configuration currently in force. */
@@ -100,6 +103,15 @@ export interface RouterHost {
     surface: string,
     report: { visible: boolean; focused: boolean; seq: number; at?: number },
   ): Promise<{ accepted: boolean; reason?: string }>
+  /**
+   * Replace or deliberately stop the process that hosts the panel.
+   *
+   * The panel's own tray menu is the only caller. `restart` goes through the
+   * supervisor's restart entry; `stop` must go through its stop entry, because
+   * only that marks the exit as deliberate — an exit the policy reads as a crash
+   * would be restarted, which is the opposite of what the user asked for.
+   */
+  panelLifecycle(action: PanelLifecycleAction): Promise<{ action: PanelLifecycleAction; accepted: true }>
   /** Free-form diagnostics for the settings/status surface. */
   diagnostics(): Record<string, unknown>
 }
@@ -127,6 +139,7 @@ export const METHODS = [
   'session/permission',
   'interaction/answer',
   'presence/report',
+  'panel/lifecycle',
   'diag/snapshot',
 ] as const
 
@@ -151,6 +164,25 @@ function optionalInt(params: unknown, field: string, context: string): number | 
     throw new ChannelError('unavailable', `${context}: ${field} must be an integer when present`)
   }
   return value as number
+}
+
+/**
+ * Read and validate the panel's requested lifecycle action.
+ *
+ * A closed set is deliberate: an unknown action must be refused rather than
+ * forwarded, because the host's answer is a process-level effect that no caller
+ * can take back.
+ *
+ * @param params - `panel/lifecycle` parameters.
+ * @returns the validated action.
+ * @throws {ChannelError} when the action is missing, empty, or not one of the two.
+ */
+function readLifecycleAction(params: unknown): PanelLifecycleAction {
+  const action = requireString(params, 'action', 'panel/lifecycle')
+  if (action !== 'restart' && action !== 'stop') {
+    throw new ChannelError('unavailable', `panel/lifecycle: action must be restart or stop (got ${action})`)
+  }
+  return action
 }
 
 /**
@@ -247,6 +279,13 @@ export class HostRouter {
           requireString(params, 'interactionId', 'interaction/answer'),
           (params as Record<string, unknown>)['answer'],
         )
+      case 'panel/lifecycle':
+        // The one request whose answer is allowed to be undeliverable: by the
+        // time the action settles, the peer that asked is being replaced or
+        // killed, and the channel's safe write drops the reply. The handler
+        // therefore completes the action before reporting acceptance, and never
+        // throws for a peer that is already gone.
+        return await this.#host.panelLifecycle(readLifecycleAction(params))
       case 'diag/snapshot':
         return { config: this.#host.config(), handshake: this.#handshake ?? null, ...this.#host.diagnostics() }
       default:
