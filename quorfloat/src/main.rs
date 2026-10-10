@@ -49,6 +49,7 @@ use dsh_quorfloat::app::sink::{Reader, SharedSink, Wake};
 use dsh_quorfloat::app::window_settings::WindowSettings;
 use dsh_quorfloat::ipc::rpc;
 use dsh_quorfloat::ipc::transport::StdioSink;
+use dsh_quorfloat::app::session::follow::PanelLifecycle;
 use dsh_quorfloat::runtime::diag::marker::Marker;
 use dsh_quorfloat::runtime::hotkey::{self, Hotkey};
 use dsh_quorfloat::VERSION;
@@ -286,6 +287,10 @@ fn run() -> Result<SessionExit, String> {
                 emit: emit.clone(),
             });
 
+            // The menu bar's choices reach the dispatcher through the same queue as the hotkey
+            // and the host's commands: one thread decides what the window does.
+            let tray_wake = wake_tx.clone();
+
             let reader = Reader::new(
                 Arc::clone(&shell_session),
                 Arc::clone(&shell_sink),
@@ -297,6 +302,11 @@ fn run() -> Result<SessionExit, String> {
                 .name("quorfloat-stdin".to_owned())
                 .spawn(move || reader.run())
                 .map_err(|error| format!("could not start the stdin reader: {error}"))?;
+
+            // The tray is built after the dispatcher exists (it is what answers the menu), so
+            // it needs its own handles: the dispatcher takes ownership below.
+            let tray_handle = handle.clone();
+            let tray_marker = shell_marker.clone();
 
             spawn_dispatcher(
                 wake_rx,
@@ -314,6 +324,14 @@ fn run() -> Result<SessionExit, String> {
 
             // The hotkey is watched on its own thread rather than polled: the watcher
             // blocks until the user presses the key, then wakes the dispatcher.
+            // The menu bar icon. A failure here is reported and survived: the panel is
+            // summonable by hotkey whether or not the platform gave us a tray.
+            if let Err(error) =
+                dsh_quorfloat::runtime::tray::install(&tray_handle, tray_wake, &tray_marker)
+            {
+                tray_marker.write(&format!("tray could not be created: {error}"));
+            }
+
             if hotkey_active {
                 hotkey::watch_hotkey(shell_hotkey_wake, emit.clone(), Arc::clone(&shell_sink));
             }
@@ -672,6 +690,55 @@ fn spawn_dispatcher(
                         // apply it, then re-apply the user's preferences on top.
                         apply_host_window(&window, &session, &view, &marker);
                         emit();
+                    }
+                    Ok(Wake::Tray(action)) => {
+                        use dsh_quorfloat::runtime::tray::TrayAction;
+                        match action {
+                            TrayAction::ToggleVisibility => {
+                                // The hotkey's path, for the hotkey's reason: a panel that is up
+                                // plays its own exit transition and asks to hide when it ends,
+                                // so hiding the native window here would cut the fade short.
+                                if visible {
+                                    marker.write("tray menu: hide");
+                                    let _ = handle.emit("quorfloat/hotkey-hide", ());
+                                } else {
+                                    marker.write("tray menu: show");
+                                    apply_window_command(
+                                        &window,
+                                        WindowCommand::Show,
+                                        &mut visible,
+                                        &marker,
+                                    );
+                                    set_view_visible(&view, visible);
+                                    report_visibility(&session, &sink, visible, &capabilities);
+                                    emit();
+                                }
+                            }
+                            TrayAction::Restart | TrayAction::Quit => {
+                                let stop = action == TrayAction::Quit;
+                                marker.write(if stop {
+                                    "tray menu: exit"
+                                } else {
+                                    "tray menu: restart"
+                                });
+                                let lifecycle = if stop {
+                                    PanelLifecycle::Stop
+                                } else {
+                                    PanelLifecycle::Restart
+                                };
+                                {
+                                    let mut session = lock(&session);
+                                    let _ = sink.with(|sink| {
+                                        session.request_panel_lifecycle(lifecycle, sink)
+                                    });
+                                }
+                                // The menu bar is ours, so choosing from it made *us* the active
+                                // application. Neither of these two brings a panel up, so the
+                                // keyboard goes back to whatever the user was doing (the same
+                                // rule the hide path follows, see `yield_activation`).
+                                yield_activation(&window, &marker);
+                            }
+                        }
                     }
                     Ok(Wake::Hotkey) => {
                         if visible {

@@ -18,7 +18,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { join } from 'node:path'
 
-import { cleanupDir, loadCordis, loadPlugin, mockPath, recordingLogger, scratchDir, waitFor } from './helpers.mjs'
+import { cleanupDir, loadCordis, loadPlugin, mockPath, recordingLogger, scratchDir, sleep, waitFor } from './helpers.mjs'
 
 const cordis = await loadCordis()
 const pluginModule = await loadPlugin()
@@ -303,6 +303,63 @@ test('the interaction limits reach the objects that enforce them', async () => {
       12345,
       'and the interaction layer was constructed with it, not with the default',
     )
+  } finally {
+    await app.dispose()
+  }
+})
+
+test('panel/lifecycle restart replaces the peer through the real supervisor', async () => {
+  // The panel's tray menu asks the host to replace the process that hosts it. The
+  // router, the supervisor, and the spawn are all real here; `onRouter` is what
+  // makes the request reachable without a live peer.
+  const app = await activate()
+  try {
+    await app.waitForRunning()
+    const { pid } = await app.waitForPid()
+    const router = app.routers.at(-1)
+    assert.ok(router !== undefined, 'a router was created for the live channel')
+
+    const result = await router.handle('panel/lifecycle', { action: 'restart' })
+    assert.deepEqual(result, { action: 'restart', accepted: true })
+
+    // A restart is stop-then-start: the old process is gone, a fresh one is
+    // running, and it got a router of its own.
+    const next = await app.waitForPid()
+    assert.notEqual(next.pid, pid, 'the replacement process is a different one')
+    await waitFor('the old process to be gone', async () => !processAlive(pid))
+    const running = await app.waitForRunning()
+    assert.equal(running.supervisor.pid, next.pid)
+    assert.equal(app.routers.length, 2, 'the replacement channel got its own router')
+    assert.notEqual(app.routers.at(-1), router)
+  } finally {
+    await app.dispose()
+  }
+})
+
+test('panel/lifecycle stop ends the peer deliberately and no restart undoes it', async () => {
+  const app = await activate()
+  try {
+    await app.waitForRunning()
+    const { pid } = await app.waitForPid()
+    const router = app.routers.at(-1)
+    assert.ok(router !== undefined, 'a router was created for the live channel')
+
+    const result = await router.handle('panel/lifecycle', { action: 'stop' })
+    assert.deepEqual(result, { action: 'stop', accepted: true })
+    assert.equal(app.latest().supervisor.state, 'stopped')
+    assert.equal(app.latest().supervisor.pid, undefined)
+    await waitFor('the stopped peer to be gone', async () => !processAlive(pid))
+
+    // The whole reason `stop` must go through the supervisor's own stop entry:
+    // the exit is then marked deliberate, so the restart policy does not read it
+    // as a crash and bring the panel back. A silent automatic restart would also
+    // create a router and emit state changes, so both counters are watched.
+    const routers = app.routers.length
+    const states = app.states.length
+    await sleep(400)
+    assert.equal(app.routers.length, routers, 'no replacement process was started')
+    assert.equal(app.states.length, states, 'nothing changed after the stop settled')
+    assert.equal(app.latest().supervisor.state, 'stopped')
   } finally {
     await app.dispose()
   }

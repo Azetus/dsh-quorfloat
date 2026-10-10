@@ -49,11 +49,39 @@ pub enum Outgoing {
         /// The workspace to create it in, or `None` for the host's own default.
         workspace_id: Option<String>,
     },
+    /// Ask the host to restart or stop this process.
+    PanelLifecycle {
+        /// Which of the two.
+        action: PanelLifecycle,
+    },
     /// Subscribe to one of them.
     Attach {
         /// Durable session identity.
         session_id: String,
     },
+}
+
+/// A lifecycle action the panel asks the host to perform on this process.
+///
+/// The panel cannot do either of these itself: replacing or ending the process is the
+/// supervisor's business, and an exit it reads as a crash would simply be restarted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelLifecycle {
+    /// Replace this process with a fresh one.
+    Restart,
+    /// Stop this process on purpose, so no automatic restart follows.
+    Stop,
+}
+
+impl PanelLifecycle {
+    /// The wire spelling the host's router accepts.
+    #[must_use]
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Restart => "restart",
+            Self::Stop => "stop",
+        }
+    }
 }
 
 /// What a request was for, so its response can be read.

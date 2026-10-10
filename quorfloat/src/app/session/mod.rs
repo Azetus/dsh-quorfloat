@@ -19,7 +19,7 @@
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
-use crate::app::session::follow::{Follow, Outgoing};
+use crate::app::session::follow::{Follow, Outgoing, PanelLifecycle};
 use crate::app::session::interaction::{
     ApprovalVerdict, Handoff, Interaction, InteractionKind, InteractionState, MAX_INTERACTIONS,
     QuestionAnswer, SentAnswer, validate_answers,
@@ -950,6 +950,19 @@ impl Session {
         self.send_request(outgoing, now, sink)
     }
 
+    /// Ask the host to restart or stop this process.
+    ///
+    /// Offered to the user through the menu bar (`runtime/tray.rs`). The answer is not awaited:
+    /// in the stop case this process is gone before it could arrive, which is the point.
+    ///
+    /// @param action - restart, or stop on purpose.
+    /// @param sink - where the frame goes.
+    /// @returns whether the request was written.
+    pub fn request_panel_lifecycle(&mut self, action: PanelLifecycle, sink: &mut dyn FrameSink) -> bool {
+        let now = rpc::now_millis();
+        self.send_request(Some(Outgoing::PanelLifecycle { action }), now, sink)
+    }
+
     /// Send one conversation request, when there is one.
     ///
     /// @param outgoing - what to ask for, if anything.
@@ -994,6 +1007,9 @@ impl Session {
         let frame = match &outgoing {
             Outgoing::ListSessions => rpc::request(id, "sessions/list", json!({})),
             Outgoing::ListWorkspaces => rpc::request(id, "workspaces/list", json!({})),
+            Outgoing::PanelLifecycle { action } => {
+                rpc::request(id, "panel/lifecycle", json!({ "action": action.wire() }))
+            }
             Outgoing::CreateSession { workspace_id } => {
                 // The host's router requires a non-empty `workspaceId` and rejects the request
                 // outright (`requireString`, `bridge/router.ts`), so "ask for the default by
@@ -2005,6 +2021,35 @@ mod tests {
         assert!(session.is_ready());
         assert_eq!(session.host_config().host_version.as_deref(), Some("0.2.0-rc.2"));
         assert_eq!(session.host_config().session_id.as_deref(), Some("quorfloat-1-abc"));
+    }
+
+    #[test]
+    fn the_menu_bar_can_ask_the_host_to_restart_or_stop_this_process() {
+        // The tray offers these two because the panel cannot do them itself: replacing or ending
+        // the process is the supervisor's business, and an exit it reads as a crash would simply
+        // be restarted (2026-10-09). What this asserts is the wire half of that: both choices
+        // leave as a `panel/lifecycle` request carrying the action the host's router expects.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        let mut source = ScriptedSource::new(vec![hello_ok()]);
+        session.run(&mut source, &mut sink);
+        sink.frames.clear();
+
+        assert!(session.request_panel_lifecycle(PanelLifecycle::Restart, &mut sink));
+        assert!(session.request_panel_lifecycle(PanelLifecycle::Stop, &mut sink));
+
+        let asked: Vec<Value> = sink
+            .frames
+            .iter()
+            .map(|frame| json!([frame["method"], frame["params"]["action"]]))
+            .collect();
+        assert_eq!(
+            asked,
+            vec![
+                json!(["panel/lifecycle", "restart"]),
+                json!(["panel/lifecycle", "stop"]),
+            ],
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ import { randomUUID } from 'node:crypto'
 
 import { Config, DEFAULT_CONFIG, type QuorfloatConfig } from './config.js'
 import type { ChannelError } from './bridge/errors.js'
-import { HostRouter } from './bridge/router.js'
+import { HostRouter, type PanelLifecycleAction } from './bridge/router.js'
 import { QuorfloatSupervisor, type SupervisorEvent, type SupervisorSnapshot } from './host/supervisor.js'
 import { resolveQuorfloatBinary, type ResolvedBinary } from './host/binary.js'
 import { registerPresenceGateway, type InboundPresenceReport } from './host/presence-gateway.js'
@@ -254,6 +254,19 @@ export function createPlugin(overrides: PluginOverrides = {}) {
             // panel's own presence; the browser half goes through the gateway
             // service instead. Both funnel into the same tracker.
             reportPresence: async (surface, report) => acceptPresence({ ...report, surface }),
+            // The panel's tray menu can replace or deliberately stop the process
+            // that hosts it. `supervisor` is declared below this closure, but the
+            // closure only runs after it is assigned: `createRouter` is called
+            // from inside `supervisor.start()`, never while the supervisor is
+            // still being constructed. `stop` must go through the supervisor's
+            // own entry — that is what marks the exit as deliberate, and a stop
+            // the policy read as a crash would be undone by an automatic restart.
+            panelLifecycle: async (action: PanelLifecycleAction) => {
+              log.info('panel requested a lifecycle action', { action })
+              if (action === 'stop') await supervisor.stop()
+              else await supervisor.restart()
+              return { action, accepted: true as const }
+            },
             diagnostics: () => ({
               hostVersion: hostVersion(),
               services: activation.probe?.presence ?? {},
