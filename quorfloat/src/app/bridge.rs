@@ -794,7 +794,7 @@ mod tests {
         // field never named.
         let (mut session, mut sink) = followed();
         list_workspaces(&mut session, &mut sink);
-        start_new(&mut session, &mut sink);
+        let _ = start_new(&mut session, &mut sink);
         let mut shell = view();
         assert_eq!(
             snapshot(&session, &shell)["session"]["createWorkspace"], "ws-project",
