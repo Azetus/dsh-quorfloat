@@ -23,6 +23,7 @@ import { HostRouter, type PanelLifecycleAction } from './bridge/router.js'
 import { QuorfloatSupervisor, type SupervisorEvent, type SupervisorSnapshot } from './host/supervisor.js'
 import { resolveQuorfloatBinary, type ResolvedBinary } from './host/binary.js'
 import { registerPresenceGateway, type InboundPresenceReport } from './host/presence-gateway.js'
+import { applyLifecycle, registerControlGateway } from './host/control-gateway.js'
 import {
   createHarnessFromContext,
   HarnessError,
@@ -72,6 +73,8 @@ interface Activation {
   presence?: PresenceTracker | undefined
   /** Disposer for the browser-facing presence service. */
   presenceGateway?: Disposer | undefined
+  /** Disposer for the browser-facing control service. */
+  controlGateway?: Disposer | undefined
   stopped: boolean
 }
 
@@ -261,10 +264,11 @@ export function createPlugin(overrides: PluginOverrides = {}) {
             // still being constructed. `stop` must go through the supervisor's
             // own entry — that is what marks the exit as deliberate, and a stop
             // the policy read as a crash would be undone by an automatic restart.
+            // The dispatch itself is shared with the browser-facing `panel`
+            // endpoint so the two cannot disagree about what an action means.
             panelLifecycle: async (action: PanelLifecycleAction) => {
               log.info('panel requested a lifecycle action', { action })
-              if (action === 'stop') await supervisor.stop()
-              else await supervisor.restart()
+              await applyLifecycle(supervisor, action)
               return { action, accepted: true as const }
             },
             diagnostics: () => ({
@@ -309,6 +313,15 @@ export function createPlugin(overrides: PluginOverrides = {}) {
         },
       })
       activation.supervisor = supervisor
+      try {
+        // Registered once the supervisor exists, but before the first spawn: a
+        // status read during startup must answer "starting", not "unavailable".
+        activation.controlGateway = registerControlGateway({ ctx, host: supervisor, log })
+      } catch (error) {
+        // The browser half loses its status and control surface, but the plugin
+        // still owns the process: report rather than fail activation.
+        log.warn('could not register the panel control gateway; the browser half cannot read or change supervision state', error)
+      }
       void supervisor
         .start()
         .then(snapshot => {
@@ -494,6 +507,12 @@ async function deactivate(activation: Activation, log: Logger): Promise<void> {
     // Unregistering the browser-facing service must not block the rest of teardown.
   }
   activation.presenceGateway = undefined
+  try {
+    activation.controlGateway?.()
+  } catch {
+    // Unregistering the browser-facing control service must not block the rest of teardown.
+  }
+  activation.controlGateway = undefined
   try {
     activation.injection?.()
   } catch {
