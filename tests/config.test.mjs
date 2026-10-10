@@ -28,7 +28,7 @@ test('an absent config normalizes to documented defaults', () => {
   assert.equal(result.value.defaultWorkspaceId, '')
   assert.equal(result.value.window.width, 640)
   assert.equal(result.value.window.maxHeight, 560)
-  assert.equal(result.value.window.anchor, 'top-center')
+  assert.equal(result.value.window.anchor, 'center', 'the centre of the primary display')
   assert.equal(result.value.window.theme, 'system')
   assert.equal(result.value.heartbeatMs, 5000)
   assert.equal(result.value.heartbeatMissLimit, 3)
@@ -42,7 +42,7 @@ test('a partial patch fills defaults for the fields it omits', () => {
   assert.equal(result.value.hotkey, '', 'an empty hotkey means "register none"')
   assert.equal(result.value.window.width, 800)
   assert.equal(result.value.window.maxHeight, 560, 'sibling defaults still apply')
-  assert.equal(result.value.window.anchor, 'top-center')
+  assert.equal(result.value.window.anchor, 'center')
 })
 
 test('an unknown top-level field is rejected by name', () => {

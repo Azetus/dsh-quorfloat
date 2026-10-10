@@ -19,7 +19,14 @@
 
 import type { StandardSchemaIssue, StandardSchemaV1 } from './cordis-types.js'
 
-/** Where the panel anchors on the display. */
+/**
+ * Where the panel anchors on the display.
+ *
+ * The Rust half implements exactly these four names (`app::geometry::Anchor`), and `center` is
+ * both the default and the placement it falls back to when a remembered window position turns
+ * out to be on no attached display — so a name added here and not there would be a value the
+ * host accepts and the panel silently ignores.
+ */
 export type WindowAnchor = 'top-center' | 'top-left' | 'top-right' | 'center'
 
 /** Theme preference forwarded to the quorfloat subproject. */
@@ -137,7 +144,10 @@ const SPEC = {
     def: {
       width: { kind: 'int', def: 640, min: 360, max: 1600 },
       maxHeight: { kind: 'int', def: 560, min: 240, max: 2000 },
-      anchor: { kind: 'enum', def: 'top-center', values: ['top-center', 'top-left', 'top-right', 'center'] },
+      // The centre of the primary display: the panel is summoned into view, so the default has
+      // to be somewhere the user is already looking — and it is the placement the panel falls
+      // back to when a remembered position is on no attached display.
+      anchor: { kind: 'enum', def: 'center', values: ['top-center', 'top-left', 'top-right', 'center'] },
       alwaysOnTop: { kind: 'boolean', def: true },
       reduceMotion: { kind: 'boolean', def: false },
       theme: { kind: 'enum', def: 'system', values: ['system', 'light', 'dark'] },

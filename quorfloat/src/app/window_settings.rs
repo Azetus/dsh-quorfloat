@@ -34,6 +34,15 @@ pub struct WindowSettings {
     /// panel" and "press the hotkey and then describe what you saw", which is what makes a
     /// scriptable run possible.
     pub start_visible: bool,
+    /// Where the panel opens when there is no remembered position to restore.
+    ///
+    /// A startup fact like [`Self::start_visible`], not something the host's `ready` payload can
+    /// change: the anchor decides where the window is *created*, and a configuration push arrives
+    /// after that, when moving a panel the user may already be looking at would be the wrong
+    /// thing to do. The default is the centre of the primary display (see
+    /// [`crate::app::geometry::Anchor::Center`]), which is also what the panel falls back to when
+    /// a remembered position turns out to be on no attached display.
+    pub anchor: crate::app::geometry::Anchor,
 }
 
 impl Default for WindowSettings {
@@ -52,6 +61,9 @@ impl Default for WindowSettings {
             theme: crate::app::theme::Preference::System,
             hide_on_blur: true,
             start_visible: false,
+            // The host's schema default, restated here for the same reason as the numbers above:
+            // the very first frame is placed before `ready` arrives.
+            anchor: crate::app::geometry::Anchor::default(),
         }
     }
 }
@@ -75,6 +87,7 @@ impl WindowSettings {
             hide_on_blur: bool_env("DSH_QUORFLOAT_WINDOW_HIDE_ON_BLUR", defaults.hide_on_blur),
             start_visible: bool_env("DSH_QUORFLOAT_WINDOW_START_VISIBLE", defaults.start_visible),
             reduce_motion: bool_env("DSH_QUORFLOAT_WINDOW_REDUCE_MOTION", defaults.reduce_motion),
+            anchor: anchor_env("DSH_QUORFLOAT_WINDOW_ANCHOR", defaults.anchor),
         }
     }
 
@@ -142,6 +155,18 @@ fn float_env(key: &str, fallback: f32) -> f32 {
         .unwrap_or(fallback)
 }
 
+/// Read an anchor-valued environment variable.
+///
+/// An unknown name keeps the default rather than moving the panel to a guess: the value crosses a
+/// language boundary (`WindowAnchor` in `src/config.ts`), and a build that predates a new spelling
+/// must not open the panel somewhere arbitrary.
+fn anchor_env(key: &str, fallback: crate::app::geometry::Anchor) -> crate::app::geometry::Anchor {
+    std::env::var(key)
+        .ok()
+        .and_then(|value| crate::app::geometry::Anchor::from_name(&value))
+        .unwrap_or(fallback)
+}
+
 /// Read a boolean-valued environment variable, accepting the spellings the host
 /// and a human both produce.
 fn bool_env(key: &str, fallback: bool) -> bool {
@@ -168,6 +193,15 @@ mod tests {
         assert_eq!(settings.max_height, 560.0);
         assert!(settings.always_on_top);
         assert!(!settings.reduce_motion);
+    }
+
+    #[test]
+    fn the_panel_anchors_at_the_centre_unless_told_otherwise() {
+        // The default used to be `top-center`, which the shell never honoured at all; the half
+        // that has to agree with `src/config.ts` and `cordis.patch.yml` is this one.
+        use crate::app::geometry::Anchor;
+        assert_eq!(WindowSettings::default().anchor, Anchor::Center);
+        assert_eq!(anchor_env("DSH_QUORFLOAT_TEST_ANCHOR_ABSENT", Anchor::Center), Anchor::Center);
     }
 
     #[test]

@@ -69,6 +69,11 @@ test('the shipped patch passes the plugin configuration schema', async () => {
   // every field is present, none of them left to an implicit default.
   assert.equal(result.value.enabled, true)
   assert.equal(result.value.window.width, 640)
+  // The anchor is not just any legal value: the schema default, this row, and the Rust
+  // half's default (`app::geometry::Anchor`) are the same placement, and a row that
+  // silently disagreed would open the panel somewhere the other two never name.
+  assert.equal(result.value.window.anchor, 'center', 'the centre of the primary display')
+  assert.equal(result.value.window.anchor, DEFAULT_CONFIG.window.anchor)
   assert.equal(result.value.logLevel, 'info')
 })
 
