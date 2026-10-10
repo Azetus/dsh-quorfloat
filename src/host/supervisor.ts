@@ -794,6 +794,12 @@ function quorfloatEnvironment(config: QuorfloatConfig): NodeJS.ProcessEnv {
     // sidecar persists the first-launch value as its own setting, and that write
     // happens before any frame arrives.
     DSH_QUORFLOAT_WINDOW_LANGUAGE: config.window.language,
+    // And whether that value is a decision or only the `en` fallback. It has to reach the
+    // sidecar *before* it writes anything down: the fallback is also what a launch nobody
+    // decided resolves to, and persisting it would freeze the panel in English without
+    // ever letting its webview answer. Only an explicit `false` says "fallback", so a
+    // configuration that predates this field keeps the historical behaviour.
+    DSH_QUORFLOAT_WINDOW_LANGUAGE_DECIDED: config.window.languageDecided === false ? '0' : '1',
   }
   // POSIX and Windows names for the same facts, both forwarded. The Windows
   // entries are not decoration: `HOME` is normally unset there, and while the host

@@ -31,4 +31,12 @@ export const api = {
   }) => invoke('set_preferences', preferences),
   reportContentHeight: (height: number) => invoke('report_content_height', { height }),
   setVisible: (visible: boolean) => invoke('set_visible', { visible }),
+  /**
+   * Report the language tags this webview can see, once, on load.
+   *
+   * Sent verbatim and in the browser's own order: the shell keeps the raw list as the
+   * record of what this machine says, and resolves it only when nobody has chosen a
+   * language (see `lib/languages.ts`).
+   */
+  reportLanguages: (languages: readonly string[]) => invoke('report_languages', { languages }),
 }

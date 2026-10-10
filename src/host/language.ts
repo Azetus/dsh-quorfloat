@@ -6,13 +6,21 @@
  * same way and never have to be translated between two vocabularies.
  *
  * The setting is a *panel* setting (see `config.ts`), and it starts empty on a fresh
- * install. Empty is not a language: it means "nobody has chosen one here yet", and
- * the first launch answers it from the Harness's own locale preference
- * (`packages/client/locale/src/locale-settings.ts` in the Harness checkout: namespace
- * `locale`, field `preference`, stored in the Host user-settings document). The
- * sidecar persists that answer as the panel's own setting, so every later launch
- * reads an explicit value and never consults the Harness again — there is no
- * "follow" mode and no live following.
+ * install. Empty is not a language: it means "nobody has chosen one here yet", and the
+ * first launch answers it in the Harness's own order — an explicit Harness locale
+ * preference (`packages/client/locale/src/locale-settings.ts` in the Harness checkout:
+ * namespace `locale`, field `preference`, stored in the Host user-settings document), and
+ * otherwise "the browser decides". The panel *is* a webview, so that last answer is its
+ * own `navigator.languages`, reported once from the page; Node's POSIX locale is not the
+ * Harness's signal (on macOS a GUI launch usually has no `LANG` at all). The sidecar
+ * persists whichever answer won as the panel's own setting, so every later launch reads
+ * an explicit value and never consults the Harness again — there is no "follow" mode and
+ * no live following.
+ *
+ * This module owns the pre-spawn half of that order, and the fact of whether it actually
+ * *decided* anything; the webview's half lives where the report arrives
+ * (`quorfloat/src/main.rs` and `app::language::from_reported`), because no report can
+ * exist before the process does.
  *
  * Reading is deliberately total and best-effort. The locale preference is another
  * plugin's business, its service may not be composed at all, and its value may name
@@ -79,9 +87,44 @@ export function isLanguage(value: unknown): value is Language {
  * @returns the language to use.
  */
 export function resolvePanelLanguage(configured: unknown, harnessPreference: unknown): Language {
-  if (isLanguage(configured)) return configured
-  if (isLanguage(harnessPreference)) return harnessPreference
-  return FALLBACK_LANGUAGE
+  return resolvePanelLanguageDecision(configured, harnessPreference).language
+}
+
+/**
+ * The language a launch starts with, and whether that value is a decision.
+ *
+ * The two travel together because only this function knows which of the three inputs
+ * answered. `decided: false` is not "no language" — the value is still `en`, and it is what
+ * the first frame draws with — it means **nobody has chosen one yet**, and the panel's own
+ * webview is still owed the question (the Harness's rule for that state is "the browser
+ * decides", and the panel is a webview). The sidecar must not write a fallback down as the
+ * panel's own setting, or every later launch would start in English without ever asking.
+ *
+ * @param configured - the panel's own setting (`config.window.language`), possibly empty.
+ * @param harnessPreference - the Harness's locale preference, when it could be read.
+ * @returns the language to use and whether it is a decision rather than the fallback.
+ */
+export function resolvePanelLanguageDecision(
+  configured: unknown,
+  harnessPreference: unknown,
+): PanelLanguageDecision {
+  if (isLanguage(configured)) return { language: configured, decided: true }
+  if (isLanguage(harnessPreference)) return { language: harnessPreference, decided: true }
+  return { language: FALLBACK_LANGUAGE, decided: false }
+}
+
+/** The language a launch starts with, and whether it is a decision. */
+export interface PanelLanguageDecision {
+  /** The value in play; see {@link resolvePanelLanguage}. */
+  readonly language: Language
+  /**
+   * Whether that value came from a real choice.
+   *
+   * `true` for an explicit plugin configuration or an explicit Harness locale; `false`
+   * when neither named a language this build ships, which leaves the webview's own report
+   * to answer.
+   */
+  readonly decided: boolean
 }
 
 /**

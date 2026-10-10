@@ -22,7 +22,7 @@ import type { ChannelError } from './bridge/errors.js'
 import { HostRouter, type PanelLifecycleAction } from './bridge/router.js'
 import { QuorfloatSupervisor, type SupervisorEvent, type SupervisorSnapshot } from './host/supervisor.js'
 import { resolveQuorfloatBinary, type ResolvedBinary } from './host/binary.js'
-import { readHarnessLocalePreference, resolvePanelLanguage } from './host/language.js'
+import { readHarnessLocalePreference, resolvePanelLanguageDecision } from './host/language.js'
 import { registerPresenceGateway, type InboundPresenceReport } from './host/presence-gateway.js'
 import { applyLifecycle, registerControlGateway } from './host/control-gateway.js'
 import {
@@ -239,18 +239,29 @@ export function createPlugin(overrides: PluginOverrides = {}) {
       // unsupported, unreadable or absent becomes `en`. The sidecar persists the
       // answer as the panel's own setting, which is what makes later launches
       // explicit instead of a second reading of the Harness.
+      //
+      // The sidecar is also told *which* of those it was. `en` is what this resolves to
+      // when nobody chose anything, and the panel's own webview — the browser the
+      // Harness's "no stored preference" rule delegates to — has not reported yet, so a
+      // fallback must not be written down as a choice (see `resolvePanelLanguageDecision`
+      // and `quorfloat/src/main.rs`, `report_languages`).
       const harnessPreference = readHarnessLocalePreference(name => ctx.get(name))
-      const language = resolvePanelLanguage(config.window.language, harnessPreference)
+      const decision = resolvePanelLanguageDecision(config.window.language, harnessPreference)
+      const language = decision.language
       log.info('panel language resolved', {
         language,
+        decided: decision.decided,
         setting: config.window.language === '' ? '(unset)' : config.window.language,
         harness: harnessPreference ?? '(unreachable)',
       })
       // Only the supervisor ever reads `window.language`, and it reads it through
-      // `config()`, so the resolved value is carried on a copy rather than mutating
-      // the validated configuration object the rest of activation closed over.
-      const effectiveConfig: QuorfloatConfig =
-        language === config.window.language ? config : { ...config, window: { ...config.window, language } }
+      // `config()`, so the resolved values are carried on a copy rather than mutating
+      // the validated configuration object the rest of activation closed over. The copy
+      // is unconditional now that it carries two facts instead of one.
+      const effectiveConfig: QuorfloatConfig = {
+        ...config,
+        window: { ...config.window, language, languageDecided: decision.decided },
+      }
 
       const supervisor = new QuorfloatSupervisor({
         config: () => effectiveConfig,
