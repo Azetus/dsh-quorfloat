@@ -1,6 +1,7 @@
 // The per-turn disclosure row: caret, label, and — while the turn is being worked on —
 // the panel's own turning mark.
 
+import { useT } from '../../hooks/useI18n'
 import { Icon } from '../common/Icon'
 
 /** Props for {@link Disclosure}. */
@@ -24,6 +25,7 @@ export interface DisclosureProps {
  * @returns the row.
  */
 export function Disclosure({ open, working, onToggle }: DisclosureProps) {
+  const t = useT()
   return (
     <button
       type="button"
@@ -34,7 +36,7 @@ export function Disclosure({ open, working, onToggle }: DisclosureProps) {
       <span className="q-caret" style={{ transform: open ? 'rotate(90deg)' : '' }}>
         <Icon name="caret-right" />
       </span>
-      <span>{working ? '正在工作' : '已完成'}</span>
+      <span>{working ? t('disclosure.working') : t('disclosure.done')}</span>
       {working && (
         <span className="q-spin">
           <svg viewBox="0 0 256 256" width="11" height="11" aria-hidden="true">

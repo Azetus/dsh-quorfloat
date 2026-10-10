@@ -1,5 +1,6 @@
 // The top bar's conversation picker.
 
+import { useT } from '../../hooks/useI18n'
 import type { Snapshot } from '../../lib/state'
 import { sessionTitle } from '../../lib/view-text'
 import { Icon } from '../common/Icon'
@@ -27,13 +28,14 @@ export interface SessionPickerProps {
  * @returns the picker.
  */
 export function SessionPicker({ state, targetWorkspace, open, onToggle, onClose }: SessionPickerProps) {
+  const t = useT()
   const pinned = state.session.pinned !== null
   return (
     <PickerPopover
       id="q-session"
       menuId="q-session-menu"
-      label="选择会话"
-      menuLabel="会话选择"
+      label={t('session.pickerLabel')}
+      menuLabel={t('session.menuLabel')}
       wrapClass="q-session-wrap"
       open={open}
       onToggle={onToggle}
@@ -41,7 +43,7 @@ export function SessionPicker({ state, targetWorkspace, open, onToggle, onClose 
       trigger={
         <>
           <span id="q-session-icon"><Icon name="message-square" /></span>
-          <span className="q-name" id="q-session-name">{sessionTitle(state)}</span>
+          <span className="q-name" id="q-session-name">{t(sessionTitle(state))}</span>
           <span id="q-session-pinmark" className="q-pinmark" hidden={!pinned}>
             {pinned && <Icon name="pin" />}
           </span>

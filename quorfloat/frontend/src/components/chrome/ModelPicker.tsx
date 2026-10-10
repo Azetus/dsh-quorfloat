@@ -1,5 +1,6 @@
 // The runtime row's model + reasoning-effort picker.
 
+import { useT } from '../../hooks/useI18n'
 import type { Snapshot } from '../../lib/state'
 import { Icon } from '../common/Icon'
 import { ModelMenu } from '../menus/ModelMenu'
@@ -27,6 +28,7 @@ export interface ModelPickerProps {
  * @returns the picker.
  */
 export function ModelPicker({ state, open, onToggle, onClose }: ModelPickerProps) {
+  const t = useT()
   const options = state.session.options
   const current = options?.current
   const model = options?.models.find(m => m.id === current?.model && m.provider === current?.provider)
@@ -35,8 +37,8 @@ export function ModelPicker({ state, open, onToggle, onClose }: ModelPickerProps
     <PickerPopover
       id="q-config"
       menuId="q-config-menu"
-      label="模型与推理等级"
-      menuLabel="模型与推理等级设置"
+      label={t('model.pickerLabel')}
+      menuLabel={t('model.menuLabel')}
       wrapClass="q-config-wrap"
       menuClass="q-right q-up q-config-menu"
       open={open}

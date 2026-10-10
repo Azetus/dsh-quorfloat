@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest'
+import { msg, resolveText } from '../src/lib/i18n'
 import { chordFromEvent, isBareTypingKey, validateChord } from '../src/lib/hotkey'
 
 /** A keydown the recorder would capture. */
@@ -37,7 +38,17 @@ describe('validateChord', () => {
   test('a bare typing key is refused, in the shell\'s words', () => {
     const verdict = validateChord('M')
     expect(verdict.ok).toBe(false)
-    if (!verdict.ok) expect(verdict.reason).toContain('裸按键')
+    if (!verdict.ok) expect(resolveText('zh', verdict.reason)).toContain('裸按键')
+  })
+  test('the refusal is a key, so the reason follows the language', () => {
+    const bare = validateChord('M')
+    const empty = validateChord('')
+    const twoKeys = validateChord('Alt+K+J')
+    expect(bare).toEqual({ ok: false, reason: msg('hotkey.bareKey') })
+    expect(empty).toEqual({ ok: false, reason: msg('hotkey.unreadable', { chord: '' }) })
+    expect(twoKeys).toEqual({ ok: false, reason: msg('hotkey.unreadable', { chord: 'Alt+K+J' }) })
+    if (!bare.ok) expect(resolveText('en', bare.reason)).toContain('bare key')
+    if (!twoKeys.ok) expect(resolveText('en', twoKeys.reason)).toContain('Alt+K+J')
   })
   test('a bare function key is exempt', () => {
     expect(validateChord('F13').ok).toBe(true)

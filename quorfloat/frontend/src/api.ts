@@ -22,8 +22,13 @@ export const api = {
   dismissInteraction: (interactionId: string) => invoke('dismiss_interaction', { interactionId }),
   dismissHandoff: () => invoke('dismiss_handoff'),
   log: (line: string) => invoke('log', { line }),
-  setPreferences: (preferences: { theme?: string; keepOpen?: boolean; hotkey?: string }) =>
-    invoke('set_preferences', preferences),
+  setPreferences: (preferences: {
+    theme?: string
+    keepOpen?: boolean
+    hotkey?: string
+    /** The panel's own language, the same two ids the snapshot carries. */
+    language?: 'zh' | 'en'
+  }) => invoke('set_preferences', preferences),
   reportContentHeight: (height: number) => invoke('report_content_height', { height }),
   setVisible: (visible: boolean) => invoke('set_visible', { visible }),
 }

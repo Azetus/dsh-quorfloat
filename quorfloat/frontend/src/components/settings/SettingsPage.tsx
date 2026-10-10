@@ -1,8 +1,11 @@
-// The settings page: appearance, the summon shortcut, and the keep-open switch.
+// The settings page: appearance, language, the summon shortcut, and the keep-open switch.
 
+import { useT } from '../../hooks/useI18n'
+import { languageOf } from '../../lib/i18n'
 import type { Snapshot } from '../../lib/state'
 import { HotkeyField } from './HotkeyField'
 import { KeepOpenSwitch } from './KeepOpenSwitch'
+import { LanguagePicker } from './LanguagePicker'
 import { ThemeChips } from './ThemeChips'
 
 /** Props for {@link SettingsPage}. */
@@ -17,30 +20,49 @@ export interface SettingsPageProps {
   readonly onRecord: () => void
   /** Return to the conversation. */
   readonly onBack: () => void
+  /** Which popover is open, if any. */
+  readonly openMenu: string | null
+  /** Toggle one popover by trigger id. */
+  readonly onToggleMenu: (id: string) => void
+  /** Close whichever popover is open. */
+  readonly onCloseMenu: () => void
 }
 
 /**
  * Render the settings page.
  *
  * It *replaces* the conversation rather than floating over it (the design's own choice),
- * and every control applies immediately and survives a restart.
+ * and every control applies immediately and survives a restart. The language picker's open
+ * state lives with the app's other popovers, so one Escape rule serves them all.
  *
  * @param props - snapshot, recording state, and handlers.
  * @returns the page.
  */
-export function SettingsPage({ state, hidden, recording, onRecord, onBack }: SettingsPageProps) {
+export function SettingsPage({
+  state, hidden, recording, onRecord, onBack, openMenu, onToggleMenu, onCloseMenu,
+}: SettingsPageProps) {
+  const t = useT()
   return (
     <div id="q-settings" className="q-settings" hidden={hidden}>
       <div className="q-settings-title">
-        <span>悬浮窗设置</span>
-        <button id="q-settings-back" type="button" onClick={onBack}>返回对话</button>
+        <span>{t('settings.title')}</span>
+        <button id="q-settings-back" type="button" onClick={onBack}>{t('settings.back')}</button>
       </div>
       <div className="q-setting">
-        <span>外观<small>明暗主题跟随系统或手动指定</small></span>
+        <span>{t('settings.appearance')}<small>{t('settings.appearanceDetail')}</small></span>
         <ThemeChips theme={state.settings.theme} />
       </div>
       <div className="q-setting">
-        <label htmlFor="q-shortcut">呼出快捷键<small>点击后按下组合键</small></label>
+        <span>{t('settings.language')}<small>{t('settings.languageDetail')}</small></span>
+        <LanguagePicker
+          language={languageOf(state.settings.language)}
+          open={openMenu === 'q-language'}
+          onToggle={() => { onToggleMenu('q-language') }}
+          onClose={onCloseMenu}
+        />
+      </div>
+      <div className="q-setting">
+        <label htmlFor="q-shortcut">{t('settings.hotkey')}<small>{t('settings.hotkeyDetail')}</small></label>
         <HotkeyField
           requested={state.hotkey.requested}
           reason={state.hotkey.reason}
@@ -49,7 +71,7 @@ export function SettingsPage({ state, hidden, recording, onRecord, onBack }: Set
         />
       </div>
       <div className="q-setting">
-        <span>失焦时保持展开<small>切换应用后仍保留悬浮窗</small></span>
+        <span>{t('settings.keepOpen')}<small>{t('settings.keepOpenDetail')}</small></span>
         <KeepOpenSwitch hideOnBlur={state.settings.hideOnBlur} />
       </div>
     </div>

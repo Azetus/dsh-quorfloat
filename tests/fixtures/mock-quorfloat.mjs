@@ -44,6 +44,12 @@ const observed = {
   signalled: null,
   stdoutBytes: 0,
   stderr: [],
+  // The panel's language, as this process would have read it at startup and as the
+  // effective configuration carried it. Both are recorded because the two reach the
+  // sidecar by different routes (spawn environment, and the `ready` payload) and a
+  // setting missing from either is invisible from the host side.
+  windowLanguageEnv: process.env['DSH_QUORFLOAT_WINDOW_LANGUAGE'] ?? null,
+  readyWindow: null,
 }
 
 let buffer = ''
@@ -243,6 +249,7 @@ function handleNotification(message) {
       return
     case 'ready':
       observed.readyReceived = true
+      observed.readyWindow = message.params?.config?.window ?? null
       note('ready received', message.params?.config?.hotkey ?? '(no hotkey)')
       return
     default:

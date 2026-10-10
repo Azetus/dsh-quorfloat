@@ -1,6 +1,7 @@
 // The permission picker's menu: the three built-in presets, each with its own glyph.
 
 import { api } from '../../api'
+import { useT } from '../../hooks/useI18n'
 import { permissionIcon } from '../../lib/icons'
 import type { Snapshot } from '../../lib/state'
 import { MenuHeading } from './MenuHeading'
@@ -25,12 +26,13 @@ export interface PermissionMenuProps {
  * @returns the menu contents.
  */
 export function PermissionMenu({ state, onClose }: PermissionMenuProps) {
+  const t = useT()
   const options = state.session.options
   return (
     <>
-      <MenuHeading title="会话权限" />
+      <MenuHeading title={t('permission.heading')} />
       {options === null
-        ? <MenuHint text="权限目录尚未到达。" />
+        ? <MenuHint text={t('permission.catalogPending')} />
         : options.permissions.map(permission => (
           <MenuOption
             key={permission.value}

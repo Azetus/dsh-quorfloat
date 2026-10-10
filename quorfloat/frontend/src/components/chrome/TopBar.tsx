@@ -1,5 +1,6 @@
 // The panel's top bar: brand, the two context pickers, and the window tools.
 
+import { useT } from '../../hooks/useI18n'
 import type { Snapshot } from '../../lib/state'
 import { Icon } from '../common/Icon'
 import { SessionPicker } from './SessionPicker'
@@ -40,6 +41,7 @@ export function TopBar({
   state, targetWorkspace, openMenu, settingsOpen, onToggleMenu, onCloseMenu,
   onChooseWorkspace, onToggleSettings, onHide,
 }: TopBarProps) {
+  const t = useT()
   return (
     <div className="q-top" data-tauri-drag-region="deep">
       <span className="q-brand">DeepSeek</span>
@@ -66,13 +68,13 @@ export function TopBar({
           id="q-settings-open"
           type="button"
           className="q-close"
-          aria-label="悬浮窗设置"
+          aria-label={t('settings.title')}
           aria-pressed={settingsOpen}
           onClick={onToggleSettings}
         >
           <Icon name="settings-2" />
         </button>
-        <button id="q-close" type="button" className="q-close" aria-label="收起悬浮窗" onClick={onHide}>
+        <button id="q-close" type="button" className="q-close" aria-label={t('panel.hide')} onClick={onHide}>
           <Icon name="x" />
         </button>
       </div>

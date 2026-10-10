@@ -22,6 +22,14 @@ pub struct WindowSettings {
     pub reduce_motion: bool,
     /// Which of the design's two palettes to draw in.
     pub theme: crate::app::theme::Preference,
+    /// Which language the panel's own interface and menu bar speak.
+    ///
+    /// The panel's setting, not the conversation's: the strings this process owns (the tray
+    /// menu) and the copy the frontend owns are drawn from it. The host resolves it before
+    /// the process starts — an explicit panel setting, or the Harness's own locale on the
+    /// very first launch — and the panel's remembered choice sits on top of it like every
+    /// other setting here (see [`Self::with_preferences`]).
+    pub language: crate::app::language::Language,
     /// Put the panel away when the user moves to another window.
     ///
     /// The design's own semantics: the panel is a thing you summon, use, and leave — and a
@@ -59,6 +67,9 @@ impl Default for WindowSettings {
             // A panel that floats over other applications should look like it belongs to
             // the desktop it is floating over, so the platform decides until told otherwise.
             theme: crate::app::theme::Preference::System,
+            // The language the tray's own strings are written in; the host overrides this
+            // from the resolved setting, and a standalone run keeps the historical Chinese.
+            language: crate::app::language::Language::default(),
             hide_on_blur: true,
             start_visible: false,
             // The host's schema default, restated here for the same reason as the numbers above:
@@ -84,6 +95,7 @@ impl WindowSettings {
             max_height: float_env("DSH_QUORFLOAT_WINDOW_MAX_HEIGHT", defaults.max_height),
             always_on_top: bool_env("DSH_QUORFLOAT_WINDOW_ALWAYS_ON_TOP", defaults.always_on_top),
             theme: crate::app::theme::Preference::from_env(),
+            language: crate::app::language::Language::from_env(),
             hide_on_blur: bool_env("DSH_QUORFLOAT_WINDOW_HIDE_ON_BLUR", defaults.hide_on_blur),
             start_visible: bool_env("DSH_QUORFLOAT_WINDOW_START_VISIBLE", defaults.start_visible),
             reduce_motion: bool_env("DSH_QUORFLOAT_WINDOW_REDUCE_MOTION", defaults.reduce_motion),
@@ -109,6 +121,14 @@ impl WindowSettings {
         }
         if let Some(theme) = window.get("theme").and_then(serde_json::Value::as_str) {
             self.theme = crate::app::theme::Preference::from_name(Some(theme));
+        }
+        // An unrecognised id keeps the language already in force: this value crosses a
+        // language boundary (`LanguagePreference` in `src/config.ts`), and a host build
+        // that learns a third language must not make an older panel guess at it.
+        if let Some(named) = crate::app::language::Language::known(
+            window.get("language").and_then(serde_json::Value::as_str),
+        ) {
+            self.language = named;
         }
         if let Some(always) = window.get("alwaysOnTop").and_then(serde_json::Value::as_bool) {
             self.always_on_top = always;
@@ -141,6 +161,9 @@ impl WindowSettings {
         }
         if let Some(keep_open) = preferences.keep_open {
             effective.hide_on_blur = !keep_open;
+        }
+        if let Some(language) = preferences.language {
+            effective.language = language;
         }
         effective
     }
@@ -224,5 +247,35 @@ mod tests {
         assert_eq!(settings.max_height, 560.0, "the missing field kept its default");
         settings.apply_host(None);
         assert_eq!(settings.width, 500.0, "an absent payload changes nothing");
+    }
+
+    #[test]
+    fn the_host_resolves_the_language_on_top_of_the_built_in_default() {
+        use crate::app::language::Language;
+        // The host sends the value it resolved (a panel setting, or the Harness's own
+        // locale on the first launch), so the panel never has to read the Harness itself.
+        let mut settings = WindowSettings::default();
+        assert_eq!(settings.language, Language::Zh, "a standalone run keeps the historical Chinese");
+        settings.apply_host(Some(&serde_json::json!({ "language": "en" })));
+        assert_eq!(settings.language, Language::En);
+        // An id this build does not ship is not a decision: the current language stands.
+        settings.apply_host(Some(&serde_json::json!({ "language": "fr" })));
+        assert_eq!(settings.language, Language::En, "an unknown id leaves the language alone");
+        settings.apply_host(Some(&serde_json::json!({ "language": "" })));
+        assert_eq!(settings.language, Language::En, "the schema's unset is not a language either");
+    }
+
+    #[test]
+    fn the_panels_own_language_outranks_the_hosts_baseline() {
+        use crate::app::language::Language;
+        use crate::app::preferences::Preferences;
+        // The same precedence every other panel setting follows: the host's configuration
+        // is the baseline, and a choice made *in the panel* is an override. Without this
+        // the settings page would appear to work and then lose to the seed.
+        let baseline = WindowSettings { language: Language::Zh, ..WindowSettings::default() };
+        let chosen = Preferences { language: Some(Language::En), ..Preferences::default() };
+        assert_eq!(baseline.with_preferences(&chosen).language, Language::En);
+        // With nothing chosen here, the host's resolved value stands.
+        assert_eq!(baseline.with_preferences(&Preferences::default()).language, Language::Zh);
     }
 }

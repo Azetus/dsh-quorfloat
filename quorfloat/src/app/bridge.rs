@@ -83,6 +83,11 @@ pub fn snapshot(session: &Session, shell: &ShellView) -> Value {
             "reduceMotion": settings.reduce_motion,
             "hideOnBlur": settings.hide_on_blur,
             "theme": theme_name(settings.theme),
+            // The panel's language, in the Harness's own ids: the frontend picks its copy
+            // from it and the menu bar (a Rust-side surface) is labelled from the same
+            // value. Always present and always one of `zh` / `en` — the host resolves the
+            // setting and the first-launch seed before any frame reaches this process.
+            "language": settings.language.as_str(),
         },
         "hotkey": {
             "requested": shell.hotkey_requested,
@@ -630,7 +635,7 @@ pub fn log(sink: &mut dyn FrameSink, line: &str) -> Value {
 /// be refused here rather than quietly becoming something else on the next start.
 ///
 /// @param preferences - what is already set; the incoming values sit on top.
-/// @param incoming - `{theme?, keepOpen?, hotkey?}`.
+/// @param incoming - `{theme?, keepOpen?, hotkey?, language?}`.
 /// @returns the updated preferences, or an error naming the refused value.
 pub fn apply_preferences(mut preferences: Preferences, incoming: &Value) -> Result<Preferences, String> {
     if let Some(theme) = incoming.get("theme").and_then(Value::as_str) {
@@ -648,6 +653,15 @@ pub fn apply_preferences(mut preferences: Preferences, incoming: &Value) -> Resu
         let hotkey = hotkey.trim();
         validate_hotkey(hotkey)?;
         preferences.hotkey = Some(hotkey.to_owned());
+    }
+    if let Some(language) = incoming.get("language").and_then(Value::as_str) {
+        // Refused rather than remapped, for the same reason an unknown theme is: a
+        // language this build does not ship cannot be honoured, and quietly becoming
+        // `zh` would make the settings page look like it worked.
+        match crate::app::language::Language::known(Some(language)) {
+            Some(language) => preferences.language = Some(language),
+            None => return Err(format!("读不懂这个语言：{language}")),
+        }
     }
     Ok(preferences)
 }
@@ -729,6 +743,10 @@ mod tests {
         let value = snapshot(&session, &view());
         assert_eq!(value["settings"]["width"], 640.0);
         assert_eq!(value["settings"]["theme"], "system");
+        // The language the frontend pulls its copy from, in the Harness's own ids.
+        // Always present: a frontend that has to guess would draw the wrong language
+        // for exactly as long as it takes the setting to arrive.
+        assert_eq!(value["settings"]["language"], "zh");
         assert_eq!(value["hotkey"]["requested"], "Alt+Space");
         assert_eq!(value["hotkey"]["registered"], true);
         assert_eq!(value["height"]["target"], 0.0);
@@ -1039,12 +1057,47 @@ mod tests {
         let mut preferences = Preferences { keep_open: Some(false), ..Preferences::default() };
         preferences = apply_preferences(
             preferences,
-            &serde_json::json!({ "theme": "dark", "keepOpen": true, "hotkey": "Cmd+Shift+K" }),
+            &serde_json::json!({ "theme": "dark", "keepOpen": true, "hotkey": "Cmd+Shift+K", "language": "en" }),
         )
-        .expect("all three are known values");
+        .expect("every one of the four is a known value");
         assert_eq!(preferences.theme, Some(crate::app::theme::Preference::Dark));
         assert_eq!(preferences.keep_open, Some(true));
         assert_eq!(preferences.hotkey.as_deref(), Some("Cmd+Shift+K"));
+        assert_eq!(preferences.language, Some(crate::app::language::Language::En));
+    }
+
+    #[test]
+    fn the_settings_page_cannot_set_a_language_this_build_does_not_ship() {
+        // Same rule as an unknown theme: remembering a value the panel cannot honour
+        // would make the settings page appear to work and change nothing.
+        let error = apply_preferences(
+            Preferences::default(),
+            &serde_json::json!({ "language": "fr" }),
+        )
+        .expect_err("an unknown language is refused, not guessed");
+        assert!(error.contains("fr"), "{error}");
+    }
+
+    #[test]
+    fn changing_the_language_leaves_the_other_preferences_alone() {
+        let before = Preferences {
+            theme: Some(crate::app::theme::Preference::Dark),
+            keep_open: Some(true),
+            hotkey: Some("Cmd+Shift+K".to_owned()),
+            language: Some(crate::app::language::Language::Zh),
+        };
+        let after = apply_preferences(before.clone(), &serde_json::json!({ "language": "en" }))
+            .expect("en is a language this build ships");
+        assert_eq!(after.language, Some(crate::app::language::Language::En));
+        assert_eq!(after.theme, before.theme);
+        assert_eq!(after.keep_open, before.keep_open);
+        assert_eq!(after.hotkey, before.hotkey);
+
+        // A payload that does not mention the language must not clear it: Tauri
+        // delivers an absent argument as `null`, and `null` is "unchanged", not "unset".
+        let untouched = apply_preferences(after.clone(), &serde_json::json!({ "language": Value::Null }))
+            .expect("a null language is not a value");
+        assert_eq!(untouched.language, Some(crate::app::language::Language::En));
     }
 
     #[test]

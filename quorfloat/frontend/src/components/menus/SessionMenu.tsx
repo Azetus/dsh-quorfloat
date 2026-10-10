@@ -1,6 +1,7 @@
 // The conversation picker's menu.
 
 import { api } from '../../api'
+import { useT } from '../../hooks/useI18n'
 import type { Snapshot } from '../../lib/state'
 import { conversationTitle, relativeTime, workspaceTitle } from '../../lib/view-text'
 import { MenuHeading } from './MenuHeading'
@@ -31,13 +32,14 @@ export interface SessionMenuProps {
  * @returns the menu contents.
  */
 export function SessionMenu({ state, targetWorkspace, onClose }: SessionMenuProps) {
+  const t = useT()
   const pinned = state.session.pinned
   const conversations = state.session.conversations.filter(c => !c.blank)
   return (
     <>
-      <MenuHeading title="会话" detail={workspaceTitle(state, targetWorkspace)} />
+      <MenuHeading title={t('session.heading')} detail={t(workspaceTitle(state, targetWorkspace))} />
       <MenuOption
-        label="新建会话"
+        label={t('session.new')}
         selected={state.session.following === null}
         symbol="plus"
         onPick={() => {
@@ -54,7 +56,7 @@ export function SessionMenu({ state, targetWorkspace, onClose }: SessionMenuProp
             <MenuOption
               label={title}
               selected={state.session.following?.sessionId === conversation.sessionId}
-              description={relativeTime(conversation.updatedAt)}
+              description={t(relativeTime(conversation.updatedAt))}
               symbol="message-square"
               onPick={() => {
                 onClose()
@@ -62,7 +64,7 @@ export function SessionMenu({ state, targetWorkspace, onClose }: SessionMenuProp
               }}
             />
             <PinButton
-              name={`会话 ${title}`}
+              name={t('session.pinName', { name: title })}
               pinned={isPinned}
               onPick={() => {
                 onClose()
@@ -72,9 +74,9 @@ export function SessionMenu({ state, targetWorkspace, onClose }: SessionMenuProp
           </MenuRow>
         )
       })}
-      {conversations.length === 0 && <MenuHint text="没有可切换的会话。" />}
+      {conversations.length === 0 && <MenuHint text={t('session.none')} />}
       <MenuSeparator />
-      <MenuHint text={pinned !== null ? '呼出时继续固定会话。' : '固定会话后，每次呼出继续此会话。'} />
+      <MenuHint text={pinned !== null ? t('session.pinnedHint') : t('session.unpinnedHint')} />
     </>
   )
 }

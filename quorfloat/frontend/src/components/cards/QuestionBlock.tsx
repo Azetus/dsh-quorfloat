@@ -1,6 +1,7 @@
 // One question of a card: heading, text, detail, the choices, and the free-text answer.
 
 import { useLayoutEffect, useRef } from 'react'
+import { useT } from '../../hooks/useI18n'
 import type { QuestionDraft } from '../../lib/questions'
 import type { InteractionQuestion } from '../../lib/state'
 import { QuestionChoice } from './QuestionChoice'
@@ -31,6 +32,7 @@ export interface QuestionBlockProps {
  * @returns the block.
  */
 export function QuestionBlock({ question, draft, frozen, onPick, onCustom, onGrow }: QuestionBlockProps) {
+  const t = useT()
   const field = useRef<HTMLTextAreaElement>(null)
 
   // Two lines of room, then the field scrolls: a card that grew without bound would push
@@ -66,8 +68,8 @@ export function QuestionBlock({ question, draft, frozen, onPick, onCustom, onGro
         ref={field}
         className={freeText ? 'q-question-field q-question-field-free' : 'q-question-field'}
         rows={1}
-        aria-label={freeText ? question.question : `${question.question} — 其他答案`}
-        placeholder={freeText ? '输入答案…' : '其他答案…'}
+        aria-label={freeText ? question.question : t('question.otherAnswerLabel', { question: question.question })}
+        placeholder={freeText ? t('question.answerPlaceholder') : t('question.otherPlaceholder')}
         value={draft.custom}
         disabled={frozen}
         onInput={event => {

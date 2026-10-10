@@ -1,6 +1,7 @@
 // The workspace picker's menu.
 
 import { api } from '../../api'
+import { useT } from '../../hooks/useI18n'
 import { workspaceLabel } from '../../lib/labels'
 import type { Snapshot } from '../../lib/state'
 import { workspaceTitle } from '../../lib/view-text'
@@ -35,9 +36,10 @@ export interface WorkspaceMenuProps {
  * @returns the menu contents.
  */
 export function WorkspaceMenu({ state, targetWorkspace, onChoose, onClose }: WorkspaceMenuProps) {
+  const t = useT()
   return (
     <>
-      <MenuHeading title="工作区" detail={workspaceTitle(state, targetWorkspace)} />
+      <MenuHeading title={t('workspace.heading')} detail={t(workspaceTitle(state, targetWorkspace))} />
       {state.session.workspaces.map(workspace => {
         const label = workspaceLabel(workspace.title, workspace.path)
         const selected = state.session.following === null && targetWorkspace === workspace.workspaceId
@@ -56,7 +58,7 @@ export function WorkspaceMenu({ state, targetWorkspace, onChoose, onClose }: Wor
             />
             {state.session.following === null && (
               <PinButton
-                name={`工作区 ${label}`}
+                name={t('workspace.pinName', { name: label })}
                 pinned={pinned}
                 onPick={() => {
                   void api.pinWorkspace(pinned ? null : workspace.workspaceId)
@@ -69,8 +71,8 @@ export function WorkspaceMenu({ state, targetWorkspace, onChoose, onClose }: Wor
       })}
       <MenuSeparator />
       <MenuHint text={state.session.workspaces.length === 0
-        ? '工作区列表还没到。'
-        : '选择工作区后，新会话在此开始。'} />
+        ? t('workspace.listPending')
+        : t('workspace.chooseHint')} />
     </>
   )
 }

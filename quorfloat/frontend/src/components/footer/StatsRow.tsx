@@ -1,8 +1,9 @@
 // The footer's right half: the conversation's numbers, each only when it can be computed.
 
+import { useT } from '../../hooks/useI18n'
 import { ring } from '../../lib/icons'
 import type { Stats } from '../../lib/state'
-import { contextLabel, roundsLabel, tokensLabel } from '../../lib/stats'
+import { contextLabel, roundsText, tokensLabel } from '../../lib/stats'
 import { Icon } from '../common/Icon'
 
 /** Props for {@link StatsRow}. */
@@ -21,6 +22,7 @@ export interface StatsRowProps {
  * @returns the row, or nothing when there are none.
  */
 export function StatsRow({ stats }: StatsRowProps) {
+  const t = useT()
   if (stats === null) return null
   const tokens = tokensLabel(stats)
   const context = contextLabel(stats)
@@ -28,17 +30,17 @@ export function StatsRow({ stats }: StatsRowProps) {
     ? Math.min(100, (stats.contextTokens / stats.contextLimit) * 100)
     : 0
   return (
-    <div id="q-session-stats" className="q-session-stats" aria-label="会话统计">
+    <div id="q-session-stats" className="q-session-stats" aria-label={t('stats.label')}>
       <span className="q-stat" id="q-stat-rounds">
         <span id="q-stat-speed-icon"><Icon name="gauge" /></span>
-        <span id="q-stat-speed">{roundsLabel(stats)}</span>
+        <span id="q-stat-speed">{t(roundsText(stats))}</span>
       </span>
       <span className="q-stat" id="q-stat-tokens">
         <span id="q-stat-token-icon"><Icon name="database" /></span>
         <span>
           <span id="q-stat-token-count">{tokens.count}</span>
           <span className="q-stat-separator"> · </span>
-          {`缓存命中 `}
+          {t('stats.cacheHit')}{' '}
           <span id="q-stat-cache">{tokens.cache}</span>
         </span>
       </span>

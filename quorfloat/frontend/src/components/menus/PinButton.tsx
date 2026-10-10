@@ -1,5 +1,6 @@
 // A pin toggle (`.q-pin`) used by the session and workspace rows.
 
+import { useT } from '../../hooks/useI18n'
 import { Icon } from '../common/Icon'
 
 /** Props for {@link PinButton}. */
@@ -19,11 +20,12 @@ export interface PinButtonProps {
  * @returns the pin button.
  */
 export function PinButton({ name, pinned, onPick }: PinButtonProps) {
+  const t = useT()
   return (
     <button
       type="button"
       className="q-pin"
-      aria-label={`${pinned ? '取消固定' : '固定'}${name}`}
+      aria-label={t(pinned ? 'pin.unpinName' : 'pin.pinName', { name })}
       aria-pressed={pinned}
       onClick={onPick}
     >

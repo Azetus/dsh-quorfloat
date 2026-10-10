@@ -1,5 +1,5 @@
 // The picker shell every top-bar and runtime menu shares: a trigger button and the
-// popover it opens, with the click-outside rule.
+// popover it opens, with the click-outside and Escape rules.
 
 import { useEffect, useRef, type ReactNode } from 'react'
 
@@ -34,9 +34,10 @@ export interface PickerPopoverProps {
 /**
  * Render one picker.
  *
- * The click-outside listener is registered only while the popover is open, and it watches
- * the whole wrapper: a click on the trigger is the trigger's own business (it toggles),
- * and a click inside the menu belongs to the menu.
+ * Both ways out are registered only while the popover is open: a click outside the wrapper
+ * closes it (a click on the trigger is the trigger's own business — it toggles — and a
+ * click inside the menu belongs to the menu), and Escape closes it and hands focus back to
+ * the trigger, so the keyboard leaves a popover where the mouse would.
  *
  * @param props - ids, labels, open state, handlers, and both content slots.
  * @returns the wrapper.
@@ -46,6 +47,7 @@ export function PickerPopover({
   onToggle, onClose, trigger, children,
 }: PickerPopoverProps) {
   const wrap = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     if (!open) return
@@ -55,8 +57,17 @@ export function PickerPopover({
       if (wrap.current?.contains(target) === true) return
       onClose()
     }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key !== 'Escape') return
+      triggerRef.current?.focus()
+      onClose()
+    }
     document.addEventListener('click', onDocumentClick)
-    return () => document.removeEventListener('click', onDocumentClick)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('click', onDocumentClick)
+      document.removeEventListener('keydown', onKeyDown)
+    }
   }, [open, onClose])
 
   return (
@@ -64,9 +75,11 @@ export function PickerPopover({
       <button
         type="button"
         id={id}
+        ref={triggerRef}
         className="q-picker"
         aria-label={label}
         aria-expanded={open}
+        aria-haspopup="menu"
         aria-controls={menuId}
         disabled={disabled}
         onClick={onToggle}

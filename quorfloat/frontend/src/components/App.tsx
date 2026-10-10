@@ -188,6 +188,9 @@ export function App({ state }: AppProps) {
         recording={recording}
         onRecord={() => { setRecording(true) }}
         onBack={backFromSettings}
+        openMenu={openMenu}
+        onToggleMenu={toggleMenu}
+        onCloseMenu={closeMenu}
       />
       <ConversationPage
         state={state}

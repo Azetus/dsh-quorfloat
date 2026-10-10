@@ -1,6 +1,8 @@
 // The appearance chips: follow the system, or pin one palette.
 
 import { api } from '../../api'
+import { useT } from '../../hooks/useI18n'
+import type { MessageKey } from '../../lib/i18n'
 import type { Snapshot } from '../../lib/state'
 
 /** Props for {@link ThemeChips}. */
@@ -9,10 +11,10 @@ export interface ThemeChipsProps {
   readonly theme: Snapshot['settings']['theme']
 }
 
-const CHOICES: readonly { readonly value: Snapshot['settings']['theme']; readonly label: string }[] = [
-  { value: 'system', label: '跟随系统' },
-  { value: 'light', label: '浅色' },
-  { value: 'dark', label: '深色' },
+const CHOICES: readonly { readonly value: Snapshot['settings']['theme']; readonly label: MessageKey }[] = [
+  { value: 'system', label: 'theme.system' },
+  { value: 'light', label: 'theme.light' },
+  { value: 'dark', label: 'theme.dark' },
 ]
 
 /**
@@ -25,6 +27,7 @@ const CHOICES: readonly { readonly value: Snapshot['settings']['theme']; readonl
  * @returns the chip group.
  */
 export function ThemeChips({ theme }: ThemeChipsProps) {
+  const t = useT()
   return (
     <span className="q-chips" id="q-theme-chips">
       {CHOICES.map(choice => (
@@ -36,7 +39,7 @@ export function ThemeChips({ theme }: ThemeChipsProps) {
           aria-pressed={choice.value === theme}
           onClick={() => { void api.setPreferences({ theme: choice.value }) }}
         >
-          {choice.label}
+          {t(choice.label)}
         </button>
       ))}
     </span>

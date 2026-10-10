@@ -6,6 +6,7 @@
 // is not focused — the same rule the old renderer used.
 
 import { useLayoutEffect, type RefObject } from 'react'
+import { useT } from '../../hooks/useI18n'
 import { Icon } from '../common/Icon'
 
 /** Props for {@link Composer}. */
@@ -33,6 +34,7 @@ export interface ComposerProps {
  * @returns the composer row.
  */
 export function Composer({ inputRef, busy, hasEntries, draft, onDraft, onSend, onGrow }: ComposerProps) {
+  const t = useT()
   // The box's single-line height, matching the CSS (`.q-compose textarea`).
   const base = 34
   const cap = 120
@@ -59,8 +61,8 @@ export function Composer({ inputRef, busy, hasEntries, draft, onDraft, onSend, o
         id="q-input"
         ref={inputRef}
         rows={1}
-        aria-label="输入问题"
-        placeholder={hasEntries ? '继续追问…' : '问点什么…'}
+        aria-label={t('composer.inputLabel')}
+        placeholder={hasEntries ? t('composer.placeholderFollowUp') : t('composer.placeholderAsk')}
         onInput={event => {
           onDraft(event.currentTarget.value)
           resize()
@@ -71,7 +73,7 @@ export function Composer({ inputRef, busy, hasEntries, draft, onDraft, onSend, o
         type="button"
         id="q-send"
         className="q-submit"
-        aria-label={busy ? '停止生成' : '发送问题'}
+        aria-label={busy ? t('composer.stop') : t('composer.send')}
         onClick={onSend}
       >
         <Icon name={busy ? 'square' : 'arrow-up'} />

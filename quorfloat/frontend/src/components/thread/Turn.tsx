@@ -1,5 +1,6 @@
 // One turn: the question, the folded working, and the answer.
 
+import { useT } from '../../hooks/useI18n'
 import type { Turn as TurnModel } from '../../lib/turns'
 import { AnswerBar } from './AnswerBar'
 import { AnswerBody } from './AnswerBody'
@@ -29,10 +30,11 @@ export interface TurnProps {
  * @returns the turn article.
  */
 export function Turn({ turn, open, onToggle, sep = false }: TurnProps) {
+  const t = useT()
   const raw = turn.answer?.blocks.flatMap(block => (block.kind === 'text' ? [block.text] : [])).join('\n\n') ?? ''
   return (
     <article className={sep ? 'q-turn q-turn-sep' : 'q-turn'}>
-      <div className="q-question">{`你 · ${turn.question}`}</div>
+      <div className="q-question">{t('turn.question', { question: turn.question })}</div>
       {(turn.working.length > 0 || turn.inProgress) && (
         <>
           <Disclosure open={open} working={turn.inProgress} onToggle={onToggle} />

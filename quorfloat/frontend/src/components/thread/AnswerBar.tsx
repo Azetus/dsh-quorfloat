@@ -1,6 +1,7 @@
 // The bar under an answer: its state, and the copy action once it is finished.
 
 import { useState } from 'react'
+import { useT } from '../../hooks/useI18n'
 
 /** Props for {@link AnswerBar}. */
 export interface AnswerBarProps {
@@ -21,21 +22,22 @@ export interface AnswerBarProps {
  * @returns the bar.
  */
 export function AnswerBar({ markdown }: AnswerBarProps) {
+  const t = useT()
   const [note, setNote] = useState<string | null>(null)
   return (
     <div className="q-answerbar">
-      <span>回答完成</span>
+      <span>{t('answer.done')}</span>
       {markdown.trim() !== '' && (
         <button
           type="button"
           onClick={() => {
             navigator.clipboard
               .writeText(markdown)
-              .then(() => { setNote('已复制') })
-              .catch(() => { setNote('请手动选择复制') })
+              .then(() => { setNote(t('answer.copied')) })
+              .catch(() => { setNote(t('answer.copyManually')) })
           }}
         >
-          {note ?? '复制回答'}
+          {note ?? t('answer.copy')}
         </button>
       )}
     </div>
