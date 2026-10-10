@@ -77,8 +77,7 @@ export function usePanelDynamics(
     // reader at the very bottom that pixel comes out of the scrollable extent: the browser
     // clamps the offset to the new maximum, and nothing gives it back — because a child's
     // layout effect (the thread's own pin) runs *before* this one, the clamp lands after the
-    // pin and survives. The result was a one-pixel up-and-down on every keystroke, visible only
-    // at the bottom, where the offset is at the maximum (2026-10-09). Put the reader back
+    // pin and survives. Put the reader back
     // exactly where they were; where they should be is the pin's decision, not this one's.
     const thread = element.querySelector<HTMLElement>('#q-thread-scroll')
     const keptScrollTop = thread?.scrollTop ?? null
@@ -92,9 +91,8 @@ export function usePanelDynamics(
     if (thread !== null && keptScrollTop !== null) thread.scrollTop = keptScrollTop
 
     // A panel on its way out has nobody watching it, and a transition left running across
-    // the native hide is exactly the one whose end event never arrives (2026-10-09: the
-    // new-session switch was pinned, the panel was hidden 90ms later, and the panel stayed
-    // at the old height). A panel that is leaving goes straight to the new height.
+    // the native hide is exactly the one whose end event never arrives. A panel that is
+    // leaving goes straight to the new height.
     const leaving = element.classList.contains('q-away')
     const plan = heightPlan({
       from,
@@ -180,8 +178,8 @@ export function usePanelDynamics(
     measure(from)
   })
 
-  // The window's own size can change under us (the shell resizing, a display change):
-  // remeasure on the way in, exactly as the old renderer did.
+  // The window's own size can change under us (the shell resizing, a display change), so
+  // remeasure on the way in.
   useEffect(() => {
     const onResize = (): void => { measure(null) }
     window.addEventListener('resize', onResize)

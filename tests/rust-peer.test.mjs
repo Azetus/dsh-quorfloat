@@ -8,9 +8,8 @@
  *
  * It exists because the alternative is finding out from a handshake timeout in a
  * packaged app, where the failure looks identical to a binary that never started.
- * The previous cross-language defect in this project (a remote method whose
- * parameter names did not match the descriptor) was found only by a live browser
- * request; this is the same class of bug, caught before it ships.
+ * A parameter name that does not match its descriptor is the same class of bug,
+ * and this catches it before it ships.
  *
  * Skipped when the Rust binary has not been built, so the suite stays runnable
  * from a clean clone. `cargo build` in `quorfloat/` enables it.
@@ -133,9 +132,9 @@ test('the real supervisor completes a handshake with the Rust binary', { skip },
     // facts spelled uselessly, and nothing on the host branches on them.
     assert.equal(recorded.platform, process.platform, 'platform uses process.platform spelling')
     assert.equal(recorded.arch, process.arch, 'arch uses process.arch spelling')
-    // `question` joined the list on 2026-10-09, when the panel learned to draw the option
-    // widgets: the declaration is a promise that claiming a question will not hide it from
-    // the Harness window for nothing.
+    // `question` is declared because the panel can draw the option widgets: the
+    // declaration is a promise that claiming a question will not hide it from the
+    // Harness window for nothing.
     assert.deepEqual(recorded.capabilities, ['window', 'hotkey', 'tauri', 'approval', 'question'])
     // The same fact through the supervisor, because that is the path the plugin's
     // claim gate reads. A declaration the snapshot failed to carry would silently
@@ -249,7 +248,7 @@ test('a real accelerator registers and the session stays healthy', { skip }, asy
 })
 
 test('the sidecar reports a measured window capability and its hidden start', { skip }, async () => {
-  // The whole point of A3's second half: the peer must not claim a window it has
+  // The point here: the peer must not claim a window it has
   // not created. `hello` is written before any window exists, so the claim has to
   // come later — and this checks it arrives, and arrives honest.
   process.env['DSH_QUORFLOAT_HOTKEY'] = 'Control+Alt+Shift+F13'
@@ -312,7 +311,7 @@ test('the sidecar reports a measured window capability and its hidden start', { 
 })
 
 test('the real host publishes an approval the panel records as a card', { skip }, async () => {
-  // The delivery half of A4, over the real wire. What cannot be tested here is the
+  // The delivery half of the approval path, over the real wire. What cannot be tested here is the
   // click that answers it — that needs a human and a window — so this asserts the
   // part a machine can: the frame leaves the host's real channel, is framed by the
   // real Rust reader, parsed by the real session, and turned into a card.
@@ -464,12 +463,10 @@ test('the real host publishes an approval the panel records as a card', { skip }
 })
 
 test('the panel reads the conversation list and attaches to nothing on its own', { skip }, async () => {
-  // This test used to assert the opposite — that the panel attached to the newest
-  // conversation by itself — and the design changed: a panel attaches to the conversation
-  // the user pinned or chose, and otherwise waits to be given something to say (the
-  // conversation is created when they submit). Asserted here because it is a claim about
-  // two programs: the host must still be asked what exists, and must not be asked to
-  // attach to anything until a person decides.
+  // A panel attaches to the conversation the user pinned or chose, and otherwise waits
+  // to be given something to say (the conversation is created when they submit). Asserted
+  // here because it is a claim about two programs: the host must still be asked what
+  // exists, and must not be asked to attach to anything until a person decides.
   const { mkdtemp, readFile, rm } = await import('node:fs/promises')
   const { tmpdir } = await import('node:os')
   const directory = await mkdtemp(join(tmpdir(), 'quorfloat-follow-'))
@@ -620,7 +617,7 @@ test('the host can ask the sidecar to show and hide its window', { skip }, async
 test('the real sidecar folds a conversation and a stream over the real wire', { skip }, async () => {
   // The transcript half of the conversation flow, over the real wire: the frames
   // leave the host's channel, are framed by the real Rust reader, and folded by
-  // the real session into entries — the state the frontend (M4) renders from.
+  // the real session into entries — the state the frontend renders from.
   // Observed through the marker, the one surface readable after the fact.
   const { mkdtemp, readFile, rm } = await import('node:fs/promises')
   const { tmpdir } = await import('node:os')

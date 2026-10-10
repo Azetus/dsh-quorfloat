@@ -21,9 +21,8 @@ describe('keepOpenChecked', () => {
 
 describe('hidesOnBlur', () => {
   test('the panel hides exactly when the setting says it hides', () => {
-    // The bug this guards: the first Tauri handler negated this and hid the
-    // panel when hideOnBlur was *false* — the feature ran inverted while the
-    // switch displayed the correct state.
+    // `hidesOnBlur` must not be negated: this flag and the setting say the same
+    // thing, while the switch renders their inverse (`keepOpenChecked`).
     expect(hidesOnBlur(true)).toBe(true)
     expect(hidesOnBlur(false)).toBe(false)
   })

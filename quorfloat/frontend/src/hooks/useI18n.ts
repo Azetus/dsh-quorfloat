@@ -5,7 +5,7 @@
 // draws a word needs it, and threading it through twenty components would make the
 // language a parameter of the layout. The default is `'zh'`, so a component rendered
 // outside the provider (a test, or a page whose snapshot has not arrived) still draws
-// today's copy instead of throwing.
+// the current copy instead of throwing.
 
 import { createContext, useCallback, useContext } from 'react'
 import {

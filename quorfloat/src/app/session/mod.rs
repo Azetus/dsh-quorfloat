@@ -7,7 +7,7 @@
 //! liveness traffic are the parts most likely to be wrong, and they must be
 //! verifiable without a host, a model, or a spawned process.
 //!
-//! Two rules from `docs/dsh-quorfloat.md` shape everything here:
+//! Two rules shape everything here:
 //!
 //! - **stdout carries protocol frames and nothing else.** Log lines go to the
 //!   sink's `log`, which is stderr. A stray `println!` would corrupt the stream
@@ -1200,9 +1200,8 @@ impl Session {
     ///
     /// The numbers are a *conversation's* — token counts and cache hits describe the turns that
     /// happened in it — so this answers `None` twice over: while nothing is followed (the
-    /// new-conversation state after "新建会话" keeps the last session's figures in hand, and the
-    /// footer drew them under an empty panel — 2026-10-09), and while they belong to a session
-    /// other than the one on screen.
+    /// new-conversation state after "新建会话" keeps the last session's figures in hand), and
+    /// while they belong to a session other than the one on screen.
     #[must_use]
     pub fn stats(&self) -> Option<Stats> {
         if self.follow.session_id() != self.stats_session.as_deref() {
@@ -1523,13 +1522,12 @@ impl Session {
     /// `user/message` already in that session's history (`hasPromptRequest` in
     /// `packages/api/session-controller/src/commands.ts`). A counter that begins at zero in every
     /// process therefore loses the first prompt after every restart — the input is cleared, the host
-    /// says "accepted", and the message is simply gone (reported 2026-10-08; the marker's fingerprint
-    /// was `session-…:prompt-1` appearing three times for one conversation).
+    /// says "accepted", and the message is simply gone.
     ///
     /// So the key is built from things that do not restart with the panel: a sequence that runs for the
     /// life of the process ([`PROMPT_SEQUENCE`]), the process id, and the clock. The session id is there
-    /// so the marker stays readable. A per-session counter is *not* enough on its own, and that is
-    /// measurable: two sessions in one process, in the same millisecond, produced the same key.
+    /// so the marker stays readable. A per-session counter is *not* enough on its own: two sessions
+    /// in one process, in the same millisecond, would produce the same key.
     ///
     /// @param session_id - the conversation the prompt goes to.
     /// @returns the key to put in `requestId`.
@@ -1902,10 +1900,8 @@ pub fn parse_options(result: &Value) -> SessionOptions {
     if let Some(groups) = result.get("groups").and_then(Value::as_array) {
         for group in groups {
             // `provider`, not `id`: the host projects the upstream group's `id` into a `provider`
-            // field, because that is what it is — the provider route a choice must name. Reading `id`
-            // here worked against a hand-written fixture and silently produced an empty model list
-            // against the real host, which is exactly what a fixture written from the same assumption
-            // cannot catch.
+            // field, because that is what it is — the provider route a choice must name. A fixture
+            // written from the same assumption as this parser cannot catch a mix-up here.
             let provider = group
                 .get("provider")
                 .or_else(|| group.get("id"))
@@ -2027,8 +2023,8 @@ mod tests {
     fn the_menu_bar_can_ask_the_host_to_restart_or_stop_this_process() {
         // The tray offers these two because the panel cannot do them itself: replacing or ending
         // the process is the supervisor's business, and an exit it reads as a crash would simply
-        // be restarted (2026-10-09). What this asserts is the wire half of that: both choices
-        // leave as a `panel/lifecycle` request carrying the action the host's router expects.
+        // be restarted. What this asserts is the wire half of that: both choices leave as a
+        // `panel/lifecycle` request carrying the action the host's router expects.
         let mut session = Session::new(identity());
         let mut sink = RecordingSink::default();
         let mut source = ScriptedSource::new(vec![hello_ok()]);
@@ -2314,8 +2310,8 @@ mod tests {
     #[test]
     fn a_reported_gap_is_recorded_and_repaired_by_re_subscribing() {
         // A resync that only wrote a log line would leave the panel showing a
-        // conversation with a hole in it and no way to tell. (What has changed since 2026-10-07 is
-        // where "there was a hole" is legible: the marker, not the thread.)
+        // conversation with a hole in it and no way to tell. The hole is legible in the
+        // marker, not in the thread.
         let mut session = Session::new(identity());
         let mut sink = RecordingSink::default();
         let mut source = ScriptedSource::new(vec![
@@ -2569,10 +2565,10 @@ mod tests {
 
     #[test]
     fn the_options_parser_reads_the_provider_field_the_host_actually_sends() {
-        // The shape here is copied from a **real** answer captured off the running host
-        // (`console.error` of `modelCatalog()`), not written from the same assumption as the parser:
-        // the host projects the upstream group's `id` into `provider`, and a fixture that called it
-        // `id` passed while the panel showed an empty model menu.
+        // The shape is the host's own answer (`modelCatalog()`), not written from the same
+        // assumption as the parser: the host projects the upstream group's `id` into
+        // `provider`, and a fixture that called it `id` would pass while the panel shows an
+        // empty model menu.
         let payload = json!({
             "groups": [{
                 "provider": "deepseek-official",
@@ -2703,7 +2699,7 @@ mod tests {
     }
 
     /// The catalog answer the host sends for a conversation it has just created: no current model,
-    /// because nothing has run yet (the real reply is `model=? permission=workspace-write`).
+    /// because nothing has run yet (the host answers `model=? permission=workspace-write`).
     ///
     /// @returns the result payload.
     fn fresh_conversation_options() -> serde_json::Value {
@@ -2720,10 +2716,9 @@ mod tests {
     fn a_conversation_created_before_it_ran_learns_its_model_when_a_step_closes() {
         // The panel attaches a conversation the moment it creates one, so the options read that
         // follows the attach arrives *before* Harness has anything to say: the model projection is
-        // built from `request/header`, and no request has been made yet. The real host answers
-        // `model=? permission=workspace-write` (2026-10-09, `.dev-home/sidecar.log`), and nothing
-        // used to ask again — so the footer said "unknown" for the rest of the run while the
-        // conversation ran on the deployment default.
+        // built from `request/header`, and no request has been made yet, so the host answers
+        // `model=?`. Something has to ask again once a step closes, or the footer says "unknown"
+        // for the rest of the run while the conversation runs on the deployment default.
         let (mut session, mut sink) = followed();
         let id = last_request(&sink)["id"].clone();
         session.on_frame(
@@ -2852,11 +2847,11 @@ mod tests {
         assert_eq!(second["params"]["text"], "第二句");
     }
 
-    /// The bug behind `session/create: workspaceId must be a non-empty string`.
+    /// `session/create: workspaceId must be a non-empty string`.
     ///
     /// The host's router requires a non-empty `workspaceId`; the empty value that means "use
-    /// your default" belongs to the host's own API, not to the wire. The panel was sending the
-    /// empty string and being refused — a request that could never have worked.
+    /// your default" belongs to the host's own API, not to the wire, so sending it is a request
+    /// that can never work.
     #[test]
     fn a_conversation_is_never_asked_for_without_a_workspace() {
         let mut session = Session::new(identity());
@@ -2953,16 +2948,14 @@ mod tests {
 
     #[test]
     fn a_prompt_key_names_the_attempt_not_just_the_conversation() {
-        // The bug this exists for (reported 2026-10-08): the panel restarted, the user typed, pressed
-        // Enter — the input was cleared and nothing was sent. The key was `{session}:prompt-{n}` with `n`
-        // starting at zero in every process, so the first prompt after a restart repeated a key the host
-        // already had in that conversation's history. The host answers `accepted: true` to a repeated key
-        // **without admitting the prompt** (`hasPromptRequest` in the harness's session controller), so
-        // the text went nowhere while the panel — for which "the host took it" is delivered — cleared the
-        // input.
+        // A key of `{session}:prompt-{n}` with `n` starting at zero in every process repeats itself
+        // after a restart, and the host answers `accepted: true` to a key already in that
+        // conversation's history **without admitting the prompt** (`hasPromptRequest` in the
+        // harness's session controller): the text goes nowhere while the panel — for which "the
+        // host took it" is delivered — clears the input.
         //
-        // Two *runs*, one conversation, both on their first prompt: the attempt count cannot tell them
-        // apart, and that is exactly the case that was broken.
+        // Two *runs*, one conversation, both on their first prompt: the attempt count cannot tell
+        // them apart.
         let key = |run: &str, sequence: u64| Session::prompt_key_for("session-1", run, sequence);
         assert_ne!(
             key("pid-1-1000", 1),

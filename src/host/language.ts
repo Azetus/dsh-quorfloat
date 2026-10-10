@@ -41,15 +41,15 @@ export const FALLBACK_LANGUAGE: Language = 'en'
 /**
  * Settings namespace the Harness's locale plugin owns.
  *
- * Confirmed in the Harness checkout at
- * `packages/client/locale/src/locale-settings.ts`: `LOCALE_SETTINGS_NAMESPACE`.
+ * `packages/client/locale/src/locale-settings.ts` in the Harness checkout defines
+ * `LOCALE_SETTINGS_NAMESPACE`.
  */
 export const HARNESS_LOCALE_NAMESPACE = 'locale'
 
 /**
  * Field carrying the explicit locale selection inside that namespace.
  *
- * Confirmed in the same file: `LOCALE_PREFERENCE_FIELD`. Its absence means "delegate
+ * `LOCALE_PREFERENCE_FIELD` in the same file. Its absence means "delegate
  * to the browser", which is exactly the "nobody has chosen" state this module reads.
  */
 export const HARNESS_LOCALE_PREFERENCE_FIELD = 'preference'

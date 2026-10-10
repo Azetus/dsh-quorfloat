@@ -1,7 +1,7 @@
 /**
  * Cross-process protocol: JSON-RPC 2.0 over NDJSON on the child's stdin/stdout.
  *
- * Wire rules (see `protocol/README.md`, which is the normative description):
+ * Wire rules (the Rust half mirrors them in `quorfloat/src/ipc/protocol.rs`):
  * - one UTF-8 JSON value per line; `\n` inside a JSON string is escaped by JSON
  *   itself, so a frame boundary is always a literal `0x0A` byte;
  * - the child's **stdout carries protocol frames only**; every log line goes to

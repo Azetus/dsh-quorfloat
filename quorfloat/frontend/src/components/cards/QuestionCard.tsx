@@ -7,7 +7,7 @@
 // The asker's `intent` (e.g. `plan-review`) is deliberately ignored: upstream says an intent
 // changes presentation only, never the encoding, and a UI that does not know the tag renders
 // the generic option list — which is exactly this card. A card this build cannot answer
-// (`actionable: false`: too many questions, or one without an id) keeps the old behaviour and
+// (`actionable: false`: too many questions, or one without an id) stays read-only and
 // says so, because an answer must cover what the user was shown.
 
 import { useState } from 'react'

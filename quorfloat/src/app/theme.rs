@@ -1,10 +1,9 @@
 //! Which palette the panel asks for.
 //!
-//! The palettes themselves left with the egui view: the frontend owns them as CSS
-//! custom properties (the `--q-*` tokens, taken from the design verbatim). What stays
-//! here is the *preference* — the one value the settings file and the host configuration
-//! both carry, and the one the shell must keep reading so a theme choice survives the
-//! migration unchanged.
+//! The palettes themselves are the frontend's, as CSS custom properties (the `--q-*`
+//! tokens, taken from the design verbatim). What stays here is the *preference* — the one
+//! value the settings file and the host configuration both carry, and the one the shell
+//! must keep reading.
 
 /// Which palette the panel is drawn in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

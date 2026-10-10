@@ -1,7 +1,7 @@
 /* The panel's styles. Tokens and measurements are taken verbatim from the
-   authoritative design (docs/ui/harness-quorfloat-phosphor-ui.html); the few
-   additions are marked — the turn disclosure, the approval card, the theme
-   chips, and the markdown content styles, which the design leaves to us. */
+   authoritative design; the few additions are marked — the turn disclosure, the
+   approval card, the theme chips, and the markdown content styles, which the
+   design leaves to us. */
 
 @font-face {
   font-family: 'Noto Sans SC';
@@ -33,8 +33,7 @@
   /* Ours: how long swapped-in content takes to land (see `.q-swap`). Longer than
      `--q-speed` on purpose — the chrome moves in 180ms, but a page or a
      conversation *arriving* should settle after the shell has finished easing the
-     window to its new height (220ms), not race it. User asked for the slower,
-     gentler transition on 2026-10-09. */
+     window to its new height (220ms), not race it. */
   --q-swap: 260ms;
 }
 
@@ -67,8 +66,8 @@ button:hover { background: var(--q-soft); }
 .q-window {
   width: 100%;
   max-width: 640px;
-  /* Anchored to the top, not centred: the panel grows and shrinks downward from there
-     (dsh-quorfloat.md §11), so a height change never also moves the top edge — and during
+  /* Anchored to the top, not centred: the panel grows and shrinks downward from there,
+     so a height change never also moves the top edge — and during
      a swap's collapse the box closes in place instead of drifting. In the steady state the
      native window is exactly panel + shadow room, so the two are the same thing; they
      differ only while a resize is in flight. */
@@ -79,7 +78,7 @@ button:hover { background: var(--q-soft); }
   box-shadow: 0 16px 42px var(--q-shadow), 0 3px 8px var(--q-shadow);
   transform-origin: 50% 0;
   /* `height` is in here for the swap's own box animation (`--q-height`): the panel is
-     content-sized, so `render.ts` pins both ends for the transition and releases the pin
+     content-sized, so the panel pins both ends for the transition and releases the pin
      when it ends. Without an explicit height there is nothing to interpolate. */
   transition: opacity var(--q-speed), transform var(--q-speed), height var(--q-height);
   display: flex;
@@ -103,7 +102,7 @@ button:hover { background: var(--q-soft); }
 /* A page or a conversation arriving: the panel's own enter motion (`.q-window`
    settles down from 6px up) at content scale, so the new content lands the same
    way the panel itself does while the shell eases the native window to the new
-   height. Entrance only — `render.ts` puts the class on the arriving element and
+   height. Entrance only — the panel puts the class on the arriving element and
    the outgoing one is out of the layout before the first frame. `--q-swap` rather
    than `--q-speed`: this one is meant to be the gentler of the two. */
 @keyframes q-swap-in {
@@ -156,9 +155,9 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
   display: block; min-width: 0; flex: 1; width: 100%;
   height: 34px; resize: none; overflow: hidden;
   border: 0; background: transparent; color: var(--q-text);
-  /* 14px, the model reply's body size — a 2026-10-09 user polish: the input
-     reads like the conversation it feeds, not like a title (the design's own
-     token is 20px; the deviation is deliberate and on the record).
+  /* 14px, the model reply's body size: the input reads like the conversation it
+     feeds, not like a title (the design's own token is 20px; the deviation is
+     deliberate).
      The 34px box with 6.5px vertical padding centres one line (21px) on the
      send button; further lines grow the box down from there. */
   font-size: 14px; line-height: 1.5; padding: 6.5px 0;
@@ -204,7 +203,7 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
 .q-card-actions button.q-allow { background: var(--q-accent); color: var(--q-bg); border-color: transparent; }
 .q-card-actions button:disabled { opacity: 0.5; cursor: default; }
 
-/* The question card's widgets (2026-10-09). The design稿 has no question card — the three
+/* The question card's widgets. The design has no question card — the three
    built-in presets are the only interaction it draws — so these follow the panel's own card
    vocabulary above, with every value taken from the design's tokens. */
 .q-question-block { display: flex; flex-direction: column; gap: 6px; }
@@ -265,7 +264,7 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
 }
 .q-thread { border-top: 1px solid var(--q-line); padding: 20px 24px 22px; }
 
-/* The way back down (2026-10-09): the harness's `ChatView` arrangement — a sticky, zero-height
+/* The way back down: the harness's `ChatView` arrangement — a sticky, zero-height
    slot inside the scroller so the control floats over the last lines instead of scrolling with
    them, with the button pulled up out of the slot by its own height. The slot itself must not
    eat clicks; only the button does. */
@@ -429,9 +428,8 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
 
 /* The right padding keeps the scrollbar off the rows: macOS scrollbars are
    overlay, and `scrollbar-gutter` reserves nothing for them. The cost is the
-   rows' 1px separators ending 10px short on the right — accepted (2026-10-09,
-   user request). The thread needs no such padding: its own 24px padding clears
-   the floating scrollbar. */
+   rows' 1px separators ending 10px short on the right — accepted. The thread
+   needs no such padding: its own 24px padding clears the floating scrollbar. */
 .q-settings { margin: 18px 22px 20px; padding-right: 10px; flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
 .q-settings-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .q-settings-title span { font-size: 15px; }

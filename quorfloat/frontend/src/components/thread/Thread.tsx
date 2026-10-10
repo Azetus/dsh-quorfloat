@@ -1,10 +1,9 @@
 // The conversation body: the scroll area, and the window of turns it actually renders.
 //
-// Windowing (2026-10-09): the shell pushes a fresh snapshot on every stream event, so the
-// panel used to rebuild the whole transcript each time — 23ms at 200 turns, 97ms at 1000,
-// linear in the conversation and spent almost entirely on turns nobody can see. Only the
-// rows inside the viewport (plus a few) are mounted now, and a row's height is measured
-// rather than guessed, because an answer is as tall as its Markdown says.
+// Windowing: the shell pushes a fresh snapshot on every stream event, so rendering the whole
+// transcript each time would be linear in the conversation and spent almost entirely on turns
+// nobody can see. Only the rows inside the viewport (plus a few) are mounted, and a row's
+// height is measured rather than guessed, because an answer is as tall as its Markdown says.
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { setBottomPin } from '../../lib/bottom-pin'
@@ -70,7 +69,7 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
       // The design's separator between turns. It is decided by the row's place in the
       // *conversation*, not by which rows happen to be mounted: a turn that follows
       // another turn carries it (`.q-turn + .q-turn`'s rule, which windowing cannot
-      // express). A loose question line between two turns breaks it, as it always did.
+      // express). A loose question line between two turns breaks it.
       sep: index > 0,
     })
   })
@@ -115,8 +114,8 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
   // on screen: an earlier turn's answer settles into its final shape, a fold closes, a card
   // leaves. A row that is not mounted has no resize observer watching it, so a remembered height
   // that is too large stays too large — the spacer below the content carries the error, and the
-  // reader gets a band of empty space under the last turn, with the panel pinned at its cap
-  // (2026-10-09). Measuring the few rows that are actually mounted costs nothing and makes a
+  // reader gets a band of empty space under the last turn, with the panel pinned at its cap.
+  // Measuring the few rows that are actually mounted costs nothing and makes a
   // stale size impossible; the measurement is idempotent, so it cannot feed itself.
   useLayoutEffect(() => {
     const thread = scrollRef.current?.querySelector('#q-thread')
@@ -199,7 +198,7 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
           slot inside the scroller, so the control floats over the last lines instead of
           scrolling with them, and it exists only while the reader is looking at something
           other than the end. Pressing it re-enters the follow state, which is what makes the
-          rest of the panel keep them there (user request 2026-10-09). */}
+          rest of the panel keep them there. */}
       {!following && (
         <JumpToBottom
           onPress={() => {

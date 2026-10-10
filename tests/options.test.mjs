@@ -40,8 +40,8 @@ test('statistics come from the two projections that carry them', () => {
 })
 
 test('context occupancy reads the fields the projection actually has', () => {
-  // `capacityTokens` is not a field the projection has; reading it left the context statistic
-  // invisible on the real host while every hand-written fixture passed. These are the real names
+  // `capacityTokens` is not a field the projection has, and reading it yields no context
+  // statistic while every hand-written fixture still passes. These are the real names
   // (`context-occupancy.ts`), and the sample is only the fallback.
   const sampled = readStats(projections({ contextPressure: { pressureTokens: 10870, contextWindow: 1_000_000 } }))
   assert.equal(sampled.contextTokens, 10870)

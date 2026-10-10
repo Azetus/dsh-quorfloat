@@ -2,8 +2,8 @@
 //!
 //! Every function here is pure: it takes one JSON value from a record and returns what
 //! the transcript should say about it. They live apart from the reducer because they are
-//! the part that was *learned* rather than designed — each one encodes a shape that was
-//! captured from a real session, and two of them encode a trap:
+//! the part that mirrors the harness rather than this project's design — each one encodes
+//! a shape the harness sends, and two of them encode a trap:
 //!
 //! - **`user/message` does not wrap its content in a `message` object**, while
 //!   `assistant/message`, `system/message` and `tool/result` all do. Reading only the
@@ -11,8 +11,6 @@
 //!   questions nobody asked.
 //! - **`arguments` is a JSON string, not an object**, because that is what the model
 //!   produced and the harness forwards verbatim.
-//!
-//! See `docs/dsh-quorfloat.md` §5 for the captured shapes.
 
 use serde_json::Value;
 
@@ -41,8 +39,7 @@ pub(super) fn message_text(data: &Value) -> String {
 
 /// The content blocks of an event's payload.
 ///
-/// **The harness is not uniform about where they live**, and the difference was found
-/// by capturing real frames rather than by reading the contract:
+/// **The harness is not uniform about where they live**:
 ///
 /// - `user/message` carries them directly: `data.content`;
 /// - `assistant/message`, `system/message` and `tool/result` wrap them:

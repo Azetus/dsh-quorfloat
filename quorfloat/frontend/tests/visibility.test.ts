@@ -15,8 +15,8 @@ describe('stepVisibility', () => {
   })
 
   test('a hide request while hidden is ignored', () => {
-    // The bug's second arming path: the programmatic hide blurs the webview,
-    // and the blur handler must not start a second fade-out.
+    // A programmatic hide blurs the webview too, and the blur handler must not
+    // start a second fade-out.
     expect(stepVisibility(hidden, 'request-hide')).toEqual(hidden)
   })
 

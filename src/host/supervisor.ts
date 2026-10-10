@@ -721,8 +721,8 @@ export class QuorfloatSupervisor {
 /**
  * Bind router methods to a plain function map for channel registration.
  *
- * The list of methods comes from the router itself: a second copy here is what let
- * `session/options` be implemented and still answered with "unsupported method".
+ * The list of methods comes from the router itself: a second copy here would drift
+ * from the dispatch and answer "unsupported method" for a method that is implemented.
  *
  * @param router - the router to expose.
  * @returns method name → handler.
@@ -797,8 +797,8 @@ function quorfloatEnvironment(config: QuorfloatConfig): NodeJS.ProcessEnv {
     // And whether that value is a decision or only the `en` fallback. It has to reach the
     // sidecar *before* it writes anything down: the fallback is also what a launch nobody
     // decided resolves to, and persisting it would freeze the panel in English without
-    // ever letting its webview answer. Only an explicit `false` says "fallback", so a
-    // configuration that predates this field keeps the historical behaviour.
+    // ever letting its webview answer. Only an explicit `false` says "fallback"; a
+    // configuration that leaves it unset is treated as a decision.
     DSH_QUORFLOAT_WINDOW_LANGUAGE_DECIDED: config.window.languageDecided === false ? '0' : '1',
   }
   // POSIX and Windows names for the same facts, both forwarded. The Windows

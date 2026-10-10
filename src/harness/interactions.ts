@@ -91,8 +91,7 @@ export interface InteractionsDeps {
    * Decide who may answer the next interaction.
    *
    * A session being owned is necessary but not sufficient: the request must also
-   * belong to the surface the user is looking at. See `presence.ts` for the rules
-   * and `docs/progress.md` §18 for the measurements behind them.
+   * belong to the surface the user is looking at. See `presence.ts` for the rules.
    */
   authority(): AuthorityVerdict
   /**
@@ -212,15 +211,14 @@ export class Interactions {
       try {
         // `prepend` is not an optimisation here, it is the whole mechanism.
         //
-        // Measured on a real dsh 0.2.0-rc.2: `dsh-api-remotes` registers a
-        // forwarding listener for this same event that hands the request to the
-        // connected browser client and **never calls `next()`**. Because
-        // waterfall listeners run in registration order, our listener was never
-        // reached at all — the request simply hung until the turn was killed.
+        // `dsh-api-remotes` registers a forwarding listener for this same event
+        // that hands the request to the connected browser client and **never
+        // calls `next()`**. Because waterfall listeners run in registration
+        // order, a listener registered afterwards is never reached at all — the
+        // request simply hangs until the turn is killed.
         //
-        // Verified against the real framework: `prepend` from this plugin's own
-        // (child) context runs before that earlier root-registered listener, so
-        // no root-context access is needed.
+        // `prepend` from this plugin's own (child) context runs before that
+        // earlier root-registered listener, so no root-context access is needed.
         const dispose = this.#deps.ctx.on(event, listener, { prepend: true })
         this.#disposers.push(dispose)
       } catch (error) {

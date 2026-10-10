@@ -190,7 +190,7 @@ test('the page request the adapter sends passes Harness validation', { skip }, a
   assert.deepEqual(call.request, {
     address: { kind: 'session', sessionId: 'session-1' },
     // A real sequence, at or below the session cursor. Harness rejects anything
-    // past the cursor, which is what an invented maximum bound used to be.
+    // past the cursor, which is what an invented maximum bound would be.
     throughSeq: 1,
     beforeSeq: 42,
     maxMessages: 50,

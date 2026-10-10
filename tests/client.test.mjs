@@ -10,8 +10,7 @@
  *
  * The DOM is stubbed because the values that matter here are the two the browser
  * provides (`document.visibilityState`, `document.hasFocus()`) and the events
- * that report their change. What the real values are on each platform was
- * measured separately (`docs/progress.md` §18).
+ * that report their change.
  *
  * The page half is tested through the same artifact. Its React comes from the
  * loader's module table, so the stub table below stands where the shell's frozen
@@ -234,7 +233,7 @@ function stateOf(tree) {
  * The layout is read off the root element the component returned, so this covers
  * the shape the settings section actually mounts. The style triple is the one
  * DSH's own settings rows use (`justify-content: space-between; align-items:
- * center`), which is also the shape the user asked for: indicator left, action
+ * center`), which is also the shape the row wants: indicator left, action
  * right, vertically centred, in every state.
  *
  * @param tree - the tree {@link mountComponent} returned.
@@ -1028,9 +1027,9 @@ test('every word the page can render resolves in both languages, and the two agr
     // translated: the label reads the same in both languages.
     assert.equal(copy.zh.tab, 'dsh-quorfloat')
     assert.equal(copy.en.tab, 'dsh-quorfloat')
-    // The copy lines the tab used to render under the indicator, and the reason
-    // paragraph it used to render below them, are deleted rather than left as
-    // keys nobody reads: the tab body is the indicator and the action only.
+    // No key survives for copy the tab body does not render: with the body reduced
+    // to the indicator and the action, a line of copy or a reason paragraph would be
+    // a key nobody reads.
     for (const language of ['en', 'zh']) {
       for (const key of ['runningLine', 'stoppedLine', 'reason']) {
         assert.ok(!(key in copy[language]), `${language}.${key} was deleted from the dictionary`)
@@ -1061,7 +1060,7 @@ test('the copy-line decision is gone from the artifact, not left behind as dead 
   const loaded = loadArtifact(dom)
   try {
     // The tab body is the indicator and the action only, so nothing decides on a
-    // line of copy any more: the export the line was read from is deleted.
+    // line of copy: the export the line was read from does not exist.
     assert.equal(loaded.module.stateLineKey, undefined, 'the artifact no longer exports the line decision')
   } finally {
     loaded.unload()
@@ -1510,12 +1509,10 @@ test('unloading removes every listener', async () => {
 })
 
 test('the state is re-reported even when nothing changes', async (t) => {
-  // The defect this pins: reports used to be change-only while the host expires them
-  // (deliberately — a page that dies without a `blur` must not pin the authority).
-  // Together those made a focused page stop counting as "the user is looking at it"
-  // after 30 seconds, and the panel took over approvals belonging to the window in
-  // front of the user. Verified on a real `dsh web` session: with the panel open and
-  // the browser focused, the panel showed the approval card.
+  // The host expires reports on purpose — a page that dies without a `blur` must not
+  // pin the authority — so a change-only report would make a focused page stop
+  // counting as "the user is looking at it" after 30 seconds, and the panel would take
+  // over approvals belonging to the window in front of the user.
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'], now: 0 })
   const dom = fakeDom({ visibility: 'visible', focused: true })
   const loaded = loadArtifact(dom)
@@ -1564,11 +1561,11 @@ test('unloading stops the heartbeat instead of reporting forever', async (t) => 
 })
 
 test('a focused page keeps the authority past the host expiry window', async (t) => {
-  // The defect this pins lived in the *combination*, which is why neither half's own
-  // tests caught it: the host expires reports on purpose (a crashed page sends no
-  // `blur`), and the page used to report only on change — so after thirty seconds of
-  // the user looking at the window its report expired and the panel took the
-  // authority. Driving both halves with one clock is the only way to see it.
+  // The failure lives in the *combination*, which is why neither half's own test sees
+  // it: the host expires reports on purpose (a crashed page sends no `blur`), and only
+  // the heartbeat keeps a live page's report fresh — so after thirty seconds of the
+  // user looking at the window a change-only report would expire and the panel would
+  // take the authority. Driving both halves with one clock is the only way to see it.
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 0 })
   const { PresenceTracker, evaluateAuthority } = await import(
     new URL('../lib/harness/presence.js', import.meta.url)

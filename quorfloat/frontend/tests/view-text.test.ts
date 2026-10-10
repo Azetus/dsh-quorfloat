@@ -1,6 +1,6 @@
 // The tokens the panel names a workspace or conversation with, and a conversation's age:
-// the pure half of the old `render.ts`, now returning dictionary keys and host data rather
-// than finished Chinese sentences. The field itself is verified by eye (docs/ui).
+// the pure half of the snapshot-derived text, returning dictionary keys and host data rather
+// than finished Chinese sentences. The field itself is verified by eye.
 
 import { afterEach, beforeEach, describe, expect, it, test, vi } from 'vitest'
 import { msg, raw, resolveText } from '../src/lib/i18n'

@@ -1,14 +1,12 @@
 //! What the user chose inside the panel, remembered across runs.
 //!
-//! Until the settings view existed, everything the panel drew was decided by the host's
-//! configuration: the theme arrived in the `ready` payload and the panel had no opinion. A setting
-//! the user changes *in the panel* is a different kind of fact — it has to take effect on the next
-//! frame, and it has to survive a restart — so it needs somewhere to live, and the rules are the
-//! ones `pinned.rs` and `geometry.rs` already use for the same problem:
+//! The host's configuration is a baseline: the theme arrives in the `ready` payload. A setting
+//! the user changes *in the panel* is a different kind of fact — it has to take effect on the
+//! next frame, and it has to survive a restart — so it needs somewhere to live, and the rules
+//! are the ones `pinned.rs` and `geometry.rs` use for the same problem:
 //!
 //! - **Nothing is load-bearing.** A missing, unreadable or unparseable file means "no local
-//!   preference", which leaves the host's configuration in charge — exactly the behaviour the
-//!   panel had before this file existed.
+//!   preference", which leaves the host's configuration in charge.
 //! - **Nothing is written without a place to write it.**
 //! - **An unrecognised value is not a value.** A theme this build does not know falls back to the
 //!   host's setting rather than guessing, on the same principle as an unrecognised record shape in

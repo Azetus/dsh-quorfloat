@@ -12,7 +12,7 @@
  *   tests drive the whole host plugin with a fake Harness instead of a running
  *   desktop app.
  *
- * Only the subset the first version actually calls is declared: create, list,
+ * Only the subset this plugin actually calls is declared: create, list,
  * page, prompt, cancel, follow, plus the workspace registry lookup and the
  * version probes. Adding a method here is a deliberate act, not an accident of
  * what happens to be reachable on `ctx`.
@@ -67,10 +67,9 @@ const MAX_TITLE_READS = 2
  * `packages/session/session-title/src/index.ts:282` — copied rather than guessed: the last
  * `session/title` event wins, and the title is its `data.title`.
  *
- * The tolerant version this replaced tried four shapes, because the payload belongs to the Harness
- * and the source was not to hand. Now that it is, the measured shape is what is encoded, and
- * anything else yields no title — a list of ids, which is where the panel already was — rather
- * than a name invented out of the wrong field.
+ * Only the shape the Harness source documents is encoded; anything else yields no title — a list
+ * of ids, which is where the panel already was — rather than a name invented out of the wrong
+ * field.
  *
  * @param events - a conversation's events, in order.
  * @returns the title, or `undefined` when the conversation has never been named.
@@ -542,8 +541,7 @@ class CordisHarness implements QuorfloatHarness {
   /**
    * Name the conversations, reading the ones whose name is not known yet.
    *
-   * The Harness's own list carries no titles — measured, not assumed: with the field mapped, the
-   * panel's record read `sessions 4 named 0`. The names exist in each conversation's history as a
+   * The Harness's own list carries no titles. The names exist in each conversation's history as a
    * `session/title` event, and `inspect` is documented as cold-safe — the persisted header and
    * prefix, without resuming an agent — so reading them wakes nothing.
    *
@@ -933,7 +931,7 @@ export function readStats(value: unknown): SessionStatsView | undefined {
     // the window the model reported. Both field names are the upstream's
     // (`context-occupancy.ts`: `projectedTokens ?? pressureTokens`, `contextWindow`) — the sampled
     // number alone ignores the surface the next request will add, and reading a field the projection
-    // does not have (`capacityTokens`) is what left this statistic invisible on the real host.
+    // does not have (`capacityTokens`) yields no statistic at all.
     ...(contextTokens === undefined ? {} : { contextTokens }),
     ...(contextLimit === undefined ? {} : { contextLimit }),
   }

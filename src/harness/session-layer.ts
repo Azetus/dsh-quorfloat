@@ -356,11 +356,10 @@ export class SessionLayer {
     // **A key this conversation has already spent can never be admitted**, whatever the peer believes.
     // The Harness's session controller answers `{accepted: true}` to a repeated `requestId` *without
     // admitting anything* — `hasPromptRequest` matches the `user/message` whose `source.rpcId` is that
-    // key — so forwarding it would tell the peer a message was delivered that never was. Measured
-    // 2026-10-08: a restarted panel reused `session-…:prompt-1` for a conversation that already had it,
-    // its input was cleared, and nothing was ever sent. The peer keeps the text when it hears a refusal,
-    // so refusing is the half that makes the mistake recoverable; the log line is the half that makes it
-    // findable.
+    // key — so forwarding it would tell the peer a message was delivered that never was. A restarted
+    // panel can reuse `session-…:prompt-1` for a conversation that already has it, clearing its input
+    // while nothing is sent. The peer keeps the text when it hears a refusal, so refusing is the half
+    // that makes the mistake recoverable; the log line is the half that makes it findable.
     if (this.#usedKeys.get(sessionId)?.has(requestId) === true) {
       this.#deps.log.warn('refused a prompt whose key this conversation has already used', {
         sessionId,

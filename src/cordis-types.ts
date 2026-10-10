@@ -6,7 +6,7 @@
  * a structural view is enough to type the code, and the plugin never has to be
  * resolved against the runtime's peer-dependency compatibility gate.
  *
- * If this file ever drifts from the real runtime, `tests/cordis-smoke.test.mjs`
+ * If this file ever drifts from the real runtime, `tests/plugin-smoke.test.mjs`
  * fails: it loads the genuine `@deepseek-ai/cordis` Context and drives this
  * plugin through it.
  */

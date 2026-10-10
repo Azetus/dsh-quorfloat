@@ -21,8 +21,7 @@ export interface ModelMenuProps {
  *
  * The host's catalog carries a description per model and per effort, and the design's own
  * sub-list deliberately spends no line on it (`option(label, selected, onPick)`): a list of
- * names is scanned, a list of paragraphs is read. User decided on 2026-10-09 to drop them
- * from both lists (see `progress.md`).
+ * names is scanned, a list of paragraphs is read.
  *
  * @param props - snapshot and the close handler.
  * @returns the menu contents.

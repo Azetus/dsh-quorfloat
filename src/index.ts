@@ -44,7 +44,7 @@ export type { QuorfloatConfig } from './config.js'
 /**
  * Services that must be provided before the plugin does any work.
  *
- * Verified against a real dsh: `sessionController` is **not** available when
+ * `sessionController` is **not** available when
  * `apply` runs — the profile composes in availability order, so the controller
  * appears later. Declaring it here is what makes Cordis activate the work at the
  * right moment; probing once at `apply` time always reports it missing.
@@ -257,7 +257,7 @@ export function createPlugin(overrides: PluginOverrides = {}) {
       // Only the supervisor ever reads `window.language`, and it reads it through
       // `config()`, so the resolved values are carried on a copy rather than mutating
       // the validated configuration object the rest of activation closed over. The copy
-      // is unconditional now that it carries two facts instead of one.
+      // is unconditional: it carries two facts.
       const effectiveConfig: QuorfloatConfig = {
         ...config,
         window: { ...config.window, language, languageDecided: decision.decided },
@@ -334,7 +334,7 @@ export function createPlugin(overrides: PluginOverrides = {}) {
             if (sessionId !== undefined) void sessionLayer.attach(sessionId)
           }
           // The panel has stopped showing a conversation — it started a new one, or the
-          // pinned one turned out to be gone. This is what keeps approval routing honest:
+          // pinned one is gone. This is what keeps approval routing honest:
           // the panel answers only for the conversation it is showing, so a subscription
           // nobody is looking at must not keep claiming requests for it.
           if (method === 'session/detach') {
@@ -366,7 +366,7 @@ export function createPlugin(overrides: PluginOverrides = {}) {
     }
 
     // Readiness uses the framework's own deferred-activation mechanism rather
-    // than polling. Two reasons, both learned the hard way on a real dsh:
+    // than polling. Two reasons:
     //
     // 1. Services appear *after* this plugin's `apply` runs — the profile boots
     //    in availability order, so `sessionController` does not exist yet when

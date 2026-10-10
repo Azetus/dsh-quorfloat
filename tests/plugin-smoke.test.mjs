@@ -2,10 +2,10 @@
  * Smoke test against the real Cordis framework.
  *
  * Everything else in `tests/` exercises one component with fakes. This file
- * answers the question the design document says must be answered before any UI
- * work: can this plugin be loaded by the actual plugin framework, reach its
- * services, spawn the subproject, complete a handshake, and be unloaded without
- * leaving a process behind?
+ * answers the question that must be answered before any UI work: can this plugin
+ * be loaded by the actual plugin framework, reach its services, spawn the
+ * subproject, complete a handshake, and be unloaded without leaving a process
+ * behind?
  *
  * The services planted here are fakes, but the framework, the module loading,
  * the config validation, the spawn, the shutdown sequence, and the disposal path
@@ -161,11 +161,11 @@ function restoreEnv(saved) {
 }
 
 test('the plugin declares exactly one hard dependency', () => {
-  // Narrow on purpose. A real dsh proved `sessionController` does not exist when
-  // `apply` runs (the profile composes in availability order), so without this
-  // declaration the plugin would probe once, see nothing, and never start. Every
-  // other service is optional: requiring them would leave the plugin in PENDING
-  // on a smaller profile with no explanation of what was missing.
+  // Narrow on purpose. `sessionController` does not exist when `apply` runs (the
+  // profile composes in availability order), so without this declaration the plugin
+  // would probe once, see nothing, and never start. Every other service is optional:
+  // requiring them would leave the plugin in PENDING on a smaller profile with no
+  // explanation of what was missing.
   assert.deepEqual(pluginModule.default.inject, ['sessionController'])
   assert.deepEqual(pluginModule.inject, ['sessionController'])
 })

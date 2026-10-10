@@ -1,10 +1,9 @@
 /**
  * Supervisor tests: process lifecycle, restart policy, and orphan hygiene.
  *
- * The questions here are the ones the design document calls out as the highest
- * non-session risk: does the handshake actually complete, does an exit count as
- * "gone" or merely "signalled", does a broken child get restarted only within
- * budget, and does a stopped plugin leave a process behind.
+ * The questions here are the highest non-session risk: does the handshake actually
+ * complete, does an exit count as "gone" or merely "signalled", does a broken child
+ * get restarted only within budget, and does a stopped plugin leave a process behind.
  */
 
 import assert from 'node:assert/strict'

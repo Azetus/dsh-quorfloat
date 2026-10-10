@@ -1,8 +1,7 @@
 // One option of a question: a drawn radio (single-select) or check (multi-select).
 //
 // A plain button with `role`/`aria-checked`, like the settings switch: the panel draws its
-// own marks from the design's tokens, and a native input cannot be styled to match them
-// (that is what the M5 switch bug was about).
+// own marks from the design's tokens, and a native input cannot be styled to match them.
 
 import { Icon } from '../common/Icon'
 
