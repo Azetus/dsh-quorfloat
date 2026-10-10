@@ -8,12 +8,14 @@
  * battery of plugins (CSS Modules, sourcemap chaining, a bundle-purity gate that
  * permits only declared module-table imports).
  *
- * This plugin's browser half imports nothing at all — it reads the DOM and calls
- * one RPC — so none of that machinery applies. Wrapping the compiled ES module is
- * the whole build:
+ * This plugin's browser half is one compiled module that reads the DOM, calls the
+ * host's gateway, and renders two slot entries through the module table's React,
+ * so none of that machinery applies. Wrapping the compiled ES module is the whole
+ * build:
  *
- * - no bare specifier means no `require(...)`, so there is nothing for the loader
- *   module table to answer and nothing the purity gate could reject;
+ * - every `require(...)` must be answerable from the loader's frozen module
+ *   table — the platform seeds plus whatever `dsh.client.external` names — so a
+ *   specifier nobody serves fails here instead of inside the page;
  * - no CSS means no stylesheet pipeline;
  * - `dsh.client.inject` still names the client packages whose services this half
  *   uses, which is what establishes load order.
@@ -29,26 +31,64 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const SOURCE = join(ROOT, 'lib', 'client', 'index.js')
 const OUTPUT = join(ROOT, 'lib', 'client.js')
 
+/** Package manifest: the loader id, and the externals this half declared. */
+const PACKAGE = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+
 /** Package name, used as the loader id and in diagnostics. */
-const PACKAGE_NAME = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).name
+const PACKAGE_NAME = PACKAGE.name
+
+/**
+ * The platform singletons the shell seeds into the frozen module table.
+ *
+ * `PLATFORM_MODULES` in `@deepseek-ai/dsh-client-web/src/platform.ts` is the
+ * authority; this copy exists because the build has no dependency on the
+ * harness's own source. A specifier here needs no `dsh.client.external`
+ * declaration and no graph row: the loader answers it from the seed table.
+ */
+const MODULE_TABLE_SEEDS = new Set([
+  'react',
+  'react/jsx-runtime',
+  'react-dom',
+  'react-dom/client',
+  '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-client-store',
+  '@deepseek-ai/dsh-client-ui-slots',
+  '@deepseek-ai/dsh-client-ui-primitives',
+  '@deepseek-ai/dsh-client-ui-dockkit',
+])
+
+/**
+ * Specifiers the manifest asks the loader graph to arrive before this bundle.
+ *
+ * @returns the declared externals, or an empty set when none were declared.
+ */
+function declaredExternals() {
+  const external = PACKAGE.dsh?.client?.external
+  return new Set(Array.isArray(external) ? external : [])
+}
 
 /** A bare specifier would need a module-table row; this half must have none. */
 const BARE_IMPORT = /(?:^|[\s;{(])import\s*\(?\s*['"]([^'"]+)['"]|(?:^|[\s;{(])require\(\s*['"]([^'"]+)['"]/gu
 
 /**
- * Verify the compiled module is self-contained.
+ * Verify every specifier the compiled module requests is one the module table can
+ * answer.
  *
- * The loader would throw at runtime on a specifier its table cannot answer, and
- * the failure would surface as a broken plugin rather than a build error, so this
- * is checked here instead.
+ * The loader would throw at runtime on a specifier its table cannot serve, and the
+ * failure would surface as a broken plugin rather than a build error, so this is
+ * checked here instead. Relative specifiers are fine: the artifact is a single
+ * factory body, so a relative import resolves inside it, and `node:` is never
+ * reachable from a page.
  *
  * @param code - the compiled ES module.
- * @throws {Error} when a bare import or require remains.
+ * @throws {Error} when a specifier is neither a seed nor a declared external.
  */
 function assertSelfContained(code) {
+  const externals = declaredExternals()
   for (const match of code.matchAll(BARE_IMPORT)) {
     const specifier = match[1] ?? match[2]
     if (specifier === undefined || specifier.startsWith('.') || specifier.startsWith('node:')) continue
+    if (MODULE_TABLE_SEEDS.has(specifier) || externals.has(specifier)) continue
     throw new Error(
       `client bundle: compiled code imports the bare specifier ${JSON.stringify(specifier)}. `
       + 'The browser half must be self-contained (or declare it in dsh.client.external).',

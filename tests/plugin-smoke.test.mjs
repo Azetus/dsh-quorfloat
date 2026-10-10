@@ -365,6 +365,30 @@ test('panel/lifecycle stop ends the peer deliberately and no restart undoes it',
   }
 })
 
+test('the browser half reads supervision through the control endpoint', async () => {
+  // The web half has no view of the sidecar process, so this endpoint is its
+  // only read path. Everything here is the real composition: the framework, the
+  // plugin, the supervisor, and the spawned mock. Resolving the service through
+  // the context is what proves `src/index.ts` registered it and handed it the
+  // supervisor that is actually running.
+  const app = await activate()
+  try {
+    await app.waitForRunning()
+    const control = app.ctx.get('quorfloatControl')
+    assert.ok(control !== undefined, 'the control gateway is registered in the real composition')
+    const { pid } = await app.waitForPid()
+    const status = control.status()
+    assert.equal(status.state, 'running')
+    assert.equal(status.pid, pid, 'the reported pid is the process the mock recorded')
+    assert.equal(status.seen, true, 'the handshake is what "seen" reports')
+    assert.equal(status.visible, false, 'the panel has not reported a window')
+    assert.equal(status.restartExhausted, false)
+    assert.equal(status.lastError, null)
+  } finally {
+    await app.dispose()
+  }
+})
+
 /** True while a process with that pid exists. */
 function processAlive(pid) {
   try {
