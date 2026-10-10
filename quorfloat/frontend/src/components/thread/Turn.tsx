@@ -22,7 +22,7 @@ export interface TurnProps {
 /**
  * Render one turn.
  *
- * The panel's own rule (2026-10-09): a turn is the final answer, and everything else the
+ * The panel's own rule: a turn is the final answer, and everything else the
  * model produced — reasoning, tool calls and results, narration — is packed into the
  * single `已完成` fold. There is no second disclosure and no tool-specific one.
  *
@@ -48,7 +48,7 @@ export function Turn({ turn, open, onToggle, sep = false }: TurnProps) {
       {turn.answer !== null && (
         <>
           <AnswerBody markdown={raw} />
-          {/* No bar while the answer streams (user decision 2026-10-09): a row that grows under
+          {/* No bar while the answer streams: a row that grows under
               the streaming text jitters — and "正在生成" is something the turn's own fold row
               already says. The completion line appears with the answer's end, where it states a
               fact instead of forecasting one. */}

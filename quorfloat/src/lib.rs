@@ -12,9 +12,9 @@
 //!   that decides ownership); [`app::session::transcript`] folds records and stream
 //!   frames into lines a panel can draw; [`app::sink`] is the bridge to the thread that
 //!   reads frames.
-//! - `frontend/` — what the panel draws, and what it is drawn into. The view moved to a
-//!   web frontend hosted by the Tauri shell (see `docs/tauri-migration-plan.md`); the
-//!   shell in `main.rs` feeds it state and applies its intents to [`app::session`].
+//! - `frontend/` — what the panel draws, and what it is drawn into. The view is a web
+//!   frontend hosted by the Tauri shell; the shell in `main.rs` feeds it state and
+//!   applies its intents to [`app::session`].
 //!
 //! Cross-cutting: [`runtime`] holds what belongs to neither the wire nor the panel —
 //! [`runtime::hotkey`], the one input the operating system owns, and [`runtime::diag`],

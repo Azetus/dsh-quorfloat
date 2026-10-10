@@ -7,9 +7,9 @@
 //! The host resolves the language (a panel setting, seeded from the Harness's locale on
 //! the first launch) and sends it in the spawn environment and in the `ready` payload.
 //! What this module owns is the reading of that value: an unrecognised or absent name
-//! keeps the built-in default, which is the Chinese the tray shipped with before the
-//! setting existed. A typo in an environment variable must not decide what language the
-//! panel speaks, the same rule `theme::Preference` follows for a palette it does not know.
+//! keeps the built-in default, which is Chinese. A typo in an environment variable must
+//! not decide what language the panel speaks, the same rule `theme::Preference` follows
+//! for a palette it does not know.
 
 /// A language the panel ships.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -114,7 +114,7 @@ impl Language {
 
 /// The script that puts a language on the document element.
 ///
-/// `frontend/index.html` ships `lang="zh-CN"` because the panel's copy was Chinese first, and
+/// `frontend/index.html` ships `lang="zh-CN"` because the panel's copy defaults to Chinese, and
 /// the value is a document-level fact the frontend cannot derive from its own state alone.
 /// The half that resolves the language is the half that keeps this honest: the script is
 /// applied as an initialization script (so the very first paint carries it) and re-applied with
@@ -143,10 +143,10 @@ pub const ENV_LANGUAGE_DECIDED: &str = "DSH_QUORFLOAT_WINDOW_LANGUAGE_DECIDED";
 
 /// Whether a host-supplied "decided" value means the language is a decision.
 ///
-/// **Absent is `true`.** A process nobody told (a manual run, an older host build) keeps
-/// the historical behaviour, where the value in the environment — or the built-in default
-/// — is the baseline the first launch writes down, rather than waiting for a report that
-/// may never come. Only an explicit negative says "this is the fallback".
+/// **Absent is `true`.** A process nobody told (a manual run, an older host build) treats
+/// the value in the environment — or the built-in default — as the baseline the first
+/// launch writes down, rather than waiting for a report that may never come. Only an
+/// explicit negative says "this is the fallback".
 ///
 /// @param value - the raw environment value, when the variable is set.
 /// @returns whether the language in play is a decision.
@@ -180,8 +180,8 @@ mod tests {
 
     #[test]
     fn an_unknown_value_is_not_a_decision() {
-        // The tray shipped in Chinese before this setting existed; a typo must keep it
-        // there rather than silently switching the panel's language.
+        // A typo must keep the built-in Chinese rather than silently switching the panel's
+        // language.
         assert_eq!(Language::from_name(Some("fr")), Language::Zh);
         assert_eq!(Language::from_name(Some("")), Language::Zh);
         assert_eq!(Language::from_name(None), Language::Zh);
@@ -236,8 +236,7 @@ mod tests {
     #[test]
     fn an_absent_decision_signal_keeps_the_historical_behaviour() {
         // The signal is a *negative* one: only an explicit "0" says the language is the
-        // host's fallback. A process nobody told keeps writing the baseline down, which is
-        // what every run did before the webview report existed.
+        // host's fallback. A process nobody told keeps writing the baseline down.
         assert!(baseline_decided(None));
         assert!(baseline_decided(Some("1")));
         assert!(baseline_decided(Some("true")));

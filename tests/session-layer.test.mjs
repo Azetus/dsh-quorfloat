@@ -317,11 +317,11 @@ test('describe() exposes subscription state for diagnostics', async () => {
 })
 
 test('a key the conversation has already used is refused, not silently dropped', async () => {
-  // The bug this exists for (2026-10-08): the panel restarted, its first prompt reused
-  // `session-…:prompt-1`, and the Harness — which keeps prompt keys for the life of the *conversation*
-  // — answered `{accepted: true}` without admitting anything. The panel treats that as delivered, so
-  // the input was cleared and the message was never sent. Refusing is what makes it recoverable: the
-  // peer keeps the text and says why.
+  // A restarted panel can reuse `session-…:prompt-1`, and the Harness — which keeps
+  // prompt keys for the life of the *conversation* — answers `{accepted: true}` without
+  // admitting anything. The panel treats that as delivered, so the input would be cleared
+  // and the message never sent. Refusing is what makes it recoverable: the peer keeps the
+  // text and says why.
   const { layer, harness } = buildLayer()
   await layer.attach('session-1')
   harness.push(
@@ -371,8 +371,8 @@ test('a key spent by a live user message is refused too', async () => {
 
 test('a key this run already admitted is still answered as accepted', async () => {
   // The other side of the guard: a repeat of a key *this* process sent is a retry of its own frame, and
-  // the answer the peer needs is the one it already got. Refusing that would be worse than the bug —
-  // the peer would say "nothing was sent" about a message that *was* sent.
+  // the answer the peer needs is the one it already got. Refusing that would be worse: the peer would
+  // say "nothing was sent" about a message that *was* sent.
   //
   // The order matters, so this test walks the key into both sets: it is sent, and then its own
   // `user/message` arrives, which is what puts it in the conversation's history.

@@ -303,10 +303,10 @@ fn run() -> Result<SessionExit, String> {
             let window = tauri::WebviewWindowBuilder::new(app, "main", url)
                 .title("quorfloat")
                 .inner_size(f64::from(settings.width), PLACEHOLDER_HEIGHT)
-                // `frontend/index.html` ships `lang="zh-CN"` because the panel's copy was
-                // Chinese first; the resolved language is set here, before any page script
-                // runs, so the first paint already declares the right language for font
-                // selection and assistive technology.
+                // `frontend/index.html` ships `lang="zh-CN"` because the panel's copy defaults
+                // to Chinese; the resolved language is set here, before any page script runs,
+                // so the first paint already declares the right language for font selection
+                // and assistive technology.
                 .initialization_script(language::document_language_script(initial_language))
                 .resizable(false)
                 .maximizable(false)
@@ -1041,7 +1041,7 @@ fn spawn_dispatcher(
                             apply_window_command(&window, WindowCommand::Show, &mut visible, &marker);
                             set_view_visible(&view, visible);
                             // A summon means a fresh conversation, unless the pin
-                            // says "continue this one" (user decision 2026-10-09).
+                            // says "continue this one".
                             // The host's own shows (`window/visibility` on Frames)
                             // do not reset — that is the host's intent, not a summon.
                             {
@@ -1177,7 +1177,7 @@ fn resume_activation(_window: &WebviewWindow) {}
 /// The panel is an accessory application (`set_activation_policy(Accessory)`), the way a launcher
 /// is, so summoning it deactivates whatever the user was typing in. Hiding only the *window* left
 /// that application deactivated with no window of ours to type into: close the panel and the caret
-/// is nowhere — the reported symptom (2026-10-09, the user's focus was in the Harness input).
+/// is nowhere.
 /// `App::hide()` is `[NSApp hide:nil]`: it hides the application and macOS activates the
 /// application that was active before it, which is the move a launcher makes.
 ///
@@ -1370,9 +1370,9 @@ fn report_visibility(
     session.report_visibility(visible, capabilities, &mut Borrowed(sink));
 }
 
-/// The same facts the old shell wrote when it finished: why the session ended, and
-/// whether the handshake completed. Written by the dispatcher before it exits the
-/// process, because `AppHandle::exit` does not come back.
+/// The facts written when the session finishes: why it ended, and whether the handshake
+/// completed. Written by the dispatcher before it exits the process, because
+/// `AppHandle::exit` does not come back.
 fn record_end(
     session: &Arc<Mutex<Session>>,
     sink: &Arc<SharedSink>,

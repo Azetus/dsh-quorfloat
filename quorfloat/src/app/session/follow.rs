@@ -1,15 +1,14 @@
 //! Following a conversation.
 //!
-//! The panel answers approvals for the conversation it is *showing*, and the host
-//! decides that by `session/attach` (see `docs/dsh-quorfloat.md` §6): an interaction is
-//! claimed only for an attached session. With nothing attached the panel owns
+//! The panel answers approvals for the conversation it is *showing*, which the host
+//! decides by `session/attach`: an interaction is claimed only for an attached session.
+//! With nothing attached the panel owns
 //! nothing, so every approval is answered by the Harness window — and from the
 //! outside that is indistinguishable from a panel that is broken.
 //!
-//! **Which** conversation to follow is, for now, the simplest rule that makes any of
-//! this observable: the most recently updated one. The panel has no conversation UI
-//! yet, so there is nothing a user could pick with; when there is, this rule becomes
-//! a default rather than the whole policy.
+//! **Which** conversation to follow is decided by three rules, in order: the pin, the
+//! choice made for this run, and the most recently updated conversation as a fallback
+//! (see `Follow::target`).
 //!
 //! Discovery is a poll, which this project otherwise avoids, because the protocol
 //! has no "a session appeared" notification. The cost is one small request every
@@ -436,7 +435,7 @@ impl Follow {
     /// Forget a choice, so the newest conversation is followed again.
     ///
     /// Used when a pinned conversation is unpinned: going back to "newest" is the only
-    /// sensible reading of that, and it is what the panel did before pins existed.
+    /// sensible reading of that.
     pub fn clear_choice(&mut self) {
         self.choice = None;
     }
@@ -552,8 +551,7 @@ impl Follow {
                     }
                 }
                 // Who to attach to is a decision the user made — pinned, or chosen for this
-                // run. The newest conversation is *not* a decision: following it was what this
-                // layer did before the panel could be told what to show, and it is how a panel
+                // run. The newest conversation is *not* a decision: following it is how a panel
                 // ends up talking about whatever the harness happened to touch last.
                 match self.target().map(str::to_owned) {
                     Some(target) if self.session_id.as_deref() == Some(target.as_str()) => None,
@@ -671,10 +669,9 @@ impl Follow {
 
     /// Record one frame of session traffic.
     ///
-    /// The panel does not display conversations yet, so everything here is counted
-    /// rather than stored — but it is *counted*, not dropped on the floor: the status
-    /// line is how a user tells "following and receiving" from "following and getting
-    /// nothing", and those look the same from every other angle.
+    /// Everything here is counted rather than stored — but *counted*, not dropped on the
+    /// floor: the status line is how a user tells "following and receiving" from "following
+    /// and getting nothing", and those look the same from every other angle.
     ///
     /// Nothing is logged per frame: a turn produces hundreds, and each line would
     /// cost stderr that the host forwards and truncates, drowning the lines that
@@ -880,9 +877,8 @@ mod tests {
     }
 
     /// A follow layer that has already started, as it is after the handshake.
-    /// Attach to one conversation, the way the design says a panel gets attached: the user
-    /// pinned it or chose it. Following the newest one is gone, so every test that needs an
-    /// attachment has to make that decision — which is the point of the change.
+    /// Attach to one conversation, the way a panel gets attached: the user pinned it or chose
+    /// it. Every test that needs an attachment has to make that decision.
     ///
     /// @param follow - the layer.
     /// @param sink - where the breadcrumbs go.
@@ -1002,8 +998,8 @@ mod tests {
     /// The pin is where the panel opens, and the choice is where it goes next.
     ///
     /// The other order — pin always first — is a panel that fights its user: picking another
-    /// conversation lasted until the next poll, three seconds later, when the pin took the
-    /// panel back. Reported from using it, and this is the rule that came out of it.
+    /// conversation would last only until the next poll, three seconds later, when the pin
+    /// took the panel back.
     #[test]
     fn a_pin_decides_where_the_panel_opens_and_the_choice_decides_where_it_goes() {
         let mut follow = started();
@@ -1177,9 +1173,9 @@ mod tests {
 
     #[test]
     fn a_newer_conversation_does_not_take_over() {
-        // The rule this replaced was "follow the newest", and it is the reason a panel could
-        // end up talking about whatever the harness touched last. An attachment now lasts
-        // until the user says otherwise.
+        // An attachment lasts until the user says otherwise: following the newest
+        // conversation is how a panel ends up talking about whatever the harness touched
+        // last.
         let mut follow = started();
         let mut sink = Recorded::default();
         follow.next(0);

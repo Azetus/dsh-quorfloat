@@ -8,8 +8,8 @@
  * Why the presence report exists at all: the approval authority needs to know
  * which surface the user is looking at, and that fact lives only here. The
  * Electron shell knows it (`window.isVisible()`) but does not expose it to
- * plugins, and the host process has no window concept. Measured behaviour that
- * shaped this file (`docs/progress.md` §18):
+ * plugins, and the host process has no window concept. Platform behaviour this
+ * file must respect:
  *
  * - `document.visibilityState` alone is not the answer. A window fully occluded
  *   by another application reports `hidden` on macOS but `visible` on Windows,
@@ -376,8 +376,7 @@ const ENTRY_ORDER = 20
  * Deliberately not configurable yet: the host's config reaches quorfloat over
  * stdio, and this half is not on that channel, so exposing it means either
  * baking a default in at build time or adding a settings fetch to the gateway.
- * Both are more moving parts than one timing constant justifies; see the config
- * candidates in `docs/progress.md` §21.
+ * Both are more moving parts than one timing constant justifies.
  */
 const HINT_DEBOUNCE_MS = 50
 
@@ -386,11 +385,10 @@ const HINT_DEBOUNCE_MS = 50
  *
  * Without this the report is only a *change* notification, and the host expires
  * reports — deliberately, so that a page which dies without a `blur` cannot pin the
- * approval authority to a window nobody is looking at. Those two rules together
- * produced a defect measured on a real `dsh web` session: a page the user had been
- * looking at for longer than `presenceMaxAgeMs` (30s by default) **stopped counting
- * as "the user is looking at it"**, and the floating panel began answering approvals
- * that belonged to the window in front of them.
+ * approval authority to a window nobody is looking at. The two rules together mean
+ * a page looked at for longer than `presenceMaxAgeMs` (30s by default) **stops
+ * counting as "the user is looking at it"**, and the floating panel starts answering
+ * approvals that belong to the window in front of them.
  *
  * A heartbeat turns the report into a *liveness* claim: while the page is alive its
  * state stays fresh, and when it dies the report expires exactly as intended. It must

@@ -6,14 +6,14 @@
 //! position, for the same reasons:
 //!
 //! - **Nothing is load-bearing.** A missing, unreadable or unparseable file means "nothing
-//!   is pinned", which is exactly the behaviour the panel had before pins existed.
+//!   is pinned", not an error.
 //! - **Nothing is written without a place to write it.**
 //! - **A pin that cannot be honoured is dropped rather than kept.** A pinned conversation
 //!   the host no longer lists must not leave the panel attached to nothing: the follow
 //!   layer validates the pin against the list it receives and forgets an unlisted one,
-//!   which puts the panel back into "new conversation" mode (`dsh-quorfloat.md` §9).
+//!   which puts the panel back into "new conversation" mode.
 //!
-//! **The two fields are not two facts (2026-10-09, user decision).** The session pin is
+//! **The two fields are not two facts.** The session pin is
 //! *the* pin — "which conversation opens next". The workspace field is either its
 //! projection (the pinned conversation's own workspace) or, with no session pin, the
 //! default directory for a new conversation (the P0 rung of the workspace ladder).

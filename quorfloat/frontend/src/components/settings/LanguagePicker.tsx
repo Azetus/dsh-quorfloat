@@ -7,7 +7,7 @@
 // new control. `q-right` is the existing class that anchors the popover to the wrapper's
 // right edge, which is where the settings row sits.
 //
-// A native `<select>` was considered and rejected: its option list is drawn by the platform
+// A native `<select>` is not usable here: its option list is drawn by the platform
 // and cannot take `--q-bg` / `--q-line` / `--q-soft`, the `MenuOption` check glyph, or the
 // `aria-pressed` current item, so matching the panel would mean either new CSS the design
 // does not define or a visibly foreign widget.

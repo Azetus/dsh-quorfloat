@@ -1,8 +1,8 @@
 /**
  * Gateway service registration tests.
  *
- * This file exists because of a real failure: the browser half reached the host
- * (HTTP 200) and the gateway found the endpoint, but rejected the arguments with
+ * The failure this file guards against: the browser half reaches the host and the
+ * gateway finds the endpoint, but rejects the arguments with
  * `gateway/arguments-invalid: unexpected "surface", "visible", "focused", "seq", "at"`.
  *
  * The cause is easy to reintroduce: the gateway's source-mode descriptor reads

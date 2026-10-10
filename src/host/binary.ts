@@ -116,11 +116,11 @@ export function resolveQuorfloatBinary(lookup: BinaryLookup): ResolvedBinary {
  * Locate this package's own root, independent of whether it is running from
  * `src/` or the compiled `lib/`.
  *
- * Deriving it from the module's depth was wrong: the compiled layout is one
- * directory deeper than the sources, so the development-artifact candidate
- * pointed at `lib/quorfloat/target/...` instead of `quorfloat/target/...`.
- * Asking Node for the package entry and walking up to its manifest is the one
- * answer that holds in both layouts.
+ * Deriving it from the module's depth does not hold: the compiled layout is one
+ * directory deeper than the sources, so the development-artifact candidate would
+ * point at `lib/quorfloat/target/...` instead of `quorfloat/target/...`. Asking
+ * Node for the package entry and walking up to its manifest is the one answer
+ * that holds in both layouts.
  *
  * @returns the absolute package root.
  */

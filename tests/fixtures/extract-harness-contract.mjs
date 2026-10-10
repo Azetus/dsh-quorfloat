@@ -37,9 +37,8 @@ function readArchive(asarPath) {
     const head = Buffer.alloc(16)
     readSync(fd, head, 0, 16, 0)
     const headerSize = head.readUInt32LE(12)
-    // The JSON header is padded so the data section starts 4-byte aligned.
-    // Verified on 0.2.0-rc.2: reading `16 + headerSize` lands 2 bytes early and
-    // prepends the tail of the previous entry (the classic "./ap{" artefact).
+    // The JSON header is padded so the data section starts 4-byte aligned; reading
+    // `16 + headerSize` lands early and prepends the tail of the previous entry.
     const padding = (4 - ((16 + headerSize) % 4)) % 4
     const dataStart = 16 + headerSize + padding
     const headerBytes = Buffer.alloc(headerSize)

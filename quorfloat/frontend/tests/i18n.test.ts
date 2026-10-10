@@ -21,8 +21,8 @@ describe('dictionaries', () => {
   })
 
   test('the migrated surface is the size the migration counted', () => {
-    // 96 keys covering the measured literals plus the endonyms and the new settings row.
-    // A guard against a key silently disappearing in a refactor.
+    // 96 keys covering the literals the panel draws plus the endonyms and the settings row.
+    // A guard against a key silently disappearing.
     expect(Object.keys(en).length).toBe(96)
   })
 })

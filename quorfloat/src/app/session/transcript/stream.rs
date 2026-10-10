@@ -5,9 +5,8 @@
 //! replaces all of it. Its state is private to this file for that reason — nothing else
 //! should be able to half-update an answer.
 //!
-//! **The live frames are not the shape of the recorded replay**, and assuming they were
-//! is the mistake that produces a panel showing nothing until the answer is over:
-//! captured side by side, the live delta is
+//! **The live frames are not the shape of the recorded replay**, and assuming they are
+//! produces a panel that shows nothing until the answer is over. The live delta is
 //! `{type:"chunk", chunk:{type:"text-delta", index, text}}` while the replay is
 //! `{type:"text-chunks", index, texts:[…]}`. The block index is `chunk.index` live and
 //! `frame.index` in a replay, and a live frame's own `index` is a **frame counter** —
@@ -42,8 +41,7 @@ impl Live {
     /// Fold one stream frame into the message being generated.
     ///
     /// **The live frames are not the shape of the recorded replay**, and assuming they
-    /// were is the kind of mistake that produces a panel which shows nothing until the
-    /// answer is already over. Captured side by side:
+    /// are produces a panel that shows nothing until the answer is already over:
     ///
     /// | | live `session/stream` | replay in `assistant/message.data.stream[]` |
     /// |---|---|---|

@@ -1,8 +1,8 @@
 //! Helpers the session tests share.
 //!
-//! They used to be copied into each test module; the approval tests and the handshake
-//! tests want the same scripted host, the same recording sink, and the same idea of what
-//! a signed-in session looks like. One copy, in one place, so a change to the fake host
+//! The approval tests and the handshake tests want the same scripted host, the same
+//! recording sink, and the same idea of what a signed-in session looks like. One copy, in
+//! one place, so a change to the fake host
 //! cannot leave one suite testing against a shape the other no longer uses.
 
 use std::collections::VecDeque;

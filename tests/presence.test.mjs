@@ -1,11 +1,10 @@
 /**
  * Presence and authority tests.
  *
- * These pin the routing rules that were derived from measurement rather than
- * assumption (docs/progress.md §18): `visibilityState` alone cannot answer "is
- * the user looking at Harness?", because a fully occluded window reports
- * `hidden` on macOS and `visible` on Windows. Only `visible AND hasFocus()` gives
- * the same answer on both, and the verdict follows from that pair.
+ * These pin the routing rules: `visibilityState` alone cannot answer "is the user
+ * looking at Harness?", because a fully occluded window reports `hidden` on macOS
+ * and `visible` on Windows. Only `visible AND hasFocus()` gives the same answer on
+ * both, and the verdict follows from that pair.
  *
  * The failure this suite exists to prevent is a silent one: claiming an approval
  * for a window the user is actually looking at hides it from them, and claiming

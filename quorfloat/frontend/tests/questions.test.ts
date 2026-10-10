@@ -1,5 +1,5 @@
 // The question card's decisions: what counts as answered, what a click does, and what
-// goes on the wire. The widgets themselves are verified by eye (docs/ui), these by value.
+// goes on the wire. The widgets themselves are verified by eye; these by value.
 
 import { describe, expect, it } from 'vitest'
 import {

@@ -117,9 +117,9 @@ pub fn snapshot(session: &Session, shell: &ShellView) -> Value {
             "pinnedWorkspace": shell.pinned_workspace,
             // Where a conversation submitted right now would be created. The panel shows it in
             // its workspace field, so that state and the ladder cannot disagree: without it the
-            // field said "选择工作区" while the create was already resolved to a real one
-            // (2026-10-09). It is the same resolution `submit` uses, with no panel choice to
-            // prefer — the panel's own pick is not the shell's to know.
+            // field says "选择工作区" while the create is already resolved to a real one. It is
+            // the same resolution `submit` uses, with no panel choice to prefer — the panel's own
+            // pick is not the shell's to know.
             "createWorkspace": create_workspace(session, None, shell.pinned_workspace.as_deref()),
             "chosen": session.target_conversation(),
             "createFailure": follow.create_failure(),
@@ -382,9 +382,9 @@ pub fn submit(
 /// which validates its own rungs: P0 is this window's own choice, P3 is the most recently
 /// active workspace, and `None` is P4 — nothing to go on, so the panel has to ask the user.
 ///
-/// This exists because the ladder had no caller (2026-10-09): the panel sends its choice
-/// when it has one, and in the new-conversation state it usually has none, so a submit was
-/// failing with "choose a workspace" while the host was listing several.
+/// The panel sends its choice when it has one and usually has none in the new-conversation
+/// state, so without this the ladder is never consulted and a submit fails with "choose a
+/// workspace" while the host is listing several.
 ///
 /// @param session - the session, which holds the host's lists.
 /// @param chosen - what the panel sent, if anything.
@@ -465,10 +465,9 @@ pub fn start_new(session: &mut Session, sink: &mut dyn FrameSink) -> Value {
 
 /// `pin` — pin one conversation (or stop pinning), and remember it across runs.
 ///
-/// The workspace field in the pin file is the session pin's **projection** (the
-/// 2026-10-09 invariant): pinning a conversation rewrites it to that
-/// conversation's own workspace, so the file can never hold a pinned session
-/// and a different pinned workspace at once.
+/// The workspace field in the pin file is the session pin's **projection**: pinning a
+/// conversation rewrites it to that conversation's own workspace, so the file can never
+/// hold a pinned session and a different pinned workspace at once.
 ///
 /// @param session_id - which one, or `None`.
 /// @param pinned_path - where the pin is remembered; `None` is "nowhere to write".
@@ -498,8 +497,8 @@ pub fn pin(
 /// `pin_workspace` — pin the default directory for a new conversation.
 ///
 /// This is a *new-conversation-state* action by design: pinning a workspace
-/// leaves the current conversation (with a `session/detach`, per §9/§10) and
-/// clears the session pin — the two fields can never disagree.
+/// leaves the current conversation (with a `session/detach`) and clears the
+/// session pin — the two fields can never disagree.
 ///
 /// @param workspace_id - which workspace, or `None` to stop pinning one.
 /// @param pinned_path - where the pin is remembered; `None` is "nowhere to write".
@@ -512,7 +511,7 @@ pub fn pin_workspace(
     pinned_path: Option<&std::path::Path>,
 ) -> Value {
     // Leaving the current conversation is told to the host first: the detach
-    // is what keeps the approval ownership (§10) honest.
+    // is what keeps the approval ownership honest.
     session.start_new_conversation(sink);
     let mut workspace: Option<String> = None;
     if let Some(path) = pinned_path {
@@ -528,14 +527,14 @@ pub fn pin_workspace(
     json!({ "pinnedWorkspace": workspace })
 }
 
-/// `on_show` — what a summon means for the conversation, per the 2026-10-09
-/// user decision: **every summon lands on a fresh new-conversation state; the
-/// pin is the user's way of continuing a specific conversation instead.**
+/// `on_show` — what a summon means for the conversation: **every summon lands on a
+/// fresh new-conversation state; the pin is the user's way of continuing a specific
+/// conversation instead.**
 ///
 /// - a pinned conversation that the panel is not currently following is
 ///   re-attached (the pin is the continuation escape hatch);
 /// - no pin: `start_new_conversation` — the detach leaves the previous
-///   conversation honestly (§10), nothing is created until the user submits.
+///   conversation honestly, nothing is created until the user submits.
 ///
 /// The dispatcher calls this on the *hotkey* show path only: a show the host
 /// asks for (an approval, say) is the host's intent, not the user's summon.
@@ -619,7 +618,7 @@ pub fn dismiss_handoff(session: &mut Session) -> Value {
 /// `log` — put one frontend breadcrumb on the record.
 ///
 /// Written to the **marker**, not stderr: the host swallows the sidecar's
-/// stderr, so a line there would be exactly as invisible as the bug the
+/// stderr, so a line there would be exactly as invisible as the problem the
 /// frontend is trying to report. The marker is the one surface a developer
 /// (or a test) reads afterwards.
 #[must_use]
@@ -668,7 +667,7 @@ pub fn apply_preferences(mut preferences: Preferences, incoming: &Value) -> Resu
 
 /// Whether an accelerator the settings page recorded is one this process may hold.
 ///
-/// Two rules, both from the egui settings page and both load-bearing:
+/// Two rules, both load-bearing:
 ///
 /// - the accelerator must be one this build can read back
 ///   ([`crate::runtime::hotkey::parse_accelerator`]);
@@ -840,9 +839,9 @@ mod tests {
 
     #[test]
     fn a_new_conversation_has_no_statistics_to_show() {
-        // The reported bug (2026-10-09): after "新建会话" the footer kept drawing the last
-        // session's token counts and cache hits under an empty panel. The figures are a
-        // conversation's, so an empty panel has none.
+        // After "新建会话" the footer must not keep drawing the last session's token counts
+        // and cache hits under an empty panel. The figures are a conversation's, so an empty
+        // panel has none.
         let (mut session, mut sink) = followed();
         session.on_frame(
             notification(
@@ -867,10 +866,9 @@ mod tests {
 
     #[test]
     fn a_submit_with_nothing_chosen_creates_in_the_ladders_workspace() {
-        // The bug (2026-10-09): submitting in the new-conversation state failed with "choose a
-        // workspace" whenever the panel had nothing of its own to send — which is the normal
-        // case, since the panel's field is only a P0 projection. The ladder existed, with its
-        // own tests, and had no caller.
+        // Submitting in the new-conversation state must create in the ladder's workspace: the
+        // panel's field is only a P0 projection, so it normally has nothing of its own to send,
+        // and the ladder would otherwise never be consulted.
         let (mut session, mut sink) = lists_without_a_conversation();
 
         let result = submit(&mut session, &mut sink, "在吗", None, None);
@@ -1166,7 +1164,7 @@ mod tests {
         }
         let result = pin_workspace(&mut session, &mut sink, Some("ws-notes"), Some(&path));
         assert_eq!(result["pinnedWorkspace"], "ws-notes");
-        // Leaving the conversation is told to the host (§9/§10).
+        // Leaving the conversation is told to the host.
         let detached = sink
             .frames
             .iter()
@@ -1208,14 +1206,13 @@ mod tests {
 
     #[test]
     fn a_summon_after_browsing_away_stays_on_the_pin() {
-        // The user's reported flow: pin session-1, browse to session-2, hide,
-        // summon. The summon must land on the pin and *stay* there — the poll's
-        // target agrees, so no re-attach to session-2 ever happens.
+        // Pin session-1, browse to session-2, hide, summon: the summon must land on the pin
+        // and *stay* there — the poll's target agrees, so no re-attach to session-2 happens.
         let (mut session, mut sink) = followed();
         session.pin_conversation(Some("session-1".to_owned()), &mut sink);
         session.choose_conversation("session-2", &mut sink);
-        // Let the browse attach resolve, as it does in real life: the panel is
-        // showing session-2 when the window closes.
+        // Let the browse attach resolve: the panel is showing session-2 when the window
+        // closes.
         let attach = sink
             .frames
             .iter()

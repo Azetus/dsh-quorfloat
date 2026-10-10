@@ -5,8 +5,7 @@
 //! shell asks of the platform. Nothing in this file decides *whether* the panel is
 //! visible — that is state, and it lives in the shell's dispatcher (`main.rs`).
 //!
-//! This is the pure half of the old `ui::window`: the viewport builder left with egui,
-//! the configuration contract did not.
+//! This module is the configuration contract without the viewport builder.
 
 /// Window geometry and appearance, from the host's effective configuration.
 #[derive(Debug, Clone, PartialEq)]
@@ -220,8 +219,7 @@ mod tests {
 
     #[test]
     fn the_panel_anchors_at_the_centre_unless_told_otherwise() {
-        // The default used to be `top-center`, which the shell never honoured at all; the half
-        // that has to agree with `src/config.ts` and `cordis.patch.yml` is this one.
+        // The half that has to agree with `src/config.ts` and `cordis.patch.yml` is this one.
         use crate::app::geometry::Anchor;
         assert_eq!(WindowSettings::default().anchor, Anchor::Center);
         assert_eq!(anchor_env("DSH_QUORFLOAT_TEST_ANCHOR_ABSENT", Anchor::Center), Anchor::Center);

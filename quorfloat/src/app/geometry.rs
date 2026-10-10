@@ -1,7 +1,7 @@
 //! Where the panel was last time, so it comes back there.
 //!
 //! Window geometry is presentation state, which the design assigns to this process rather
-//! than to the host (`docs/dsh-quorfloat.md`): the panel is a thing the user moves around,
+//! than to the host: the panel is a thing the user moves around,
 //! and a panel that jumps back to a default corner after every restart is a panel they
 //! have to re-place every time the host restarts it. The settings system will own this in
 //! P3; until then it is a small file this process reads and writes.
@@ -306,8 +306,8 @@ impl Placement {
 /// Decide where the panel opens, given the displays that exist now.
 ///
 /// The rule in one line: **a remembered position wins unless it is on no attached display**, and
-/// the anchor is where the panel goes instead. The failure it prevents is the reported one — a
-/// coordinate recorded while an external monitor was attached (`{"x":402.0,"y":11276.0}`)
+/// the anchor is where the panel goes instead. The failure it prevents: a coordinate recorded
+/// while an external monitor was attached (`{"x":402.0,"y":11276.0}`)
 /// outlives that monitor, the window is created there, and the hotkey and the tray's "show" then
 /// focus a panel that is on no screen: both look like they did nothing.
 ///
@@ -523,9 +523,9 @@ mod tests {
         vec![display()]
     }
 
-    /// The measured case from the bug report: a 3024x1964 built-in display, a remembered
-    /// coordinate from a desk where an external monitor was attached above it, and the primary
-    /// display's work area (menu bar excluded, as macOS reports it).
+    /// A 3024x1964 built-in display with a remembered coordinate from a desk where an external
+    /// monitor was attached above it, and the primary display's work area (menu bar excluded, as
+    /// macOS reports it).
     fn measured() -> (Vec<ScreenRect>, Option<ScreenRect>, (f32, f32)) {
         let built_in = ScreenRect::new(0.0, 0.0, 3024.0, 1964.0);
         let work_area = ScreenRect::new(0.0, 25.0, 3024.0, 1914.0);
@@ -660,10 +660,10 @@ mod tests {
 
     #[test]
     fn a_position_from_a_display_that_is_gone_falls_back_to_the_anchor() {
-        // The reported failure, in numbers: `{"x":402.0,"y":11276.0}` was recorded while an
-        // external monitor hung below the built-in one; that monitor is unplugged, and the
-        // coordinate is now on no display at all. The panel must open at the anchor instead of
-        // being created where the user cannot see it.
+        // The refusal, in numbers: `{"x":402.0,"y":11276.0}` was recorded while an external
+        // monitor hung below the built-in one; that monitor is unplugged, and the coordinate is
+        // now on no display at all. The panel must open at the anchor instead of being created
+        // where the user cannot see it.
         let (displays, primary, remembered) = measured();
         let placement =
             placement(Some(remembered), &displays, primary, (640.0, 400.0), Anchor::Center);

@@ -2,7 +2,7 @@
 //
 // The markup is the design's, element for element — including the ids the stylesheet
 // selects on (`#q-main`, `#q-thread-scroll`, `#q-settings`, …): `tokens.css` came from the
-// design verbatim, and this migration is about the code, not the design.
+// design verbatim.
 
 import type { ReactNode, RefObject } from 'react'
 import { useT } from '../hooks/useI18n'

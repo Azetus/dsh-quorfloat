@@ -1,12 +1,12 @@
 //! Coordinates the native window height with the panel height the frontend reports.
 //!
-//! The visual transition is the frontend's job now (CSS animates the panel's own
-//! height); what remains in this process is the coordination the old egui shell
-//! did, and it is still load-bearing: the window must make room *before* the panel
+//! The visual transition is the frontend's job (CSS animates the panel's own
+//! height); what lives in this process is the coordination, and it is load-bearing:
+//! the window must make room *before* the panel
 //! grows, a platform that never makes room must not keep the panel cropped or the
 //! shell busy, and giving up is reported once.
 //!
-//! Rules (ported from the documented contract in `docs/dsh-quorfloat.md` §11):
+//! Rules:
 //!
 //! - a growth request waits for the platform to make room; the wait has a deadline
 //!   (2 × the frontend's 220ms transition), and **a target that keeps growing does
@@ -20,14 +20,14 @@
 //!   permission; identical requests are deduplicated.
 
 /// Extra native space around the panel for its CSS shadow, logical pixels.
-/// The design's shadow room, unchanged from the egui shell: side 34, top 20,
-/// bottom 40 — the window is the panel plus this.
+/// The design's shadow room: side 34, top 20, bottom 40 — the window is the panel
+/// plus this.
 pub const SHADOW_SIDE: f32 = 34.0;
 pub const SHADOW_TOP: f32 = 20.0;
 pub const SHADOW_BOTTOM: f32 = 40.0;
 
 /// How long one growth request waits for the platform to make room: twice the
-/// frontend's 220ms CSS transition, as in the egui shell.
+/// frontend's 220ms CSS transition.
 pub const WAIT_FOR_NATIVE_ROOM_MS: i64 = 440;
 
 /// Two native heights this close are the same height.

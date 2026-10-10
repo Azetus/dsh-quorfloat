@@ -42,11 +42,6 @@ test('the pin is a checksummed download, not a floating URL', () => {
   assert.match(FONT_SOURCE.license, /OFL/i)
 })
 
-// The coupling test that compared FONT_FILE against `quorfloat/src/ui/fonts.rs` left
-// with the egui view (the migration dropped the module it guarded). Its replacement
-// lands with the web frontend (M4), when the font moves into `frontend/assets/` and a
-// new consumer-side constant exists to compare against.
-
 test('the licence is shipped beside the font it covers, unmodified', () => {
   // OFL 1.1 requires the notice to accompany every copy, and the copyright line lives in
   // the font's name table — unreadable to a user looking at a font file. So this text

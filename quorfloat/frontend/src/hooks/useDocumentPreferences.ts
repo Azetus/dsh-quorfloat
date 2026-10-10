@@ -8,8 +8,7 @@ import type { Snapshot } from '../lib/state'
 /**
  * Apply the host's appearance preferences to `<html>`.
  *
- * One property switches both palettes, and one class switches every transition off — the
- * same two knobs the old renderer set on every render.
+ * One property switches both palettes, and one class switches every transition off.
  *
  * @param settings - the snapshot's settings.
  */

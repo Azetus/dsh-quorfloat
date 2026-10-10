@@ -109,7 +109,7 @@ export interface RouterHost {
    * The panel's own tray menu is the only caller. `restart` goes through the
    * supervisor's restart entry; `stop` must go through its stop entry, because
    * only that marks the exit as deliberate — an exit the policy reads as a crash
-   * would be restarted, which is the opposite of what the user asked for.
+   * would be restarted, which is the opposite of a deliberate stop.
    */
   panelLifecycle(action: PanelLifecycleAction): Promise<{ action: PanelLifecycleAction; accepted: true }>
   /** Free-form diagnostics for the settings/status surface. */
@@ -118,11 +118,9 @@ export interface RouterHost {
 
 /** Every method this host answers, in one place.
  *
- * **The single source of truth for the protocol.** The supervisor used to keep its own copy of this
- * list in order to register channel handlers, and the two drifted the first time a method was added:
- * the router knew `session/options`, the copy did not, and the peer was told "unsupported method"
- * for a method that was implemented. A list of names that must agree with a `switch` is a list that
- * will not; `conformance.test.mjs` walks this one and fails if any entry is not answerable.
+ * **The single source of truth for the protocol.** A list of names that must agree with a `switch`
+ * is a list that will not; `conformance.test.mjs` walks this one and fails if any entry is not
+ * answerable.
  */
 export const METHODS = [
   'hello',

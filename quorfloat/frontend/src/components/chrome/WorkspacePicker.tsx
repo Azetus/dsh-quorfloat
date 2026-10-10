@@ -42,8 +42,7 @@ export function WorkspacePicker({ state, targetWorkspace, open, onToggle, onClos
       open={open}
       onToggle={() => {
         // The host sends the workspace list only when asked, and the panel asks when the user
-        // first looks at the picker. Without this the picker drew an empty list forever — the
-        // old renderer asked here, and the React migration dropped the call (2026-10-09).
+        // first looks at the picker — without this the picker would show an empty list.
         if (state.session.workspaces.length === 0) void api.requestWorkspaces()
         onToggle()
       }}

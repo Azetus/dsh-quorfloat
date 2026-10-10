@@ -1,10 +1,9 @@
 /**
  * Interaction tests: ownership filtering, one-shot settlement, and withdrawal.
  *
- * The waterfall contract these tests pin down is the one the design document
- * calls a hard requirement: the panel answers only for sessions it owns, an
- * answer takes effect once, a second answer is refused rather than re-executed,
- * and a cancelled request never leaves the turn hanging.
+ * The waterfall contract these tests pin down: the panel answers only for sessions it
+ * owns, an answer takes effect once, a second answer is refused rather than
+ * re-executed, and a cancelled request never leaves the turn hanging.
  */
 
 import assert from 'node:assert/strict'
@@ -45,7 +44,7 @@ function fakeContext() {
     dispatch(name, ...args) {
       // Waterfall semantics: each listener receives `next`, which continues the
       // chain. A listener that never calls it ends the chain, exactly like the
-      // browser forwarder measured on a real dsh.
+      // browser forwarder it stands in for.
       const list = listeners.get(name) ?? []
       // An empty chain is not an error: a real waterfall falls through to the
       // fallback its caller supplied, which is how `unavailable` is produced.
@@ -78,9 +77,7 @@ const PANEL_DECIDES = { authority: 'panel', reason: 'harness-not-visible', fresh
  * What a peer declared in `hello`, as the behaviour tests assume it: one that answers
  * approvals only. A panel that claims a question it cannot render hides it from the
  * Harness window for the whole claim deadline, so claiming is gated on this — and the
- * shipping build stopped being this peer on 2026-10-09, when it learned to draw the
- * option widgets and declared `question` too (`quorfloat/src/ipc/protocol.rs`). The
- * tests keep the narrower peer on purpose: it is the case that must stay safe.
+ * narrower peer is the case that must stay safe.
  */
 const PANEL_ANSWERS = kind => kind === 'approval'
 
@@ -102,8 +99,7 @@ function build({
     // make; `panel: undefined` is the panel being open on nothing, and another id is the panel
     // being open on something else — the case the rule added for it is about.
     // `null` means the panel is open and attached to nothing: passing `undefined` would take
-    // the default above instead, which is how the first version of these tests managed to test
-    // the opposite of what it said.
+    // the default above instead, which would test the opposite of what this says.
     panelSession: () => panel ?? undefined,
     authority,
     canAnswer,
@@ -327,9 +323,9 @@ test('abortAll withdraws every pending request', async () => {
 })
 
 test('an owned question is published with its options and answered as a batch', async () => {
-  // Only for a peer that declared it can answer questions. The shipping build does
-  // not (see `the answer shape the panel writes…` and `canAnswer`), so this covers
-  // the machinery that build will need rather than today's behaviour.
+  // Only for a peer that declared it can answer questions (see `canAnswer`): a peer
+  // that declares approvals only never reaches this path, so this exercises the
+  // machinery a question-capable build needs.
   const { ctx, interactions, notifications } = build({ canAnswer: () => true })
   const pending = ctx.dispatch(
     'user-questions/request',
@@ -382,9 +378,9 @@ test('a question for a session owned elsewhere is delegated', async () => {
 
 
 /**
- * A listener that behaves like the browser forwarder measured on a real dsh:
- * it takes the request, hands it to a client that may not exist, and never calls
- * `next()`. Reaching it means the turn hangs.
+ * A listener that behaves like the browser forwarder: it takes the request, hands
+ * it to a client that may not exist, and never calls `next()`. Reaching it means
+ * the turn hangs.
  */
 function blockingForwarder(hits) {
   return function forwarder() {
@@ -394,10 +390,9 @@ function blockingForwarder(hits) {
 }
 
 test('an answerer registered later still runs first (prepend)', async () => {
-  // The defect measured on a real dsh: `dsh-api-remotes` registers this event
-  // first and never delegates, so a plugin that registers afterwards is never
-  // reached — the approval is logged as asked and never decided. `prepend` is
-  // what puts this plugin in front.
+  // `dsh-api-remotes` registers this event first and never delegates, so a plugin
+  // that registers afterwards is never reached — the approval is logged as asked
+  // and never decided. `prepend` is what puts this plugin in front.
   const ctx = fakeContext()
   const notifications = []
   const hits = []
@@ -519,8 +514,8 @@ test('an answer arriving after the deadline is refused, not applied', async () =
 
 test('unregister removes both listeners so nothing outlives the plugin', () => {
   // A prepended listener that survived unload would keep claiming requests for a
-  // panel that no longer exists — worse than the original hang, because nothing
-  // would ever answer.
+  // panel that no longer exists — worse than hanging, because nothing would ever
+  // answer.
   const ctx = fakeContext()
   const interactions = new Interactions({
     ctx,
@@ -596,10 +591,9 @@ test('a visible Harness window keeps the decision, and the panel only gets a hin
 })
 
 test('a claimed approval needs no pointer to the Harness window', async () => {
-  // An open-but-unfocused Harness window used to earn the panel a hint telling the
-  // user to go and confirm there. That was wrong: claiming is exclusive, so the
-  // window has nothing to show for this request — the card is on the panel the user
-  // is looking at, and sending them elsewhere is noise at best.
+  // Claiming is exclusive, so an open-but-unfocused Harness window has nothing to
+  // show for this request: the card is on the panel the user is looking at, and a
+  // hint sending them elsewhere is noise at best.
   const { ctx, notifications } = buildWithAuthority({
     authority: 'panel',
     reason: 'harness-open-but-idle',
@@ -617,10 +611,10 @@ test('a claimed approval needs no pointer to the Harness window', async () => {
 })
 
 test('a question the panel cannot answer is announced and handed over at once', async () => {
-  // The defect this prevents: claiming a question this build has no widget for hides
-  // it from the Harness window for the entire claim deadline and then hands back a
-  // request that was invisible the whole time. The user is told where it went instead,
-  // and the request reaches the answerer that can actually take it.
+  // Claiming a question this build has no widget for hides it from the Harness
+  // window for the entire claim deadline and then hands back a request that was
+  // invisible the whole time. The user is told where it went instead, and the
+  // request reaches the answerer that can actually take it.
   const { ctx, notifications } = buildWithAuthority(
     { authority: 'panel', reason: 'harness-not-visible', fresh: ['web'] },
     () => false,

@@ -1,10 +1,10 @@
 // The protocol's method table, and the one failure it is prone to.
 //
 // A method is answered only if three things agree: the router's dispatch, the method list the
-// supervisor registers channel handlers from, and the peer's own idea of what it may ask. The first
-// two were written twice, drifted the first time a method was added, and produced the worst possible
-// symptom — `unsupported method: session/options` for a method that was implemented, in the panel's
-// own settings menu, with nothing in the log to say which side was wrong.
+// supervisor registers channel handlers from, and the peer's own idea of what it may ask. A list
+// of names that must agree with a switch will drift, and the symptom is the worst possible one —
+// `unsupported method: session/options` for a method that was implemented, in the panel's own
+// settings menu, with nothing in the log to say which side was wrong.
 //
 // So the list lives in one place (`METHODS`, in `src/bridge/router.ts`) and these tests walk it: every
 // entry must be answerable, and a method that is not in it must not be answerable either.
@@ -56,8 +56,8 @@ const PARAMS = {
 }
 
 test('every method in the table is answered by the router', async () => {
-  // The test that would have caught the drift: a method listed but not dispatched fails here, in the
-  // suite, rather than in the panel with an error nobody can place.
+  // A method listed but not dispatched fails here, in the suite, rather than in the panel with an
+  // error nobody can place.
   const router = new HostRouter(stubHost())
   for (const method of METHODS) {
     try {

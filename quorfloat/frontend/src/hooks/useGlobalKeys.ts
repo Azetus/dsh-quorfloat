@@ -1,5 +1,5 @@
 // The panel's keyboard rules: a chord while recording, Escape to close or hide, Enter to
-// send. Ported from the old `main.ts` handler unchanged.
+// send.
 
 import { useEffect, type RefObject } from 'react'
 import { api } from '../api'

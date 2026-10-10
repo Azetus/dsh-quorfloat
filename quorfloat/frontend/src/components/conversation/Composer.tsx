@@ -3,7 +3,7 @@
 // The textarea is deliberately uncontrolled: while the user types, the DOM is the
 // source of truth for the draft (the host snapshots arrive on every stream event, and a
 // controlled value would fight the caret). The draft is pushed back in only when the box
-// is not focused — the same rule the old renderer used.
+// is not focused.
 
 import { useLayoutEffect, type RefObject } from 'react'
 import { useT } from '../../hooks/useI18n'

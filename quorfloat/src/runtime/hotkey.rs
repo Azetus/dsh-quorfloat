@@ -20,9 +20,8 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 /// **`attempted` and `held` are two fields because they are two facts.** They agree almost always, and
 /// the case where they do not is the one that matters: a change the desktop refused leaves the user
 /// holding their *previous* shortcut while having asked for a new one. One field cannot carry both —
-/// and the first version of this tried, with the result that the reported key and the key actually
-/// grabbed disagreed, so releasing "the current accelerator" released a key this process did not
-/// hold. Two fields make that mistake unrepresentable.
+/// releasing "the current accelerator" would then release a key this process does not hold. Two
+/// fields make that mistake unrepresentable.
 pub struct Hotkey {
     /// The accelerator the user is asking for: what the settings page shows, and what `hello` reports.
     attempted: Option<String>,
@@ -285,8 +284,7 @@ pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 ///
 /// Polling is not an option here: the event loop is busy with the window, and a
 /// `try_recv` buried in a per-frame path would run only while something else asks
-/// for frames. The hotkey would then appear to do nothing at all, which is exactly
-/// what it did before this existed.
+/// for frames, so the hotkey would appear to do nothing at all.
 ///
 /// Blocking on the hotkey channel from a dedicated thread fixes the direction of
 /// the wait: the thread sleeps until the user presses the key, then wakes the

@@ -66,7 +66,7 @@ export interface WindowConfig {
    * before the panel's webview has had a chance to answer with `navigator.languages`.
    *
    * Absent means decided, deliberately: a configuration built by hand (a test, a caller that
-   * predates this field) keeps the historical behaviour instead of silently deferring a seed.
+   * does not set it) treats the language as settled instead of silently deferring a seed.
    */
   readonly languageDecided?: boolean
 }

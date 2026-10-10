@@ -1,8 +1,7 @@
 // The panel's fade-out flight: the `.q-away` class, the request to hide the native
 // window, and the guards that keep a quick "hide then show" from closing a reopened panel.
 //
-// Ported from the old `main.ts` unchanged in behaviour — including the marker lines, which
-// are the only observable record of a hide that the shell swallowed.
+// The marker lines are the only observable record of a hide that the shell swallowed.
 
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { listen } from '@tauri-apps/api/event'

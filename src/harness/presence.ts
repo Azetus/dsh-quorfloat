@@ -1,8 +1,7 @@
 /**
  * Presence tracking and the approval-authority verdict.
  *
- * The behaviour this file implements was specified from measurement, not from
- * assumption (see `docs/progress.md` §18):
+ * The platform facts this file implements:
  *
  * - `document.visibilityState` alone cannot answer "is the user looking at
  *   Harness?". On macOS a fully occluded window reports `hidden`, while on

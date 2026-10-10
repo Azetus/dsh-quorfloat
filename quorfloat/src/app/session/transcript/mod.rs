@@ -1,16 +1,16 @@
 //! The conversation, as lines the panel can draw.
 //!
 //! The host sends records; a record is an envelope around an event whose `type` is a
-//! **free-form string** (`protocol.md` §5). One ordinary session produced 24 kinds, and
-//! nothing in the contract enumerates them — so this module is built around two rules:
+//! **free-form string** and nothing in the contract enumerates the kinds, so this module
+//! is built around two rules:
 //!
 //! - **Known kinds are rendered; internal kinds are counted, not lost.** The ones a user
 //!   would call conversation become entries. The ones that describe the machinery
 //!   (`step/start`, `request/header`, …) are skipped, and the count is reported, because
 //!   "we hid 40 events" is a very different statement from "nothing arrived".
 //! - **Nothing but the conversation is drawn, and nothing is lost by it.** An unknown
-//!   kind gets no line (the reader asked for a conversation window, not an event log —
-//!   2026-10-07), but it is *counted by kind and named in the marker*, so a harness
+//!   kind gets no line (the reader asked for a conversation window, not an event log),
+//!   but it is *counted by kind and named in the marker*, so a harness
 //!   upgrade still cannot look like silence: `transcript skipped: … 2 unrecognised
 //!   (something/new, other/thing)`.
 //!
@@ -171,8 +171,8 @@ impl Transcript {
     ///
     /// "There is a live buffer **with something in it**": [`Self::live_entry`] already hides
     /// an empty one, and a buffer holding nothing is not an answer — but the composer reads
-    /// this flag to choose between send and stop, so an empty buffer used to leave it
-    /// offering "stop" for a turn that was over (2026-10-09).
+    /// this flag to choose between send and stop: an empty buffer would otherwise leave it
+    /// offering "stop" for a turn that was over.
     ///
     /// The buffer's own lifetime is what makes that enough: it is created by a stream frame
     /// and settled by the turn boundary (see the `turn/end` arm below), so a live buffer
@@ -337,8 +337,7 @@ impl Transcript {
     /// Whatever is on screen is now known-incomplete, and this module cannot repair it
     /// by itself — the answer is a fresh subscription. What it *can* do is say so to the
     /// caller, which re-attaches **and puts the gap on the marker**: the panel draws no
-    /// line for it any more (2026-10-07), so the record is where "the history skipped a
-    /// turn" has to live.
+    /// line for a gap, so the record is where "the history skipped a turn" has to live.
     ///
     /// @param params - the notification parameters.
     /// @returns the reason string, for the caller's log line.
@@ -447,14 +446,10 @@ impl Transcript {
             // The list is the harness's own **known event vocabulary** (`known-event-types.ts`)
             // minus what this file handles above. Naming every one of them is the point: the
             // fallback below exists so a harness *upgrade* cannot look like silence, and it can only
-            // do that job if the vocabulary it already knows is spelled out here. `model/selection`
-            // is how this was found — it is the same kind of fact as `permission/preset` (a durable
-            // note about the session, not a line of the conversation), and it was reaching the
-            // transcript as `事件 · model/selection / 未识别的事件` every time the model changed.
-            // The approval log is the same kind of fact: the *card* is where a user answers, and
-            // once it is answered there is nothing to read — the tool result that follows carries
-            // the consequence. Drawing "请求提权 / 提权请求：rejected" put two lines of event log in
-            // the middle of a conversation (see `docs/progress.md` §4).
+            // do that job if the vocabulary it already knows is spelled out here. These kinds are
+            // durable notes *about* the session rather than lines of the conversation — the approval
+            // *card* is where a user answers, and `model/selection` belongs in the footer's picker —
+            // so drawing them would put event log in the middle of a conversation.
             "approval/asked" | "approval/decided"
             | "step/start" | "step/end" | "command/run" | "command/done" | "workspace/changes"
             | "session/end-seed" | "permission/preset" | "sandbox/mode" | "approval/policy" | "agent/inbox/spliced"
@@ -473,7 +468,7 @@ impl Transcript {
             }
             // A kind this build has never seen. **Counted and named, never drawn**: the panel is a
             // conversation window, and the marker is where "the harness sent something we do not
-            // understand" is answered (`docs/AGENT.md` §4.4).
+            // understand" is answered.
             other => {
                 if other.starts_with("session-log-") {
                     self.internal += 1;
@@ -858,11 +853,9 @@ mod tests {
 
     #[test]
     fn changing_the_model_does_not_write_a_line_into_the_conversation() {
-        // The bug this exists for: `model/selection` reached the transcript as
-        // `事件 · model/selection / 未识别的事件` — twice, once per switch — because the reducer's
-        // machinery list named only the types it happened to have met. A model change is a durable
-        // note *about* the session, exactly like `permission/preset`, and belongs in the footer's
-        // picker rather than in the conversation.
+        // A model change is a durable note *about* the session, exactly like
+        // `permission/preset`, and belongs in the footer's picker rather than in the
+        // conversation.
         let mut transcript = Transcript::new();
         transcript.apply_snapshot(&snapshot(
             vec![
@@ -913,8 +906,8 @@ mod tests {
 
     #[test]
     fn an_unrecognised_kind_is_named_in_the_log_rather_than_drawn() {
-        // The rule that matters most: a harness upgrade must not look like silence. Since 2026-10-07
-        // the answer lives in the marker instead of the thread — the panel is a conversation window,
+        // The rule that matters most: a harness upgrade must not look like silence. The answer
+        // lives in the marker instead of the thread — the panel is a conversation window,
         // and "we do not understand `something/new`" is a fact for whoever reads the log, not a line
         // for whoever is reading an answer.
         let mut transcript = Transcript::new();
@@ -949,11 +942,10 @@ mod tests {
 
     #[test]
     fn a_late_stream_frame_does_not_leave_the_panel_streaming() {
-        // The bug the composer showed: `streaming` was `live.is_some()`, and a stream frame
-        // that arrives after the turn's own end (an empty frame, or a straggler the host
-        // flushed late) creates a live buffer that nothing ever clears. `live_entry()` hides
-        // an empty buffer, so the thread looked settled — while the composer read the flag
-        // and kept offering "stop" for a turn that was over.
+        // A stream frame that arrives after the turn's own end (an empty frame, or a
+        // straggler the host flushed late) creates a live buffer that nothing ever clears.
+        // `live_entry()` hides an empty buffer, so the thread would look settled while the
+        // composer read the flag and kept offering "stop" for a turn that was over.
         let mut transcript = Transcript::new();
         transcript.apply_snapshot(&snapshot(vec![], 0, 1));
         transcript.apply_event(&json!({"sessionId": "session-1", "generation": 1, "seq": 1,
@@ -1067,8 +1059,7 @@ mod tests {
         assert!(is_error);
     }
 
-    /// The bug this filter was written for: the panel showed the harness's own instructions as
-    /// if the user had typed them.
+    /// The panel must not show the harness's own instructions as if the user had typed them.
     #[test]
     fn injected_context_and_the_system_prompt_are_not_shown() {
         let mut transcript = Transcript::new();
@@ -1137,8 +1128,8 @@ mod tests {
 
     /// One live `session/stream` notification, wrapped as the host sends it.
     ///
-    /// The frames below are verbatim shapes from a real capture, `attemptId`, `revision`
-    /// and all — including the frame counter in `index` that is *not* the block index.
+    /// The frames below are verbatim host shapes, `attemptId`, `revision` and all —
+    /// including the frame counter in `index` that is *not* the block index.
     fn live(frame: Value) -> Value {
         json!({"sessionId": "session-1", "generation": 1, "frame": frame})
     }
@@ -1165,10 +1156,10 @@ mod tests {
 
     #[test]
     fn the_frames_own_counter_is_not_the_block_index() {
-        // The trap in the captured shape: a live frame's `index` counts frames (29 here),
-        // while the block it describes is `chunk.index` (1). Reading the frame's counter
-        // as the block index builds thirty placeholder blocks per token, and the answer
-        // arrives in a panel full of blanks.
+        // The trap in the shape: a live frame's `index` counts frames (29 here), while the
+        // block it describes is `chunk.index` (1). Reading the frame's counter as the block
+        // index builds thirty placeholder blocks per token, and the answer arrives in a
+        // panel full of blanks.
         let mut transcript = Transcript::new();
         transcript.apply_snapshot(&snapshot(vec![], 0, 1));
         transcript.apply_stream(&live(json!({"type": "chunk", "revision": 31, "index": 29,
@@ -1208,8 +1199,8 @@ mod tests {
 
     #[test]
     fn an_unrecognised_delta_kind_is_counted_rather_than_guessed() {
-        // A tool call streaming is the shape this build has never captured. Guessing at
-        // it would put invented text on screen; counting it sends someone to a capture.
+        // A tool call streaming is a shape this build does not parse. Guessing at it would
+        // put invented text on screen; counting it records what actually arrived.
         let mut transcript = Transcript::new();
         transcript.apply_snapshot(&snapshot(vec![], 0, 1));
         transcript.apply_stream(&live(json!({"type": "chunk", "index": 1,
@@ -1286,8 +1277,8 @@ mod tests {
         let detail = transcript.apply_resync(&json!({"sessionId": "session-1", "generation": 1,
             "reason": "sequence-gap", "expected": 6, "received": 9}));
         assert_eq!(detail.as_deref(), Some("sequence-gap (expected 6, received 9)"));
-        // The repair is automatic and the caller marks it; what the panel no longer does is write an
-        // event line about it into the conversation.
+        // The repair is automatic and the caller marks it; no event line is written about it
+        // into the conversation.
         assert!(transcript.entries().is_empty(), "nothing is drawn: {:?}", transcript.entries());
         assert_eq!(transcript.skipped().internal, 1, "and it is counted as set aside");
     }

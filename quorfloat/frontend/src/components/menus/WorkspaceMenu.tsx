@@ -27,8 +27,8 @@ export interface WorkspaceMenuProps {
 /**
  * Render the workspace list.
  *
- * Choosing a workspace while following a conversation *is* the new-conversation action
- * (2026-10-09): it leaves the conversation with a detach and preselects this directory.
+ * Choosing a workspace while following a conversation *is* the new-conversation action:
+ * it leaves the conversation with a detach and preselects this directory.
  * The pin button is what persists; it exists only in new-conversation state, because with
  * a session pin the workspace field is that session's projection, not a choice.
  *
