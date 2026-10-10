@@ -1,5 +1,7 @@
 // The summon-shortcut field: click it, press the chord, done.
 
+import { useT } from '../../hooks/useI18n'
+
 /** Props for {@link HotkeyField}. */
 export interface HotkeyFieldProps {
   /** The accelerator the shell last accepted, or null. */
@@ -22,12 +24,15 @@ export interface HotkeyFieldProps {
  * @returns the field.
  */
 export function HotkeyField({ requested, reason, recording, onRecord }: HotkeyFieldProps) {
+  const t = useT()
   return (
     <input
       id="q-shortcut"
       className={recording ? 'q-shortcut q-recording' : 'q-shortcut'}
-      value={recording ? '按下组合键…' : requested ?? '—'}
-      aria-label="呼出快捷键"
+      // `'—'` is the design's "no chord yet" placeholder: a symbol, not a word, so it is
+      // the same in both languages and stays out of the dictionary.
+      value={recording ? t('hotkey.recording') : requested ?? '—'}
+      aria-label={t('settings.hotkey')}
       title={recording ? '' : reason ?? ''}
       readOnly
       onClick={onRecord}

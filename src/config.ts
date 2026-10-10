@@ -32,6 +32,17 @@ export type WindowAnchor = 'top-center' | 'top-left' | 'top-right' | 'center'
 /** Theme preference forwarded to the quorfloat subproject. */
 export type ThemePreference = 'system' | 'light' | 'dark'
 
+/**
+ * Language of the panel's own interface.
+ *
+ * The same two ids the Harness uses, so the two never have to be translated; the
+ * empty string is not a third language but the "nobody chose one here yet" state.
+ * A first launch answers it from the Harness's own locale preference and the
+ * sidecar persists the answer as the panel's own setting, so a later launch
+ * already carries an explicit value — see `src/host/language.ts`.
+ */
+export type LanguagePreference = '' | 'zh' | 'en'
+
 /** Log verbosity; `debug` also traces protocol frames that carry no user content. */
 export type LogLevel = 'error' | 'warn' | 'info' | 'debug'
 
@@ -43,6 +54,7 @@ export interface WindowConfig {
   readonly alwaysOnTop: boolean
   readonly reduceMotion: boolean
   readonly theme: ThemePreference
+  readonly language: LanguagePreference
 }
 
 /** Fully normalized plugin configuration as seen by the rest of the plugin. */
@@ -151,6 +163,10 @@ const SPEC = {
       alwaysOnTop: { kind: 'boolean', def: true },
       reduceMotion: { kind: 'boolean', def: false },
       theme: { kind: 'enum', def: 'system', values: ['system', 'light', 'dark'] },
+      // Empty is the documented "unset": the first launch resolves it from the
+      // Harness's locale preference and the sidecar persists the result as the
+      // panel's own setting. See `src/host/language.ts`.
+      language: { kind: 'enum', def: '', values: ['', 'zh', 'en'] },
     },
   },
   startupTimeoutMs: { kind: 'int', def: 8000, min: 500, max: 60000 },

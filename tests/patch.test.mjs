@@ -74,6 +74,10 @@ test('the shipped patch passes the plugin configuration schema', async () => {
   // silently disagreed would open the panel somewhere the other two never name.
   assert.equal(result.value.window.anchor, 'center', 'the centre of the primary display')
   assert.equal(result.value.window.anchor, DEFAULT_CONFIG.window.anchor)
+  // The shipped row leaves the language unset on purpose: the first launch resolves it from
+  // the Harness's own locale preference and the sidecar persists the answer.
+  assert.equal(result.value.window.language, '', 'an install must not hard-code a language')
+  assert.equal(result.value.window.language, DEFAULT_CONFIG.window.language)
   assert.equal(result.value.logLevel, 'info')
 })
 

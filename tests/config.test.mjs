@@ -45,6 +45,19 @@ test('a partial patch fills defaults for the fields it omits', () => {
   assert.equal(result.value.window.anchor, 'center')
 })
 
+test('the panel language is unset by default and accepts only the two ids', () => {
+  // Empty is not a third language: it is the state the first launch resolves from the
+  // Harness's own locale and then persists (`src/host/language.ts`).
+  assert.equal(validate(undefined).value.window.language, '')
+  assert.equal(validate({ window: { language: '' } }).value.window.language, '')
+  assert.equal(validate({ window: { language: 'zh' } }).value.window.language, 'zh')
+  assert.equal(validate({ window: { language: 'en' } }).value.window.language, 'en')
+
+  const rejected = validate({ window: { language: 'fr' } })
+  assert.ok('issues' in rejected, 'a language this build does not ship is refused, not remapped')
+  assert.deepEqual(rejected.issues[0].path, ['window', 'language'])
+})
+
 test('an unknown top-level field is rejected by name', () => {
   const result = validate({ hotkey: 'Alt+Space', hotket: 'Alt+Space' })
   assert.ok('issues' in result)

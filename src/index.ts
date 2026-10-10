@@ -22,6 +22,7 @@ import type { ChannelError } from './bridge/errors.js'
 import { HostRouter, type PanelLifecycleAction } from './bridge/router.js'
 import { QuorfloatSupervisor, type SupervisorEvent, type SupervisorSnapshot } from './host/supervisor.js'
 import { resolveQuorfloatBinary, type ResolvedBinary } from './host/binary.js'
+import { readHarnessLocalePreference, resolvePanelLanguage } from './host/language.js'
 import { registerPresenceGateway, type InboundPresenceReport } from './host/presence-gateway.js'
 import { applyLifecycle, registerControlGateway } from './host/control-gateway.js'
 import {
@@ -230,8 +231,29 @@ export function createPlugin(overrides: PluginOverrides = {}) {
         log.warn('approval/question answering from the panel is unavailable on this Harness build')
       }
 
+      // The panel's language, resolved once, on the transition into work: it has to
+      // be in the spawn environment for the very first frame, before any host frame
+      // has been processed. An explicit panel setting is used as it stands; an empty
+      // one is seeded from the Harness's own locale preference (namespace `locale`,
+      // field `preference`, in the Host user-settings document), and anything
+      // unsupported, unreadable or absent becomes `en`. The sidecar persists the
+      // answer as the panel's own setting, which is what makes later launches
+      // explicit instead of a second reading of the Harness.
+      const harnessPreference = readHarnessLocalePreference(name => ctx.get(name))
+      const language = resolvePanelLanguage(config.window.language, harnessPreference)
+      log.info('panel language resolved', {
+        language,
+        setting: config.window.language === '' ? '(unset)' : config.window.language,
+        harness: harnessPreference ?? '(unreachable)',
+      })
+      // Only the supervisor ever reads `window.language`, and it reads it through
+      // `config()`, so the resolved value is carried on a copy rather than mutating
+      // the validated configuration object the rest of activation closed over.
+      const effectiveConfig: QuorfloatConfig =
+        language === config.window.language ? config : { ...config, window: { ...config.window, language } }
+
       const supervisor = new QuorfloatSupervisor({
-        config: () => config,
+        config: () => effectiveConfig,
         resolveBinary: () =>
           overrides.resolveBinary?.(config.quorfloatPath) ?? resolveQuorfloatBinary({ configuredPath: config.quorfloatPath }),
         createRouter: channelSessionId => {

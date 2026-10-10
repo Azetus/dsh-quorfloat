@@ -1,6 +1,7 @@
 // The runtime row's permission picker — the footer entry whose glyph follows the
 // permission actually in force.
 
+import { useT } from '../../hooks/useI18n'
 import { permissionIcon } from '../../lib/icons'
 import type { Snapshot } from '../../lib/state'
 import { Icon } from '../common/Icon'
@@ -30,14 +31,15 @@ export interface PermissionPickerProps {
  * @returns the picker.
  */
 export function PermissionPicker({ state, open, onToggle, onClose }: PermissionPickerProps) {
+  const t = useT()
   const options = state.session.options
   const name = options?.permissions.find(p => p.value === options.permission)?.name ?? '—'
   return (
     <PickerPopover
       id="q-permission"
       menuId="q-permission-menu"
-      label="选择权限"
-      menuLabel="权限选择"
+      label={t('permission.pickerLabel')}
+      menuLabel={t('permission.menuLabel')}
       wrapClass="q-permission-wrap"
       menuClass="q-up"
       open={open}

@@ -1,6 +1,7 @@
 // The model + reasoning-effort menu.
 
 import { api } from '../../api'
+import { useT } from '../../hooks/useI18n'
 import type { Snapshot } from '../../lib/state'
 import { MenuHeading } from './MenuHeading'
 import { MenuHint } from './MenuHint'
@@ -27,12 +28,13 @@ export interface ModelMenuProps {
  * @returns the menu contents.
  */
 export function ModelMenu({ state, onClose }: ModelMenuProps) {
+  const t = useT()
   const options = state.session.options
   if (options === null) {
     return (
       <>
-        <MenuHeading title="模型" />
-        <MenuHint text="模型目录尚未到达。" />
+        <MenuHeading title={t('model.heading')} />
+        <MenuHint text={t('model.catalogPending')} />
       </>
     )
   }
@@ -44,8 +46,8 @@ export function ModelMenu({ state, onClose }: ModelMenuProps) {
       {/* The design's back row. Our menu is one flat list (the design's two-level
           navigation was flattened when the panel was built), so this is a heading, not a
           control — a dead button would be a lie about what the panel can do. */}
-      <div className="q-config-back">‹ 模型与推理等级</div>
-      <MenuHeading title="模型" />
+      <div className="q-config-back">{t('model.backRow')}</div>
+      <MenuHeading title={t('model.heading')} />
       {options.models.map(model => (
         <MenuOption
           key={`${model.provider}/${model.id}`}
@@ -58,7 +60,7 @@ export function ModelMenu({ state, onClose }: ModelMenuProps) {
         />
       ))}
       <MenuSeparator />
-      <MenuHeading title="推理等级" />
+      <MenuHeading title={t('model.effortHeading')} />
       {efforts.map(effort => (
         <MenuOption
           key={effort.id}
@@ -70,7 +72,7 @@ export function ModelMenu({ state, onClose }: ModelMenuProps) {
           }}
         />
       ))}
-      {efforts.length === 0 && <MenuHint text="当前模型没有可选档位。" />}
+      {efforts.length === 0 && <MenuHint text={t('model.noEfforts')} />}
     </>
   )
 }

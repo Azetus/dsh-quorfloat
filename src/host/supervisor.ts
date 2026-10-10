@@ -787,6 +787,13 @@ function quorfloatEnvironment(config: QuorfloatConfig): NodeJS.ProcessEnv {
     // in the `ready` payload for the same reason as the numbers above: the placement happens the
     // moment the window is created, which is before any frame from the host has been processed.
     DSH_QUORFLOAT_WINDOW_ANCHOR: config.window.anchor,
+    // The language the panel draws and labels its menu bar in. `''` is the schema's
+    // "unset" and reaches the peer as it is; the plugin resolves it from the Harness's
+    // locale preference before constructing this supervisor, so in a real profile this
+    // is always `zh` or `en`. It is here as well as in the `ready` payload because the
+    // sidecar persists the first-launch value as its own setting, and that write
+    // happens before any frame arrives.
+    DSH_QUORFLOAT_WINDOW_LANGUAGE: config.window.language,
   }
   // POSIX and Windows names for the same facts, both forwarded. The Windows
   // entries are not decoration: `HOME` is normally unset there, and while the host

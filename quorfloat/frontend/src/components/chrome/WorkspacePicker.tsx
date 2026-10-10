@@ -1,6 +1,7 @@
 // The top bar's workspace picker.
 
 import { api } from '../../api'
+import { useT } from '../../hooks/useI18n'
 import type { Snapshot } from '../../lib/state'
 import { pinnedWorkspaceMark, workspaceTitle } from '../../lib/view-text'
 import { Icon } from '../common/Icon'
@@ -30,13 +31,14 @@ export interface WorkspacePickerProps {
  * @returns the picker.
  */
 export function WorkspacePicker({ state, targetWorkspace, open, onToggle, onClose, onChoose }: WorkspacePickerProps) {
+  const t = useT()
   const marked = state.session.following === null && pinnedWorkspaceMark(state, targetWorkspace)
   return (
     <PickerPopover
       id="q-workspace"
       menuId="q-workspace-menu"
-      label="选择工作区"
-      menuLabel="工作区选择"
+      label={t('workspace.choose')}
+      menuLabel={t('workspace.menuLabel')}
       open={open}
       onToggle={() => {
         // The host sends the workspace list only when asked, and the panel asks when the user
@@ -49,7 +51,7 @@ export function WorkspacePicker({ state, targetWorkspace, open, onToggle, onClos
       trigger={
         <>
           <span id="q-workspace-icon"><Icon name="folder" /></span>
-          <span className="q-name" id="q-workspace-name">{workspaceTitle(state, targetWorkspace)}</span>
+          <span className="q-name" id="q-workspace-name">{t(workspaceTitle(state, targetWorkspace))}</span>
           <span id="q-workspace-pinmark" className="q-pinmark" hidden={!marked}>
             {marked && <Icon name="pin" />}
           </span>

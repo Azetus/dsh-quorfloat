@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'vitest'
-import { cacheLabel, contextPercent, speedLabel, tokenLabel } from '../src/lib/stats'
+import { msg, resolveText } from '../src/lib/i18n'
+import { cacheLabel, contextPercent, roundsText, speedLabel, tokenLabel } from '../src/lib/stats'
+import type { Stats } from '../src/lib/state'
 
 describe('speedLabel', () => {
   test('ten and above round to an integer', () => {
@@ -52,5 +54,36 @@ describe('contextPercent', () => {
   test('missing either number is not a number', () => {
     expect(contextPercent(null, 1000)).toBeNull()
     expect(contextPercent(10, null)).toBeNull()
+  })
+})
+
+/** A stats record with everything the rounds group reads. */
+const stats = (over: Partial<Stats>): Stats => ({
+  turns: 0,
+  steps: 0,
+  tokensPerSecond: null,
+  totalTokens: null,
+  cacheHitPercent: null,
+  contextTokens: null,
+  contextLimit: null,
+  ...over,
+})
+
+describe('roundsText', () => {
+  test('it returns the key and the figures, not a sentence', () => {
+    expect(roundsText(stats({ turns: 3, steps: 9, tokensPerSecond: 229 })))
+      .toEqual(msg('stats.rounds', { turns: 3, steps: 9, speed: '229' }))
+  })
+
+  test('the dictionary phrases it per language', () => {
+    const text = roundsText(stats({ turns: 3, steps: 9, tokensPerSecond: 229 }))
+    expect(resolveText('zh', text)).toBe('3 轮 9 步 · 229 tok/s')
+    expect(resolveText('en', text)).toBe('Turns 3 · Steps 9 · 229 tok/s')
+  })
+
+  test('an unreported speed keeps the tested dash, in both languages', () => {
+    const text = roundsText(stats({ turns: 1, steps: 2 }))
+    expect(resolveText('zh', text)).toBe('1 轮 2 步 · — tok/s')
+    expect(resolveText('en', text)).toBe('Turns 1 · Steps 2 · — tok/s')
   })
 })

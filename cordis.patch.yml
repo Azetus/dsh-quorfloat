@@ -24,6 +24,10 @@
           alwaysOnTop: true
           reduceMotion: false
           theme: system
+          # Empty means "nobody has chosen a panel language yet": the first launch
+          # resolves it from the Harness's own locale preference and the sidecar
+          # persists the answer as the panel's own setting.
+          language: ""
         startupTimeoutMs: 8000
         requestTimeoutMs: 10000
         heartbeatMs: 5000

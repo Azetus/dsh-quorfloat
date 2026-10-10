@@ -5,6 +5,7 @@
 // design verbatim, and this migration is about the code, not the design.
 
 import type { ReactNode, RefObject } from 'react'
+import { useT } from '../hooks/useI18n'
 
 /** Props for {@link Panel}. */
 export interface PanelProps {
@@ -25,6 +26,7 @@ export interface PanelProps {
  * @returns the stage.
  */
 export function Panel({ panelRef, hiding, maxHeight, children }: PanelProps) {
+  const t = useT()
   return (
     <div className="q-stage">
       <section
@@ -32,7 +34,7 @@ export function Panel({ panelRef, hiding, maxHeight, children }: PanelProps) {
         ref={panelRef}
         className={hiding ? 'q-window q-away' : 'q-window'}
         style={{ maxHeight }}
-        aria-label="Quorfloat 对话窗口"
+        aria-label={t('panel.windowLabel')}
       >
         {children}
       </section>

@@ -4,6 +4,7 @@
 import { useEffect, type RefObject } from 'react'
 import { api } from '../api'
 import { chordFromEvent, validateChord } from '../lib/hotkey'
+import { useT } from './useI18n'
 
 /** Everything the keyboard handler needs from the app. */
 export interface GlobalKeyOptions {
@@ -39,6 +40,8 @@ export function useGlobalKeys(options: GlobalKeyOptions): void {
     recording, setRecording, setTransientError, menuOpen, closeMenu, settingsOpen,
     backFromSettings, hide, inputRef, submit,
   } = options
+  // The rejected chord's reason is a dictionary key; the status line takes the words.
+  const t = useT()
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent): void => {
@@ -52,7 +55,7 @@ export function useGlobalKeys(options: GlobalKeyOptions): void {
         if (chord === null) return
         const verdict = validateChord(chord)
         if (!verdict.ok) {
-          setTransientError(verdict.reason)
+          setTransientError(t(verdict.reason))
           return
         }
         setTransientError(null)
@@ -83,7 +86,7 @@ export function useGlobalKeys(options: GlobalKeyOptions): void {
     document.addEventListener('keydown', onKeyDown)
     return () => { document.removeEventListener('keydown', onKeyDown) }
   }, [
-    recording, setRecording, setTransientError, menuOpen, closeMenu, settingsOpen,
+    t, recording, setRecording, setTransientError, menuOpen, closeMenu, settingsOpen,
     backFromSettings, hide, inputRef, submit,
   ])
 }

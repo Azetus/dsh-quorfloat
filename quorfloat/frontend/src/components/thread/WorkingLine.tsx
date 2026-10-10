@@ -1,6 +1,7 @@
 // One block of the working (folded) part of a turn: reasoning, narration, a tool call, or
 // a tool result.
 
+import { useT } from '../../hooks/useI18n'
 import type { Turn } from '../../lib/turns'
 
 /** Props for {@link WorkingLine}. */
@@ -20,6 +21,7 @@ export interface WorkingLineProps {
  * @returns the line.
  */
 export function WorkingLine({ line }: WorkingLineProps) {
+  const t = useT()
   switch (line.kind) {
     case 'reasoning':
       return <div className="q-working-line q-reasoning">{line.text}</div>
@@ -28,14 +30,16 @@ export function WorkingLine({ line }: WorkingLineProps) {
     case 'call':
       return (
         <div className="q-working-line q-call">
-          <span className="q-tool-name">{`⚙ ${line.name ?? '工具'}`}</span>
+          <span className="q-tool-name">{t('working.call', { name: line.name ?? t('working.tool') })}</span>
           {line.arguments !== null && <span className="q-call-args">{` ${line.arguments}`}</span>}
         </div>
       )
     case 'tool':
       return (
         <div className={line.isError ? 'q-working-line q-tool q-error' : 'q-working-line q-tool'}>
-          <span className="q-tool-name">{line.name !== null ? `↳ ${line.name}` : '↳ 工具结果'}</span>
+          <span className="q-tool-name">
+            {line.name !== null ? t('working.resultNamed', { name: line.name }) : t('working.result')}
+          </span>
           {` ${line.text}`}
         </div>
       )

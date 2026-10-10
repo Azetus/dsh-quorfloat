@@ -40,7 +40,8 @@ use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 use dsh_quorfloat::app::bridge::{self, ShellView};
 use dsh_quorfloat::app::geometry::{self, ScreenRect, WindowState};
 use dsh_quorfloat::app::height::{Height, HeightAction, SHADOW_SIDE};
-use dsh_quorfloat::app::preferences::Preferences;
+use dsh_quorfloat::app::language::{self, Language};
+use dsh_quorfloat::app::preferences::{self, Preferences};
 use dsh_quorfloat::app::session::interaction::parse_answers;
 use dsh_quorfloat::app::session::{
     FrameSink, HotkeyReport, Identity, Session, SessionExit, WindowCommand,
@@ -52,6 +53,7 @@ use dsh_quorfloat::ipc::transport::StdioSink;
 use dsh_quorfloat::app::session::follow::PanelLifecycle;
 use dsh_quorfloat::runtime::diag::marker::Marker;
 use dsh_quorfloat::runtime::hotkey::{self, Hotkey};
+use dsh_quorfloat::runtime::tray::{self, TrayMenu};
 use dsh_quorfloat::VERSION;
 
 /// How often the follow layer re-checks which conversation the panel is attached to.
@@ -72,6 +74,14 @@ struct ShellRuntime {
     height_tx: Sender<Wake>,
     pinned_path: Option<std::path::PathBuf>,
     preferences_path: Option<std::path::PathBuf>,
+    /// The live menu bar, once the platform gave us one.
+    ///
+    /// Shared with the dispatcher because the language can change from two directions — a
+    /// settings-page write on this thread, a host configuration push on the dispatcher's —
+    /// and both must re-label the same items.
+    tray: Arc<Mutex<Option<TrayMenu<tauri::Wry>>>>,
+    /// Where lifecycle breadcrumbs are written; the tray and language lines go here.
+    marker: Marker,
     emit: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -113,6 +123,23 @@ fn run() -> Result<SessionExit, String> {
 
     let marker = Marker::from_env();
     marker.write("start");
+    // The panel's own language, and the one thing about it that only happens once.
+    //
+    // The host resolved a language before this process started: the panel's explicit setting
+    // when it has one, otherwise the Harness's own locale preference on the first launch. If
+    // nothing is remembered *here*, that resolved value is adopted and written down, so every
+    // later launch reads an explicit setting instead of asking the Harness again — there is no
+    // follow mode. A remembered choice wins over the baseline, which is what makes a change
+    // made in the panel's settings page survive the next launch.
+    let mut preferences = preferences_path.as_deref().map(Preferences::load).unwrap_or_default();
+    let (language, seeded) = preferences::seed_language(preferences.language, settings.language);
+    if seeded {
+        preferences.language = Some(language);
+        if let Some(path) = preferences_path.as_deref() {
+            preferences.save(path);
+        }
+        marker.write(&format!("language seeded: {}", language.as_str()));
+    }
     // What the file holds, on the record, before the window exists: whether that position can
     // actually be applied is a question about the displays, which can only be asked once there is
     // a window to ask through — the outcome is therefore written where the window is placed.
@@ -159,7 +186,9 @@ fn run() -> Result<SessionExit, String> {
     // **startup** — the documented contract has two call sites, this one and the
     // host-config application in the dispatcher — so the very first snapshot the
     // frontend renders already carries the user's choices.
-    let preferences = preferences_path.as_deref().map(Preferences::load).unwrap_or_default();
+    //
+    // `preferences` was read and language-seeded above, before the marker's first lines;
+    // the effective settings reuse it so the seed is visible to the very first frame.
     let view = Arc::new(Mutex::new(ShellView {
         settings: settings.clone().with_preferences(&preferences),
         hotkey_requested: hotkey.spec().map(str::to_owned),
@@ -174,15 +203,17 @@ fn run() -> Result<SessionExit, String> {
     // The effective settings at startup, on the record: the ground truth the
     // settings page's controls are rendered from, before any host frame or
     // user click has had a chance to change them.
-    {
+    let initial_language = {
         let view = lock(&view);
         marker.write(&format!(
-            "settings initial: keepOpen={} hideOnBlur={} theme={}",
+            "settings initial: keepOpen={} hideOnBlur={} theme={} language={}",
             view.preferences.keep_open.unwrap_or(false),
             view.settings.hide_on_blur,
             theme_name_for_marker(view.settings.theme),
+            view.settings.language.as_str(),
         ));
-    }
+        view.settings.language
+    };
 
     // The handshake, before the Tauri app exists and therefore before any window,
     // webview, font, or GPU initialisation can delay it.
@@ -208,6 +239,11 @@ fn run() -> Result<SessionExit, String> {
     let shell_state = Arc::clone(&window_state);
     let shell_view = Arc::clone(&view);
     let shell_hotkey_wake = hotkey_wake.clone();
+    // Created here rather than inside `setup` because two places need it: the setup that
+    // installs the tray, and the dispatcher, which applies a pushed configuration (and so
+    // may learn about a language change) on its own thread.
+    let shell_tray: Arc<Mutex<Option<TrayMenu<tauri::Wry>>>> = Arc::new(Mutex::new(None));
+    let dispatcher_tray = Arc::clone(&shell_tray);
 
     let app = tauri::Builder::default()
         .setup(move |app| {
@@ -253,6 +289,11 @@ fn run() -> Result<SessionExit, String> {
             let window = tauri::WebviewWindowBuilder::new(app, "main", url)
                 .title("quorfloat")
                 .inner_size(f64::from(settings.width), PLACEHOLDER_HEIGHT)
+                // `frontend/index.html` ships `lang="zh-CN"` because the panel's copy was
+                // Chinese first; the resolved language is set here, before any page script
+                // runs, so the first paint already declares the right language for font
+                // selection and assistive technology.
+                .initialization_script(language::document_language_script(initial_language))
                 .resizable(false)
                 .maximizable(false)
                 .minimizable(false)
@@ -280,6 +321,8 @@ fn run() -> Result<SessionExit, String> {
                 height_tx: wake_tx.clone(),
                 pinned_path,
                 preferences_path,
+                tray: Arc::clone(&shell_tray),
+                marker: shell_marker.clone(),
                 emit: emit.clone(),
             });
 
@@ -314,6 +357,7 @@ fn run() -> Result<SessionExit, String> {
                 settings.start_visible,
                 hotkey_active,
                 Arc::clone(&shell_state),
+                dispatcher_tray,
                 emit.clone(),
             )
             .map_err(|error| format!("could not start the window dispatcher: {error}"))?;
@@ -322,10 +366,9 @@ fn run() -> Result<SessionExit, String> {
             // blocks until the user presses the key, then wakes the dispatcher.
             // The menu bar icon. A failure here is reported and survived: the panel is
             // summonable by hotkey whether or not the platform gave us a tray.
-            if let Err(error) =
-                dsh_quorfloat::runtime::tray::install(&tray_handle, tray_wake, &tray_marker)
-            {
-                tray_marker.write(&format!("tray could not be created: {error}"));
+            match tray::install(&tray_handle, tray_wake, &tray_marker, initial_language) {
+                Ok(menu) => *lock(&shell_tray) = Some(menu),
+                Err(error) => tray_marker.write(&format!("tray could not be created: {error}")),
             }
 
             if hotkey_active {
@@ -636,14 +679,21 @@ fn log(state: tauri::State<'_, ShellRuntime>, line: String) -> Value {
 /// The hotkey is rebound here, on the main thread, which is where the platform
 /// wants registration. A refused accelerator keeps the previous grab, exactly as
 /// `Hotkey::rebind` documents.
+///
+/// A language change also re-labels the menu bar, in place, and puts the new tag on the
+/// document element: the tray's strings and `lang` are the panel's own and follow the same
+/// setting as the page's copy.
 #[tauri::command]
 fn set_preferences(
     state: tauri::State<'_, ShellRuntime>,
+    window: WebviewWindow,
     theme: Option<String>,
     keep_open: Option<bool>,
     hotkey: Option<String>,
+    language: Option<String>,
 ) -> Result<Value, String> {
-    let incoming = json!({ "theme": theme, "keepOpen": keep_open, "hotkey": hotkey });
+    let incoming =
+        json!({ "theme": theme, "keepOpen": keep_open, "hotkey": hotkey, "language": language });
     let mut preferences = state
         .preferences_path
         .as_deref()
@@ -673,20 +723,80 @@ fn set_preferences(
         // the same single overlay as at startup, so a preference can never be lost
         // to a settings update.
         let mut view = lock(&state.view);
+        let before_language = view.settings.language;
         view.preferences = preferences;
         view.settings = view.settings.with_preferences(&view.preferences);
         // On the record, with the *effective* values: this is the ground truth
         // that answers "did the switch's click reach the behaviour" without a
         // window to look at.
         state.sink.mark(&format!(
-            "preferences set: keepOpen={} hideOnBlur={} theme={}",
+            "preferences set: keepOpen={} hideOnBlur={} theme={} language={}",
             view.preferences.keep_open.unwrap_or(false),
             view.settings.hide_on_blur,
             theme_name_for_marker(view.settings.theme),
+            view.settings.language.as_str(),
         ));
+        let language = view.settings.language;
+        drop(view);
+        sync_tray_language(&state.tray, language, &state.marker);
+        if before_language != language {
+            set_document_language(&window, language, &state.marker);
+        }
     }
     (state.emit)();
     Ok(json!({}))
+}
+
+/// Re-label the menu bar for a language, and record the change once.
+///
+/// Idempotent by construction: the tray remembers the language its items carry, so the
+/// callers (a settings-page write, and the dispatcher applying a pushed configuration) can
+/// both call it unconditionally without producing a marker for a value that did not change.
+/// A process without a tray has nothing to re-label and writes nothing.
+///
+/// @param tray - the live tray, when the platform gave us one.
+/// @param language - the effective language.
+/// @param marker - where the one line saying the language changed is written.
+fn sync_tray_language(
+    tray: &Arc<Mutex<Option<TrayMenu<tauri::Wry>>>>,
+    language: Language,
+    marker: &Marker,
+) {
+    // The claim and the platform work are deliberately separate. `TrayMenu::relabel` calls
+    // into the platform, which blocks until the main thread runs it; holding this lock across
+    // that would let the dispatcher (relabelling a pushed configuration) and the main thread
+    // (relabelling a settings-page write) wait on each other. Claiming the new language under
+    // the lock makes the check-and-set atomic, so exactly one caller relabels and writes the
+    // marker, and the platform calls happen with no lock held.
+    let claimed = {
+        let mut slot = lock(tray);
+        match slot.as_mut() {
+            Some(menu) if menu.language() != language => {
+                menu.set_language(language);
+                Some(menu.clone())
+            }
+            _ => None,
+        }
+    };
+    let Some(mut menu) = claimed else { return };
+    menu.relabel(language, marker);
+    marker.write(&format!("language changed: {}", language.as_str()));
+}
+
+/// Put the effective language on the webview's document element.
+///
+/// The initialization script covers the initial load; this covers every later change, because
+/// `lang` is read by the platform (font selection, hyphenation, assistive technology) and a
+/// panel whose copy switched to English while its document still claimed Chinese would render
+/// English text with Chinese-preferred glyphs.
+///
+/// @param window - the panel's window.
+/// @param language - the language in force.
+/// @param marker - where a refused script is recorded.
+fn set_document_language(window: &WebviewWindow, language: Language, marker: &Marker) {
+    if let Err(error) = window.eval(language::document_language_script(language)) {
+        marker.write(&format!("could not set the document language: {error}"));
+    }
 }
 
 /// The theme's wire name, for the preferences marker.
@@ -735,6 +845,7 @@ fn spawn_dispatcher(
     start_visible: bool,
     hotkey_active: bool,
     window_state: Arc<Mutex<WindowState>>,
+    tray: Arc<Mutex<Option<TrayMenu<tauri::Wry>>>>,
     emit: Arc<dyn Fn() + Send + Sync>,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
@@ -753,6 +864,10 @@ fn spawn_dispatcher(
                 vec!["tauri", "window"]
             };
             let mut visible = start_visible;
+            // The language the document element currently carries; `None` until the first
+            // tick applies it, because the initialization script may have run before the
+            // document existed.
+            let mut document_language: Option<Language> = None;
             if start_visible {
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -780,7 +895,11 @@ fn spawn_dispatcher(
                         }
                         // The host's `ready` may have changed the window section:
                         // apply it, then re-apply the user's preferences on top.
-                        apply_host_window(&window, &session, &view, &marker);
+                        let language = apply_host_window(&window, &session, &view, &marker, &tray);
+                        if document_language != Some(language) {
+                            set_document_language(&window, language, &marker);
+                            document_language = Some(language);
+                        }
                         emit();
                     }
                     Ok(Wake::Tray(action)) => {
@@ -1002,17 +1121,25 @@ fn yield_activation(window: &WebviewWindow, marker: &Marker) {
 ///
 /// The overlay order is the documented one: host baseline first, then the user's
 /// preferences on top (`app/bridge.rs`). Only a change reaches the platform.
+///
+/// The language is part of that push, and it is the one field that also reaches a surface
+/// this process owns rather than the webview: the menu bar is re-labelled here, because a
+/// host-side configuration change never goes through the settings-page command.
+///
+/// @returns the effective language after the overlay, so the caller can also keep the
+///   document element in step without locking the view a second time.
 fn apply_host_window(
     window: &WebviewWindow,
     session: &Arc<Mutex<Session>>,
     view: &Arc<Mutex<ShellView>>,
     marker: &Marker,
-) {
+    tray: &Arc<Mutex<Option<TrayMenu<tauri::Wry>>>>,
+) -> Language {
     let host_window = {
         let session = lock(session);
         session.host_config().window.clone()
     };
-    let (changed, width, always_on_top, hide_on_blur) = {
+    let (changed, width, always_on_top, hide_on_blur, language) = {
         let mut view = lock(view);
         let before = view.settings.clone();
         view.settings.apply_host(host_window.as_ref());
@@ -1022,10 +1149,14 @@ fn apply_host_window(
             view.settings.width,
             view.settings.always_on_top,
             view.settings.hide_on_blur,
+            view.settings.language,
         )
     };
+    // Unconditional, and idempotent: the tray itself knows the language it carries, so a
+    // tick that changed nothing writes nothing.
+    sync_tray_language(tray, language, marker);
     if !changed {
-        return;
+        return language;
     }
     let native_width = f64::from(width + SHADOW_SIDE * 2.0);
     if let Ok(size) = window.inner_size() {
@@ -1042,6 +1173,7 @@ fn apply_host_window(
     marker.write(&format!(
         "window config applied: width={width:.0} alwaysOnTop={always_on_top} hideOnBlur={hide_on_blur}",
     ));
+    language
 }
 
 /// Accept the frontend's measured panel height and coordinate the native window.

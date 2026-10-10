@@ -1,5 +1,6 @@
 // The footer's left half: the key hints, and the status line when there is something to say.
 
+import { useT } from '../../hooks/useI18n'
 import { KeyChip } from './KeyChip'
 
 /** Props for {@link StatusLine}. */
@@ -19,14 +20,15 @@ export interface StatusLineProps {
  * @returns the status element.
  */
 export function StatusLine({ status }: StatusLineProps) {
+  const t = useT()
   return (
     <span id="q-status">
       <KeyChip kind="enter" />
-      {' 发送\u3000'}
+      {` ${t('status.send')}\u3000`}
       <KeyChip kind="shift-enter" />
-      {' 换行\u3000'}
+      {` ${t('status.newline')}\u3000`}
       <KeyChip kind="esc" />
-      {' 关闭'}
+      {` ${t('status.close')}`}
       {status !== null && status !== '' && <span style={{ marginLeft: '10px' }}>{status}</span>}
     </span>
   )

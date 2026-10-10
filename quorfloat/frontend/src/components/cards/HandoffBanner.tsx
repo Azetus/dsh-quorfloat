@@ -1,6 +1,7 @@
 // The banner that says an interaction went to the Harness window instead of here.
 
 import { api } from '../../api'
+import { useT } from '../../hooks/useI18n'
 import type { Snapshot } from '../../lib/state'
 
 /** Props for {@link HandoffBanner}. */
@@ -19,14 +20,15 @@ export interface HandoffBannerProps {
  * @returns the banner.
  */
 export function HandoffBanner({ handoff }: HandoffBannerProps) {
+  const t = useT()
   const hasSurface = handoff.surfaces.length > 0
   const text = handoff.kind === 'approval'
-    ? (hasSurface ? '审批已转交 Harness 窗口处理' : '当前没有可以处理它的 Harness 窗口')
-    : (hasSurface ? '这个问题已转交 Harness 窗口回答' : '当前没有可以回答它的 Harness 窗口')
+    ? (hasSurface ? t('handoff.approvalHandled') : t('handoff.approvalNoSurface'))
+    : (hasSurface ? t('handoff.questionHandled') : t('handoff.questionNoSurface'))
   return (
     <div className="q-handoff">
       <span>{text}</span>
-      <button type="button" onClick={() => { void api.dismissHandoff() }}>知道了</button>
+      <button type="button" onClick={() => { void api.dismissHandoff() }}>{t('common.gotIt')}</button>
     </div>
   )
 }

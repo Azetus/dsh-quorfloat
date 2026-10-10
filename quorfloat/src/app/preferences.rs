@@ -20,6 +20,7 @@
 
 use std::path::PathBuf;
 
+use crate::app::language::Language;
 use crate::app::theme::Preference;
 
 /// What the user set in the settings view.
@@ -47,13 +48,22 @@ pub struct Preferences {
     /// the settings page shows and what `hello` reports. Remembering a parsed key instead would mean
     /// two spellings of the same fact, and they would eventually disagree.
     pub hotkey: Option<String>,
+    /// The language the user chose in the panel, when they have chosen one here.
+    ///
+    /// This is the panel's own setting, and it is the one that is *persisted on the first
+    /// launch*: the host resolves a language before the process starts (an explicit panel
+    /// setting, or the Harness's own locale preference when there is none), and
+    /// [`seed_language`] adopts that answer as a remembered choice when this field is
+    /// still empty. Every later launch therefore reads an explicit value and never asks
+    /// the Harness again — there is no follow mode and no live following.
+    pub language: Option<Language>,
 }
 
 impl Preferences {
     /// Whether the user has set nothing at all here.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.theme.is_none() && self.keep_open.is_none() && self.hotkey.is_none()
+        self.theme.is_none() && self.keep_open.is_none() && self.hotkey.is_none() && self.language.is_none()
     }
 
     /// Read the preferences file.
@@ -92,7 +102,11 @@ impl Preferences {
             .filter(|spec| !spec.is_empty())
             .filter(|spec| crate::runtime::hotkey::parse_accelerator(spec).is_some())
             .map(str::to_owned);
-        Self { theme, keep_open, hotkey }
+        // A language this build does not ship is absent, not a remembered choice: the
+        // same rule the theme follows, and the reason the seed gets another chance
+        // rather than the panel freezing on a typo.
+        let language = Language::known(value.get("language").and_then(serde_json::Value::as_str));
+        Self { theme, keep_open, hotkey, language }
     }
 
     /// Write the preferences. Failure is ignored: not being able to remember a preference is a
@@ -119,8 +133,32 @@ impl Preferences {
             "theme": theme,
             "keepOpen": self.keep_open,
             "hotkey": self.hotkey,
+            "language": self.language.map(Language::as_str),
         });
         let _ = std::fs::write(path, body.to_string());
+    }
+}
+
+/// The panel's own language after the first-launch seed.
+///
+/// **The one rule about the seed, in one place.** The panel's remembered choice is the
+/// authority once it exists; on a launch where it does not, the baseline the host resolved
+/// — the Harness's own locale, or `en` when that could not be read — is adopted *and
+/// persisted*, so every later launch reads an explicit value instead of asking the
+/// Harness again. There is no follow mode: this happens once, per install.
+///
+/// Pure on purpose. The failure mode is a panel that is stuck in the wrong language for
+/// every future launch, which is exactly the kind of decision that has to be asserted
+/// without a window or a settings file.
+///
+/// @param chosen - the language the panel had remembered, when it had one.
+/// @param baseline - the language this launch resolved before the process started.
+/// @returns the language to use, and whether it was newly adopted (and so must be saved).
+#[must_use]
+pub fn seed_language(chosen: Option<Language>, baseline: Language) -> (Language, bool) {
+    match chosen {
+        Some(language) => (language, false),
+        None => (baseline, true),
     }
 }
 
@@ -192,6 +230,7 @@ mod tests {
             theme: Some(Preference::Dark),
             keep_open: Some(true),
             hotkey: Some("Cmd+Shift+K".to_owned()),
+            language: Some(Language::En),
         };
         preferences.save(&path);
         assert_eq!(Preferences::load(&path), preferences);
@@ -201,7 +240,8 @@ mod tests {
     #[test]
     fn nothing_chosen_is_no_file_rather_than_an_empty_one() {
         let path = scratch("empty");
-        Preferences { theme: Some(Preference::Light), keep_open: None, hotkey: None }.save(&path);
+        Preferences { theme: Some(Preference::Light), keep_open: None, hotkey: None, language: None }
+            .save(&path);
         assert!(path.exists());
 
         Preferences::default().save(&path);
@@ -279,7 +319,56 @@ mod tests {
 
     #[test]
     fn an_unwritable_path_is_survivable() {
-        Preferences { theme: Some(Preference::Dark), keep_open: None, hotkey: Some("Alt+Space".to_owned()) }
-            .save(Path::new("/definitely/not/a/real/directory/preferences.json"));
+        Preferences {
+            theme: Some(Preference::Dark),
+            keep_open: None,
+            hotkey: Some("Alt+Space".to_owned()),
+            language: Some(Language::En),
+        }
+        .save(Path::new("/definitely/not/a/real/directory/preferences.json"));
+    }
+
+    #[test]
+    fn a_language_preference_survives_a_round_trip() {
+        // The panel's own setting is what later launches read *instead of* asking the
+        // Harness again, so losing it would silently re-seed a language the user changed.
+        let path = scratch("language-round");
+        for language in [Language::Zh, Language::En] {
+            let preferences = Preferences { language: Some(language), ..Preferences::default() };
+            preferences.save(&path);
+            assert_eq!(Preferences::load(&path), preferences);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_language_this_build_does_not_know_is_not_a_preference() {
+        // A hand-edited `"language": "fr"` must not become a decision: absent is the
+        // honest reading, and the first-launch seed gets to answer again.
+        let path = scratch("bad-language");
+        std::fs::write(&path, r#"{"language": "fr"}"#).expect("write");
+        assert_eq!(Preferences::load(&path).language, None);
+
+        std::fs::write(&path, r#"{"language": "EN"}"#).expect("write");
+        assert_eq!(Preferences::load(&path).language, Some(Language::En), "the ids are read case-insensitively");
+
+        std::fs::write(&path, r#"{"language": 2}"#).expect("write");
+        assert_eq!(Preferences::load(&path).language, None);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_first_launch_adopts_the_hosts_language_and_later_launches_keep_it() {
+        // The seed, in one place. On a launch with nothing remembered, the host's resolved
+        // value is adopted and must be written down — otherwise every future launch would
+        // ask the Harness again, which is the "follow mode" this design deliberately
+        // does not have.
+        assert_eq!(seed_language(None, Language::Zh), (Language::Zh, true));
+        assert_eq!(seed_language(None, Language::En), (Language::En, true));
+
+        // With a remembered choice, the remembered one wins and nothing is written:
+        // changing the Harness's language later must not move the panel.
+        assert_eq!(seed_language(Some(Language::En), Language::Zh), (Language::En, false));
+        assert_eq!(seed_language(Some(Language::Zh), Language::En), (Language::Zh, false));
     }
 }

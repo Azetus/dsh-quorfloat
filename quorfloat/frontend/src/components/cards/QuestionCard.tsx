@@ -12,6 +12,7 @@
 
 import { useState } from 'react'
 import { api } from '../../api'
+import { useT } from '../../hooks/useI18n'
 import {
   answerPayload, emptyDrafts, isComplete, setCustom, toggleChoice,
   type QuestionDraft, type QuestionDrafts,
@@ -49,6 +50,7 @@ function draftsFrom(answers: Interaction['answers']): QuestionDrafts {
  * @returns the card.
  */
 export function QuestionCard({ interaction, onGrow }: QuestionCardProps) {
+  const t = useT()
   const questions: InteractionQuestion[] = interaction.questions
   const [drafts, setDrafts] = useState<QuestionDrafts>(() => emptyDrafts(questions))
 
@@ -61,13 +63,13 @@ export function QuestionCard({ interaction, onGrow }: QuestionCardProps) {
 
   /** What the state line says, if anything. */
   const stateLine = (): { readonly text: string; readonly refused: boolean } | null => {
-    if (interaction.state === 'submitting') return { text: '提交中…', refused: false }
-    if (interaction.state === 'applied') return { text: '已提交', refused: false }
+    if (interaction.state === 'submitting') return { text: t('common.submitting'), refused: false }
+    if (interaction.state === 'applied') return { text: t('question.submitted'), refused: false }
     if (interaction.state === 'refused') {
-      return { text: interaction.refusalReason ?? '请求已失效', refused: true }
+      return { text: interaction.refusalReason ?? t('common.requestExpired'), refused: true }
     }
-    if (!interaction.actionable) return { text: '这个问题请在 Harness 窗口回答', refused: false }
-    if (!complete) return { text: '请先回答所有问题', refused: false }
+    if (!interaction.actionable) return { text: t('question.notActionable'), refused: false }
+    if (!complete) return { text: t('question.answerAll'), refused: false }
     return null
   }
   const line = stateLine()
@@ -76,7 +78,7 @@ export function QuestionCard({ interaction, onGrow }: QuestionCardProps) {
     <div className="q-card">
       <div className="q-card-title">
         <Icon name="message-square" />
-        <strong>需要你的回答</strong>
+        <strong>{t('question.title')}</strong>
       </div>
       {questions.map(question => (
         <QuestionBlock
@@ -91,7 +93,7 @@ export function QuestionCard({ interaction, onGrow }: QuestionCardProps) {
       ))}
       {interaction.questionCount > questions.length && (
         <div className="q-card-reason">
-          {`还有 ${interaction.questionCount - questions.length} 个问题没有显示。`}
+          {t('question.hiddenCount', { count: interaction.questionCount - questions.length })}
         </div>
       )}
       {line !== null && (
@@ -105,7 +107,7 @@ export function QuestionCard({ interaction, onGrow }: QuestionCardProps) {
             disabled={!complete}
             onClick={() => { void api.answerQuestion(interaction.id, answerPayload(questions, shown)) }}
           >
-            提交
+            {t('question.submit')}
           </button>
         ) : (
           <button
@@ -113,7 +115,7 @@ export function QuestionCard({ interaction, onGrow }: QuestionCardProps) {
             disabled={interaction.state === 'submitting'}
             onClick={() => { void api.dismissInteraction(interaction.id) }}
           >
-            {interaction.actionable ? '关闭' : '知道了'}
+            {interaction.actionable ? t('common.close') : t('common.gotIt')}
           </button>
         )}
       </div>
