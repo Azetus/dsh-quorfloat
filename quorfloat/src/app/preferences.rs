@@ -142,10 +142,16 @@ impl Preferences {
 /// The panel's own language after the first-launch seed.
 ///
 /// **The one rule about the seed, in one place.** The panel's remembered choice is the
-/// authority once it exists; on a launch where it does not, the baseline the host resolved
-/// — the Harness's own locale, or `en` when that could not be read — is adopted *and
-/// persisted*, so every later launch reads an explicit value instead of asking the
-/// Harness again. There is no follow mode: this happens once, per install.
+/// authority once it exists; otherwise the language this launch resolved before the
+/// process started decides, but only if it really *is* a decision:
+///
+/// - a `decided` baseline is the explicit plugin configuration or the Harness's stored
+///   locale, and it is adopted and persisted here, exactly as the seed always did;
+/// - a baseline that is only the host's `en` fallback is used for the first frame but
+///   **not written down**: the panel's own webview has not reported yet, and its answer
+///   outranks a fallback (see [`seed_from_reported`]).
+///
+/// There is no follow mode: whichever way this ends, it happens once per install.
 ///
 /// Pure on purpose. The failure mode is a panel that is stuck in the wrong language for
 /// every future launch, which is exactly the kind of decision that has to be asserted
@@ -153,12 +159,34 @@ impl Preferences {
 ///
 /// @param chosen - the language the panel had remembered, when it had one.
 /// @param baseline - the language this launch resolved before the process started.
+/// @param decided - whether that baseline is a decision rather than the `en` fallback.
 /// @returns the language to use, and whether it was newly adopted (and so must be saved).
 #[must_use]
-pub fn seed_language(chosen: Option<Language>, baseline: Language) -> (Language, bool) {
+pub fn seed_language(chosen: Option<Language>, baseline: Language, decided: bool) -> (Language, bool) {
+    match (chosen, decided) {
+        (Some(language), _) => (language, false),
+        (None, true) => (baseline, true),
+        (None, false) => (baseline, false),
+    }
+}
+
+/// What the panel adopts once its webview reports the languages it can see.
+///
+/// This is the last question of the resolution order, and it is only reached while
+/// nothing has been chosen: a remembered preference — or a baseline that was a decision,
+/// and so was already written down at startup — means the report has nothing to say.
+/// Otherwise the raw list (`navigator.languages`) is walked in order and the first entry
+/// whose primary subtag this build ships wins; an empty, absent, or unrecognised list is
+/// `en`, the same fallback the host would have used.
+///
+/// @param chosen - the language the panel remembers *now*, after the startup seed.
+/// @param reported - the tags the webview reported, verbatim and in its own order.
+/// @returns the language to use, and whether it was newly adopted (and so must be saved).
+#[must_use]
+pub fn seed_from_reported(chosen: Option<Language>, reported: &[String]) -> (Language, bool) {
     match chosen {
         Some(language) => (language, false),
-        None => (baseline, true),
+        None => (Language::from_reported(reported).unwrap_or(Language::En), true),
     }
 }
 
@@ -358,17 +386,81 @@ mod tests {
     }
 
     #[test]
-    fn the_first_launch_adopts_the_hosts_language_and_later_launches_keep_it() {
-        // The seed, in one place. On a launch with nothing remembered, the host's resolved
-        // value is adopted and must be written down — otherwise every future launch would
-        // ask the Harness again, which is the "follow mode" this design deliberately
-        // does not have.
-        assert_eq!(seed_language(None, Language::Zh), (Language::Zh, true));
-        assert_eq!(seed_language(None, Language::En), (Language::En, true));
+    fn the_first_launch_adopts_a_decided_language_and_later_launches_keep_it() {
+        // The seed, in one place. On a launch with nothing remembered, a *decided* baseline
+        // (the explicit plugin configuration, or the Harness's own locale) is adopted and
+        // must be written down — otherwise every future launch would ask the Harness again,
+        // which is the "follow mode" this design deliberately does not have.
+        assert_eq!(seed_language(None, Language::Zh, true), (Language::Zh, true));
+        assert_eq!(seed_language(None, Language::En, true), (Language::En, true));
 
         // With a remembered choice, the remembered one wins and nothing is written:
         // changing the Harness's language later must not move the panel.
-        assert_eq!(seed_language(Some(Language::En), Language::Zh), (Language::En, false));
-        assert_eq!(seed_language(Some(Language::Zh), Language::En), (Language::Zh, false));
+        assert_eq!(seed_language(Some(Language::En), Language::Zh, true), (Language::En, false));
+        assert_eq!(seed_language(Some(Language::Zh), Language::En, true), (Language::Zh, false));
+    }
+
+    #[test]
+    fn a_fallback_baseline_is_not_written_down_before_the_webview_answers() {
+        // `en` is also what the host answers when nobody chose anything, so it must not be
+        // persisted as if it were a choice: doing so would freeze every future launch in
+        // English before the panel's own webview ever gets to answer.
+        assert_eq!(seed_language(None, Language::En, false), (Language::En, false));
+        // The value is still what the first frame draws with, so nothing flickers.
+        assert_eq!(seed_language(None, Language::Zh, false), (Language::Zh, false));
+    }
+
+    #[test]
+    fn the_panels_own_preference_beats_the_webview() {
+        // A language the user chose *in the panel* is the one thing the webview can never
+        // overrule: the report is the answer to the first launch's question, not a vote on
+        // every launch.
+        let reported = vec!["en-US".to_owned(), "zh-CN".to_owned()];
+        assert_eq!(seed_from_reported(Some(Language::Zh), &reported), (Language::Zh, false));
+        assert_eq!(seed_from_reported(Some(Language::En), &reported), (Language::En, false));
+    }
+
+    #[test]
+    fn a_decided_harness_language_beats_the_webview() {
+        // Composed end to end, because the two halves live in different places: the host
+        // resolves an explicit Harness `zh` and says it is a decision, so the startup seed
+        // writes it down; the report of an English webview then finds a remembered value.
+        let (baseline, written_down) = seed_language(None, Language::Zh, true);
+        assert!(written_down, "a decision is persisted at startup");
+        let remembered = written_down.then_some(baseline);
+        let reported = vec!["en-US".to_owned()];
+        assert_eq!(seed_from_reported(remembered, &reported), (Language::Zh, false));
+    }
+
+    #[test]
+    fn the_seed_happens_once_and_a_later_launch_ignores_the_report() {
+        // Launch one: nobody chose anything, so the baseline is only the fallback and is
+        // not written down — until the webview reports a Chinese list, which is adopted
+        // and persisted.
+        let (provisional, written_down) = seed_language(None, Language::En, false);
+        assert_eq!((provisional, written_down), (Language::En, false));
+        let reported = vec!["zh-Hans-CN".to_owned(), "en-US".to_owned()];
+        let (adopted, seeded) = seed_from_reported(None, &reported);
+        assert_eq!((adopted, seeded), (Language::Zh, true), "the webview seeds the panel");
+
+        // Launch two: the file now remembers it, so neither the host's fallback nor a new
+        // report can move it — there is no follow mode.
+        let remembered = seeded.then_some(adopted);
+        assert_eq!(seed_language(remembered, Language::En, false), (Language::Zh, false));
+        assert_eq!(
+            seed_from_reported(remembered, &["en-US".to_owned()]),
+            (Language::Zh, false),
+        );
+    }
+
+    #[test]
+    fn a_stored_language_we_do_not_ship_still_leaves_the_webview_the_answer() {
+        // A stored `zh-Hant` is not one of the two ids, so the host resolves `en` and says
+        // it is *not* a decision; with no webview answer either, the panel is English —
+        // strictly what the user decided, and the fallback the report must not skip.
+        let (provisional, written_down) = seed_language(None, Language::En, false);
+        assert_eq!((provisional, written_down), (Language::En, false));
+        assert_eq!(seed_from_reported(None, &[]), (Language::En, true));
+        assert_eq!(seed_from_reported(None, &["fr-FR".to_owned()]), (Language::En, true));
     }
 }

@@ -55,6 +55,20 @@ export interface WindowConfig {
   readonly reduceMotion: boolean
   readonly theme: ThemePreference
   readonly language: LanguagePreference
+  /**
+   * Whether {@link language} is a decision rather than the built-in `en` fallback.
+   *
+   * **Internal, and never a patch field.** The schema below does not accept it, so only the
+   * plugin's own resolution (`src/index.ts`) can set it on the effective configuration the
+   * supervisor spawns with. It exists because the sidecar has to tell "somebody chose this"
+   * from "nothing was chosen yet": the fallback reaches the sidecar as an ordinary `en`, and
+   * writing it down as the panel's own setting would freeze every later launch in English
+   * before the panel's webview has had a chance to answer with `navigator.languages`.
+   *
+   * Absent means decided, deliberately: a configuration built by hand (a test, a caller that
+   * predates this field) keeps the historical behaviour instead of silently deferring a seed.
+   */
+  readonly languageDecided?: boolean
 }
 
 /** Fully normalized plugin configuration as seen by the rest of the plugin. */

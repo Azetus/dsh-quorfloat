@@ -30,6 +30,7 @@
 //! which are thin wrappers over the bridge (see `app/bridge.rs`).
 
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -82,6 +83,13 @@ struct ShellRuntime {
     tray: Arc<Mutex<Option<TrayMenu<tauri::Wry>>>>,
     /// Where lifecycle breadcrumbs are written; the tray and language lines go here.
     marker: Marker,
+    /// Whether the webview has already reported the languages it can see.
+    ///
+    /// Its one report is answered with one marker line and, at most, one seed; a page
+    /// reload re-reports, and a second line would only be noise. An atomic rather than a
+    /// lock because it is a single latch, and the report is a Tauri command that can run
+    /// while the dispatcher holds the view.
+    languages_reported: AtomicBool,
     emit: Arc<dyn Fn() + Send + Sync>,
 }
 
@@ -126,13 +134,19 @@ fn run() -> Result<SessionExit, String> {
     // The panel's own language, and the one thing about it that only happens once.
     //
     // The host resolved a language before this process started: the panel's explicit setting
-    // when it has one, otherwise the Harness's own locale preference on the first launch. If
-    // nothing is remembered *here*, that resolved value is adopted and written down, so every
-    // later launch reads an explicit setting instead of asking the Harness again — there is no
-    // follow mode. A remembered choice wins over the baseline, which is what makes a change
-    // made in the panel's settings page survive the next launch.
+    // when it has one, otherwise the Harness's own locale preference. Only the first of those
+    // arrivals is a decision — `en` is also what the host answers when nobody chose anything —
+    // so the host says which it is, and a fallback is used for the first frame but not written
+    // down: the panel's own webview has not reported yet, and `navigator.languages` is what
+    // answers a launch nobody decided (see the `report_languages` command). A remembered choice
+    // wins over the baseline either way, which is what makes a change made in the panel's
+    // settings page survive the next launch.
     let mut preferences = preferences_path.as_deref().map(Preferences::load).unwrap_or_default();
-    let (language, seeded) = preferences::seed_language(preferences.language, settings.language);
+    let (language, seeded) = preferences::seed_language(
+        preferences.language,
+        settings.language,
+        language::baseline_decided_from_env(),
+    );
     if seeded {
         preferences.language = Some(language);
         if let Some(path) = preferences_path.as_deref() {
@@ -323,6 +337,7 @@ fn run() -> Result<SessionExit, String> {
                 preferences_path,
                 tray: Arc::clone(&shell_tray),
                 marker: shell_marker.clone(),
+                languages_reported: AtomicBool::new(false),
                 emit: emit.clone(),
             });
 
@@ -403,6 +418,7 @@ fn run() -> Result<SessionExit, String> {
             set_preferences,
             report_content_height,
             set_visible,
+            report_languages,
         ])
         .build(tauri::generate_context!())
         .map_err(|error| format!("could not build the shell: {error}"))?;
@@ -823,6 +839,69 @@ fn report_content_height(state: tauri::State<'_, ShellRuntime>, height: f64) -> 
 fn set_visible(state: tauri::State<'_, ShellRuntime>, visible: bool) -> Value {
     let command = if visible { WindowCommand::Show } else { WindowCommand::Hide };
     let _ = state.height_tx.send(Wake::Visibility(command));
+    json!({})
+}
+
+/// `report_languages` — the webview reported the languages it can see.
+///
+/// This is the panel's answer to the one question the host cannot answer. With nothing
+/// chosen anywhere the Harness's own rule is "the browser decides", and the panel *is* a
+/// webview: `navigator.languages` is that decision, in the user's own order. The host
+/// process cannot speak for it — Node's POSIX locale is not the same signal, and on macOS
+/// a GUI launch usually has no `LANG` at all — which is why this arrives from the page.
+///
+/// The report matters only while nothing has been chosen. A language remembered by the
+/// panel, an explicit plugin configuration, and the Harness's stored locale all outrank
+/// it, and in those cases the startup seed already wrote the value down; this command
+/// then records the raw list and changes nothing. When it does seed, the language is
+/// persisted as the panel's own choice, so the webview is asked once per install and
+/// never followed: a later launch starts from the remembered value.
+///
+/// The rejected reports say so without a marker line: the raw list is written exactly
+/// once per launch, because a second line would make "what did the panel report" and
+/// "how many times did it say so" the same question.
+#[tauri::command]
+fn report_languages(
+    state: tauri::State<'_, ShellRuntime>,
+    window: WebviewWindow,
+    languages: Option<Vec<String>>,
+) -> Value {
+    let languages = languages.unwrap_or_default();
+    if state.languages_reported.swap(true, Ordering::SeqCst) {
+        state.sink.log("ignoring a repeated language report from the panel");
+        return json!({});
+    }
+    // Verbatim, in the order the webview reported it. The whole point of this line is to
+    // show what this machine actually says, so nothing is summarised or reordered.
+    state.marker.write(&format!(
+        "panel languages reported: {}",
+        if languages.is_empty() { "(none)".to_owned() } else { languages.join(", ") },
+    ));
+
+    let mut preferences = lock(&state.view).preferences.clone();
+    let (adopted, seeded) = preferences::seed_from_reported(preferences.language, &languages);
+    if !seeded {
+        // Nothing to adopt: the panel remembers a language, or a decided baseline was
+        // already seeded at startup. Silence rather than a second seed line.
+        return json!({});
+    }
+    preferences.language = Some(adopted);
+    if let Some(path) = state.preferences_path.as_deref() {
+        preferences.save(path);
+    }
+    {
+        // The same overlay as everywhere else: the webview's answer is now the panel's own
+        // choice, sitting on top of the host's baseline rather than beside it.
+        let mut view = lock(&state.view);
+        view.preferences = preferences;
+        view.settings = view.settings.with_preferences(&view.preferences);
+    }
+    state.marker.write(&format!("language seeded: {}", adopted.as_str()));
+    // The tray and the document element are the panel's own surfaces for this setting, and
+    // both follow it live — the same two calls a settings-page change makes.
+    sync_tray_language(&state.tray, adopted, &state.marker);
+    set_document_language(&window, adopted, &state.marker);
+    (state.emit)();
     json!({})
 }
 

@@ -280,6 +280,22 @@ test('a malformed presence report is rejected as a bad request', async () => {
   }
 })
 
+test('the plugin marks a language nobody chose as a fallback for the sidecar', async () => {
+  // End to end through the real plugin, because the two halves are wired by hand: the
+  // default configuration names no language and the fakes provide no Harness locale, so
+  // this launch is exactly the "nobody chose anything" state. The sidecar must be told
+  // that, or it would write `en` down as the panel's own choice and the panel's webview
+  // would never get to answer with `navigator.languages`.
+  const app = await activate()
+  await app.waitForRunning()
+  const reportPath = app.reportPath
+  await app.fiber.dispose()
+  const report = JSON.parse(readFileSync(reportPath, 'utf8'))
+  assert.equal(report.windowLanguageEnv, 'en', 'the fallback is still what the first frame draws with')
+  assert.equal(report.windowLanguageDecidedEnv, '0', 'and the plugin says it is not a decision')
+  assert.equal(report.readyWindow?.languageDecided, false)
+})
+
 test('the interaction limits reach the objects that enforce them', async () => {
   // A config field nobody passes on is a silent bug: the schema accepts it, the
   // settings page offers it, and nothing changes. These are the ends the plugin

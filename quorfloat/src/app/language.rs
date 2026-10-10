@@ -58,6 +58,31 @@ impl Language {
         }
     }
 
+    /// The language a webview's own preference list asks for.
+    ///
+    /// The list is the browser's answer in the user's own order (`navigator.languages`),
+    /// and the rule here is the one the Harness itself follows while nothing is stored:
+    /// walk the list and take the **first entry this build supports**, by primary subtag.
+    /// `zh`, `zh-CN`, `zh-Hans` and `zh-Hant` all name the Chinese this build ships, and
+    /// `en-US` names English; anything else is skipped and the next entry is considered.
+    /// Case does not matter — the tags cross a webview, not this project's own wire.
+    ///
+    /// @param languages - tags in the order the webview reported them.
+    /// @returns the first supported language, or `None` when none of them is supported.
+    #[must_use]
+    pub fn from_reported<S: AsRef<str>>(languages: &[S]) -> Option<Self> {
+        languages.iter().find_map(|tag| {
+            // The primary subtag is everything before the first `-` of a BCP 47 tag. An
+            // entry with no usable primary subtag is skipped rather than guessed at.
+            let primary = tag.as_ref().trim().split('-').next().unwrap_or("");
+            match primary.to_ascii_lowercase().as_str() {
+                "zh" => Some(Self::Zh),
+                "en" => Some(Self::En),
+                _ => None,
+            }
+        })
+    }
+
     /// The id this language is written and sent as.
     ///
     /// @returns `zh` or `en`.
@@ -108,6 +133,39 @@ pub fn document_language_script(language: Language) -> String {
 /// The environment variable the host passes the resolved language in.
 pub const ENV_LANGUAGE: &str = "DSH_QUORFLOAT_WINDOW_LANGUAGE";
 
+/// The environment variable that says whether that language is a decision.
+///
+/// The host always resolves *some* language before the process starts, and `en` is also
+/// what it answers when nobody chose anything. The sidecar has to tell those two apart:
+/// a decision is written down as the panel's own setting, while a fallback must wait for
+/// the panel's webview to report what it can see (see [`crate::app::preferences::seed_from_reported`]).
+pub const ENV_LANGUAGE_DECIDED: &str = "DSH_QUORFLOAT_WINDOW_LANGUAGE_DECIDED";
+
+/// Whether a host-supplied "decided" value means the language is a decision.
+///
+/// **Absent is `true`.** A process nobody told (a manual run, an older host build) keeps
+/// the historical behaviour, where the value in the environment — or the built-in default
+/// — is the baseline the first launch writes down, rather than waiting for a report that
+/// may never come. Only an explicit negative says "this is the fallback".
+///
+/// @param value - the raw environment value, when the variable is set.
+/// @returns whether the language in play is a decision.
+#[must_use]
+pub fn baseline_decided(value: Option<&str>) -> bool {
+    match value.map(str::trim) {
+        None => true,
+        Some(text) => !matches!(text.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"),
+    }
+}
+
+/// Read [`baseline_decided`] from [`ENV_LANGUAGE_DECIDED`].
+///
+/// @returns whether the language in the environment is a decision.
+#[must_use]
+pub fn baseline_decided_from_env() -> bool {
+    baseline_decided(std::env::var(ENV_LANGUAGE_DECIDED).ok().as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,8 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unrecognised_pushed_id_is_reported_as_unknown() {
-        // `known` exists so a pushed configuration can tell "the host named English"
+    fn an_unrecognised_pushed_id_is_reported_as_unknown() {        // `known` exists so a pushed configuration can tell "the host named English"
         // from "the host named something this build does not know": the second must not
         // become a decision.
         assert_eq!(Language::known(Some("en")), Some(Language::En));
@@ -140,6 +197,54 @@ mod tests {
         assert_eq!(Language::known(Some("fr")), None);
         assert_eq!(Language::known(Some("")), None);
         assert_eq!(Language::known(None), None);
+    }
+
+    #[test]
+    fn a_reported_list_is_matched_by_primary_subtag() {
+        // The webview reports BCP 47 tags, and a subtag is not a language this build does
+        // not ship: `zh-Hant` is still Chinese to a panel that has only one Chinese, which
+        // is exactly the rule the Harness follows while no locale is stored.
+        assert_eq!(Language::from_reported(&["zh"]), Some(Language::Zh));
+        assert_eq!(Language::from_reported(&["zh-CN"]), Some(Language::Zh));
+        assert_eq!(Language::from_reported(&["zh-Hans"]), Some(Language::Zh));
+        assert_eq!(Language::from_reported(&["zh-Hant"]), Some(Language::Zh));
+        assert_eq!(Language::from_reported(&["en-US"]), Some(Language::En));
+        assert_eq!(Language::from_reported(&["EN"]), Some(Language::En), "a webview's tags are read case-insensitively");
+        assert_eq!(Language::from_reported(&["  zh-TW  "]), Some(Language::Zh));
+    }
+
+    #[test]
+    fn a_reported_list_is_scanned_in_order() {
+        // The browser's order *is* the user's preference order: the first entry we can
+        // support wins, and a later `zh-CN` must not outrank an earlier `en-US`.
+        assert_eq!(Language::from_reported(&["fr-FR", "zh-CN"]), Some(Language::Zh));
+        assert_eq!(Language::from_reported(&["en-US", "zh-CN"]), Some(Language::En));
+    }
+
+    #[test]
+    fn a_reported_list_we_cannot_use_is_no_answer() {
+        // `None` is not a language: it says "the webview did not answer the question", which
+        // the seed reads as the `en` fallback. An empty entry is not an entry either.
+        let empty: [&str; 0] = [];
+        assert_eq!(Language::from_reported(&empty), None);
+        assert_eq!(Language::from_reported(&[""]), None);
+        assert_eq!(Language::from_reported(&["   "]), None);
+        assert_eq!(Language::from_reported(&["fr-FR", "de"]), None);
+        assert_eq!(Language::from_reported(&["!!"]), None);
+    }
+
+    #[test]
+    fn an_absent_decision_signal_keeps_the_historical_behaviour() {
+        // The signal is a *negative* one: only an explicit "0" says the language is the
+        // host's fallback. A process nobody told keeps writing the baseline down, which is
+        // what every run did before the webview report existed.
+        assert!(baseline_decided(None));
+        assert!(baseline_decided(Some("1")));
+        assert!(baseline_decided(Some("true")));
+        assert!(baseline_decided(Some("")), "a blank value is not a no");
+        assert!(!baseline_decided(Some("0")));
+        assert!(!baseline_decided(Some("false")));
+        assert!(!baseline_decided(Some(" NO ")));
     }
 
     #[test]

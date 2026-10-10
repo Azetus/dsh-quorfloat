@@ -48,7 +48,11 @@ const observed = {
   // effective configuration carried it. Both are recorded because the two reach the
   // sidecar by different routes (spawn environment, and the `ready` payload) and a
   // setting missing from either is invisible from the host side.
+  //
+  // `decided` travels beside the value because `en` means two different things: a real
+  // choice, or "nobody chose anything, and the panel's webview has not reported yet".
   windowLanguageEnv: process.env['DSH_QUORFLOAT_WINDOW_LANGUAGE'] ?? null,
+  windowLanguageDecidedEnv: process.env['DSH_QUORFLOAT_WINDOW_LANGUAGE_DECIDED'] ?? null,
   readyWindow: null,
 }
 

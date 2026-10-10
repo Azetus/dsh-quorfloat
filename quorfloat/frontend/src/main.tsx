@@ -6,9 +6,17 @@
 import { createRoot } from 'react-dom/client'
 import { api } from './api'
 import { Root } from './components/Root'
+import { reportedLanguages } from './lib/languages'
 
 const host = document.getElementById('root')
 if (host === null) throw new Error('#root is missing from the document')
+
+// The shell's only source for "nobody has chosen a language yet": `navigator.languages`
+// is a fact of this webview, so it has to leave from here. Sent once, and before the
+// first render, because the first launch's language is seeded from it; a shell that is
+// not there, or an invoke that is refused, is caught and simply leaves the report
+// unmade — the shell then keeps the `en` it started with.
+void api.reportLanguages(reportedLanguages()).catch(() => {})
 
 createRoot(host).render(<Root />)
 
