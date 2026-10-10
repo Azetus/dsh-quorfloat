@@ -38,7 +38,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
 use dsh_quorfloat::app::bridge::{self, ShellView};
-use dsh_quorfloat::app::geometry::WindowState;
+use dsh_quorfloat::app::geometry::{self, ScreenRect, WindowState};
 use dsh_quorfloat::app::height::{Height, HeightAction, SHADOW_SIDE};
 use dsh_quorfloat::app::preferences::Preferences;
 use dsh_quorfloat::app::session::interaction::parse_answers;
@@ -113,10 +113,11 @@ fn run() -> Result<SessionExit, String> {
 
     let marker = Marker::from_env();
     marker.write("start");
-    // Where the panel opens, on the record: "the window came back somewhere odd" is a
-    // question about this line and the file behind it.
+    // What the file holds, on the record, before the window exists: whether that position can
+    // actually be applied is a question about the displays, which can only be asked once there is
+    // a window to ask through — the outcome is therefore written where the window is placed.
     marker.write(&match lock(&window_state).position() {
-        Some((x, y)) => format!("window restored at {x:.0},{y:.0}"),
+        Some((x, y)) => format!("window position remembered at {x:.0},{y:.0}"),
         None => "window position not remembered".to_owned(),
     });
 
@@ -265,16 +266,11 @@ fn run() -> Result<SessionExit, String> {
                 .accept_first_mouse(true)
                 .build()
                 .map_err(|error| format!("could not create the main window: {error}"))?;
-            // Where the user left it — or nowhere, which is a real difference rather than
-            // a default: a panel that always opened at the origin would be one the user
-            // moves every launch.
-            if let Some((x, y)) = lock(&shell_state).position() {
-                if let Err(error) = window.set_position(tauri::Position::Physical(
-                    tauri::PhysicalPosition::new(x as i32, y as i32),
-                )) {
-                    shell_sink.log(&format!("could not restore the window position: {error}"));
-                }
-            }
+            // Where the user left it — or the anchor, if there is nothing to restore or what was
+            // remembered is on no attached display (a coordinate from a monitor that has since
+            // been unplugged, which is exactly how a panel ends up created where nobody can see
+            // it and the hotkey looks broken). Both facts are on the record either way.
+            place_window(&window, &settings, &shell_state, &shell_sink, &shell_marker);
 
             app.manage(ShellRuntime {
                 session: Arc::clone(&shell_session),
@@ -373,6 +369,102 @@ fn run() -> Result<SessionExit, String> {
     // reaching here means the event loop stopped without a recorded exit.
     let recorded = lock(&outcome).clone().unwrap_or(SessionExit::PeerClosed);
     Ok(recorded)
+}
+
+// ── window placement ─────────────────────────────────────────────────────────
+
+/// Put the panel where [`geometry::placement`] decided, and say which rule placed it.
+///
+/// One marker line per outcome, because "the panel came back somewhere odd" and "the hotkey did
+/// nothing visible" are both questions about this moment: the refusal line is the only place the
+/// dropped coordinate exists once the file has been rewritten.
+///
+/// @param window - the panel's window, just created and still hidden.
+/// @param settings - the effective settings; `anchor` is the fallback placement.
+/// @param state - the remembered geometry, read here because the decision needs it.
+/// @param sink - for a platform error that is worth a log line.
+/// @param marker - the record of what happened.
+fn place_window(
+    window: &WebviewWindow,
+    settings: &WindowSettings,
+    state: &Arc<Mutex<WindowState>>,
+    sink: &SharedSink,
+    marker: &Marker,
+) {
+    let displays = displays_now(window);
+    let primary = primary_display(window);
+    // The window's own physical size, taken from the window rather than from the configured
+    // width: the configuration is in logical pixels and the displays are in physical ones, and
+    // on a scaled display those differ by exactly the factor that would put the centre off.
+    let size = window.outer_size().map_or_else(
+        |_| {
+            // Unreachable in practice (the window was created a moment ago on this thread), but
+            // the fallback is scaled rather than assumed to be 1:1 for the same reason.
+            let scale = window.scale_factor().unwrap_or(1.0) as f32;
+            (settings.width * scale, PLACEHOLDER_HEIGHT as f32 * scale)
+        },
+        |size| (size.width as f32, size.height as f32),
+    );
+    let remembered = lock(state).position();
+    let placement = geometry::placement(remembered, &displays, primary, size, settings.anchor);
+    if let Some((x, y)) = placement.position() {
+        if let Err(error) = window.set_position(tauri::Position::Physical(
+            tauri::PhysicalPosition::new(x as i32, y as i32),
+        )) {
+            sink.log(&format!("could not place the window: {error}"));
+        }
+    }
+    if let Some(note) = placement.note(settings.anchor) {
+        marker.write(&note);
+    }
+}
+
+/// The displays the platform reports, as the plain rectangles the geometry rules take.
+///
+/// Translation only — no decision happens here. A query that fails becomes an empty list, which
+/// the rules read as "nothing can be verified" (see [`geometry::placement`]); that is the safe
+/// reading of a platform that will not answer.
+///
+/// @param window - any window of this application, used as the handle to the platform.
+/// @returns every display's frame, in physical pixels.
+fn displays_now(window: &WebviewWindow) -> Vec<ScreenRect> {
+    window
+        .available_monitors()
+        .map(|monitors| {
+            monitors
+                .iter()
+                .map(|monitor| {
+                    ScreenRect::new(
+                        monitor.position().x as f32,
+                        monitor.position().y as f32,
+                        monitor.size().width as f32,
+                        monitor.size().height as f32,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The primary display's usable rectangle, which is what the anchor is measured against.
+///
+/// The **work area** rather than the frame: its top edge is below the macOS menu bar and the
+/// Windows taskbar, so that is the real top of the screen for a window — and therefore the real
+/// centre too.
+///
+/// @param window - any window of this application.
+/// @returns the primary display's work area, or `None` when the platform names no primary
+///   display (the anchor then has nowhere to point and the platform's own placement stands).
+fn primary_display(window: &WebviewWindow) -> Option<ScreenRect> {
+    window.primary_monitor().ok().flatten().map(|monitor| {
+        let area = monitor.work_area();
+        ScreenRect::new(
+            area.position.x as f32,
+            area.position.y as f32,
+            area.size.width as f32,
+            area.size.height as f32,
+        )
+    })
 }
 
 // ── Tauri commands ───────────────────────────────────────────────────────────
@@ -774,11 +866,15 @@ fn spawn_dispatcher(
                     Ok(Wake::Exit(exit)) => {
                         // Remember where the panel was — a drag that ends inside the
                         // settle window is as real as any other move — then leave.
+                        let now = rpc::now_millis();
                         if let Ok(position) = window.outer_position() {
-                            let now = rpc::now_millis();
+                            // The displays are read fresh here rather than reused from a tick:
+                            // this is the write that outlives the process, so it is judged
+                            // against the arrangement that exists at the moment of quitting.
+                            let displays = displays_now(&window);
                             let mut state = lock(&window_state);
-                            state.observe((position.x as f32, position.y as f32), now);
-                            state.flush(now);
+                            state.observe((position.x as f32, position.y as f32), &displays, now);
+                            state.flush(&displays, now);
                         }
                         record_end(&session, &sink, &marker, &exit);
                         handle.exit(0);
@@ -790,9 +886,22 @@ fn spawn_dispatcher(
                         // And where the panel is now: a drag is remembered once it
                         // settles (the geometry module's one-second rule), so a
                         // crash or a kill does not lose the user's placement.
+                        //
+                        // The display list is read next to the position rather than cached: a
+                        // position is only remembered while it is on a display that exists now,
+                        // and "now" is the only moment at which that can be answered. The
+                        // alternative — a cached list — would keep a hot-unplugged monitor
+                        // "attached" for as long as the cache lives, which is precisely the
+                        // coordinate this check exists to refuse. The cost is one platform query
+                        // per tick, beside the position query that was already here.
                         if let Ok(position) = window.outer_position() {
+                            let displays = displays_now(&window);
                             let mut state = lock(&window_state);
-                            state.observe((position.x as f32, position.y as f32), rpc::now_millis());
+                            state.observe(
+                                (position.x as f32, position.y as f32),
+                                &displays,
+                                rpc::now_millis(),
+                            );
                         }
                     }
                     Err(RecvTimeoutError::Disconnected) => {

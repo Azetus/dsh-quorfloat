@@ -782,6 +782,11 @@ function quorfloatEnvironment(config: QuorfloatConfig): NodeJS.ProcessEnv {
     DSH_QUORFLOAT_WINDOW_MAX_HEIGHT: String(config.window.maxHeight),
     DSH_QUORFLOAT_WINDOW_ALWAYS_ON_TOP: String(config.window.alwaysOnTop),
     DSH_QUORFLOAT_WINDOW_REDUCE_MOTION: String(config.window.reduceMotion),
+    // Where the panel opens when there is no remembered position to restore (and where it falls
+    // back to when the remembered one is on no attached display). It has to be here and not only
+    // in the `ready` payload for the same reason as the numbers above: the placement happens the
+    // moment the window is created, which is before any frame from the host has been processed.
+    DSH_QUORFLOAT_WINDOW_ANCHOR: config.window.anchor,
   }
   // POSIX and Windows names for the same facts, both forwarded. The Windows
   // entries are not decoration: `HOME` is normally unset there, and while the host
