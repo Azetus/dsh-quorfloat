@@ -148,11 +148,24 @@ export function stageSidecar({
  * `cpSync` already carries the source's mode, but the bit is set explicitly because a
  * bundle assembled from an archive or a downloaded artifact would otherwise ship an
  * executable nobody can run — and the host half reports that as "not executable"
- * rather than as a packaging fault. Windows has no such bit to set.
+ * rather than as a packaging fault.
+ *
+ * Windows is skipped outright: there is no executable bit to set, the host half's
+ * `accessSync(path, X_OK)` is an existence check there, and so the mode is not part
+ * of what makes the staged sidecar launchable. The call is also non-fatal on the
+ * platforms that do have the bit: a filesystem that cannot express it (exFAT, a
+ * network share, a read-only mount) must not turn "stage the sidecar" into a build
+ * failure, and the mode copied by `cpSync` is still in place.
  *
  * @param path - the staged executable.
  */
 function makeExecutable(path) {
   if (process.platform === 'win32') return
-  chmodSync(path, statSync(path).mode | 0o111)
+  try {
+    chmodSync(path, statSync(path).mode | 0o111)
+  } catch (error) {
+    process.stderr.write(
+      `cannot set the executable bit on ${path}: ${error instanceof Error ? error.message : String(error)}\n`,
+    )
+  }
 }

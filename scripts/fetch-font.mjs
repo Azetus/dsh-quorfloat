@@ -39,7 +39,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -213,6 +213,9 @@ async function main() {
 }
 
 // Only run when invoked directly: the tests import `verify`/`fontPath` from here.
-if (process.argv[1] !== undefined && import.meta.url === `file://${process.argv[1]}`) {
+// Compared through `pathToFileURL`, because building `file://${path}` by hand is
+// wrong wherever a path is not already URL-shaped: on Windows `C:\...` never equals
+// `file:///C:/...`, so `npm run fonts` would have exited 0 having done nothing.
+if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
   await main()
 }

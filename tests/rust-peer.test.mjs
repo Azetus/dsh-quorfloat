@@ -25,9 +25,13 @@ import { buildSupervisor, repoRoot, sleep, waitFor } from './helpers.mjs'
 
 /** Where `cargo build` leaves the binary, newest profile first. */
 function rustBinary() {
+  // Cargo appends `.exe` on Windows; without it every protocol test would skip
+  // there and the host↔sidecar wire would go unexercised on the platform the
+  // release is verified on.
+  const executable = process.platform === 'win32' ? 'dsh-quorfloat.exe' : 'dsh-quorfloat'
   const candidates = [
-    join(repoRoot, 'quorfloat/target/debug/dsh-quorfloat'),
-    join(repoRoot, 'quorfloat/target/release/dsh-quorfloat'),
+    join(repoRoot, 'quorfloat/target/debug', executable),
+    join(repoRoot, 'quorfloat/target/release', executable),
   ]
   return candidates.find(candidate => existsSync(candidate))
 }

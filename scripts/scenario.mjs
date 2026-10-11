@@ -25,15 +25,24 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 const name = process.argv[2] ?? 'scenario'
 const spec = process.argv[3] ?? ''
-const reportPath = process.env['DSH_QUORFLOAT_PEER_REPORT'] ?? `/tmp/qf-${name}.json`
+// `os.tmpdir()` rather than a literal `/tmp`: the latter is a POSIX path that
+// resolves to `C:\tmp` on Windows, where nothing may exist to write into.
+const reportPath = process.env['DSH_QUORFLOAT_PEER_REPORT'] ?? join(tmpdir(), `qf-${name}.json`)
 const workspaceId = process.env['DSH_QUORFLOAT_PEER_WORKSPACE'] ?? ''
 const runMs = Number(process.env['QF_SCENARIO_MS'] ?? 120_000)
+
+/**
+ * Whether `dsh` needs a shell to be resolved: it is a `.cmd` shim on Windows, and
+ * `spawn` with `shell: false` cannot run one. Mirrors `scripts/dev.mjs`.
+ */
+const NEEDS_SHELL = process.platform === 'win32'
 
 if (spec === '') {
   console.error('usage: node scripts/scenario.mjs <name> <ui:surface:visible:focused,panel:visible>')
@@ -72,6 +81,7 @@ rmSync(reportPath, { force: true })
 const child = spawn('dsh', ['--profile', process.env['QF_PROFILE'] ?? 'quorfloat-dev', '--no-open'], {
   cwd: ROOT,
   stdio: ['ignore', 'pipe', 'pipe'],
+  shell: NEEDS_SHELL,
   env: { ...process.env, DSH_QUORFLOAT_PATH: join(ROOT, 'scripts', 'peer-probe.mjs'), ...probeEnv() },
 })
 

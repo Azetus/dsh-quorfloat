@@ -9,11 +9,15 @@
 
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { dirname, join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
-/** Absolute path to this repository root. */
-export const repoRoot = new URL('..', import.meta.url).pathname.replace(/\/$/, '')
+/**
+ * Absolute path to this repository root, derived the way `scripts/*.mjs` do it.
+ * `URL.pathname` is not a filesystem path: on Windows it yields `/C:/...`, which
+ * `path.join` turns into a doubled drive letter (`C:\C:\...`).
+ */
+export const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 
 /** Load the real Cordis framework. */
 export async function loadCordis() {

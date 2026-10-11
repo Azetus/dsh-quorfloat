@@ -128,7 +128,7 @@ export function resolveQuorfloatBinary(lookup: BinaryLookup): ResolvedBinary {
         : { source: candidate.source, candidate: candidate.path, ok: false, reason: inspection.reason },
     )
     if (inspection.ok) {
-      return { path: candidate.path, args: inspection.args, source: candidate.source, attempts }
+      return { path: inspection.path, args: inspection.args, source: candidate.source, attempts }
     }
   }
 
@@ -249,19 +249,27 @@ function devBuildPath(packageRoot: string): string {
 
 /** Result of inspecting one candidate path. */
 type Inspection =
-  | { readonly ok: true; readonly args: readonly string[] }
+  | { readonly ok: true; readonly path: string; readonly args: readonly string[] }
   | { readonly ok: false; readonly reason: string }
 
 /**
  * Decide whether a candidate can be launched, and how.
  *
- * An executable file is launched directly. A **non-executable script that names
- * its interpreter** (a `node` shebang) is launched through that interpreter.
- * This exists because the documented escape hatch — point
- * `config.quorfloatPath` / `DSH_QUORFLOAT_PATH` at a launcher — is used during
- * development with script files that have no executable bit, and refusing them
- * produced the least helpful failure available: "executable not found" for a
- * file sitting right there.
+ * An executable file is launched directly. A **script that names its Node
+ * interpreter** (a `node` shebang) is launched as `process.execPath <script>`,
+ * with the interpreter as the command and the script as the argument — which is
+ * the shape the tests already inject. This exists because the documented escape
+ * hatch — point `config.quorfloatPath` / `DSH_QUORFLOAT_PATH` at a launcher — is
+ * used during development with script files (`scripts/peer-probe.mjs`), and
+ * refusing them produced the least helpful failure available: "executable not
+ * found" for a file sitting right there.
+ *
+ * The script test deliberately precedes the executable test. Windows'
+ * `CreateProcess` cannot start a `.mjs`, and there `X_OK` is only an existence
+ * check, so an executable-bit test would wrongly accept the script and fail at
+ * spawn. On POSIX the direct route works only when the file happens to carry the
+ * executable bit, which a fresh checkout need not have. Deciding by content
+ * first keeps both platforms on the one path.
  *
  * @param path - absolute candidate path.
  * @param source - which rule produced the candidate, for the error text.
@@ -277,17 +285,17 @@ function inspectCandidate(path: string, source: ResolutionAttempt['source']): In
   }
   if (!stats.isFile()) return { ok: false, reason: 'not a regular file' }
 
-  if (isExecutable(path)) return { ok: true, args: [] }
+  // Only an explicit developer override may be a script. A platform-package
+  // payload must be a real executable, or the package is broken and should be
+  // reported as such.
+  const scriptAllowed = source !== 'platform-package' && source !== 'dev-build'
+  const isNodeScript = scriptInterpreter(path) !== undefined
+  if (isNodeScript && scriptAllowed) return { ok: true, path: process.execPath, args: [path] }
 
-  // Not executable: only an explicit developer override may be a script. A
-  // platform-package payload must be a real executable, or the package is broken
-  // and should be reported as such.
-  if (source === 'platform-package' || source === 'dev-build') return { ok: false, reason: 'not executable' }
-  const interpreter = scriptInterpreter(path)
-  if (interpreter === undefined) {
-    return { ok: false, reason: 'not executable, and it does not declare a node interpreter' }
-  }
-  return { ok: true, args: [path] }
+  if (isExecutable(path)) return { ok: true, path, args: [] }
+
+  if (!scriptAllowed) return { ok: false, reason: 'not executable' }
+  return { ok: false, reason: 'not executable, and it does not declare a node interpreter' }
 }
 
 /**

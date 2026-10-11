@@ -206,7 +206,12 @@ function run(command, args, cwd = ROOT) {
 
 /** Whether `dsh` can be started at all. */
 function hasDsh() {
-  return spawnSync('dsh', ['--help'], { stdio: 'ignore', shell: NEEDS_SHELL }).error === undefined
+  const result = spawnSync('dsh', ['--help'], { stdio: 'ignore', shell: NEEDS_SHELL })
+  // Both checks are needed, and the second one is why: with `shell: true` the
+  // process that gets spawned is `cmd.exe`, which always exists, so a missing
+  // `dsh` is a nonzero exit status (127) rather than an `ENOENT` error. Testing
+  // only `error` would make this guard pass on exactly the platform it exists for.
+  return result.error === undefined && result.status === 0
 }
 
 /**

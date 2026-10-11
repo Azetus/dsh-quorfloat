@@ -25,8 +25,18 @@ import { mkdirSync, openSync, readSync, closeSync, writeFileSync, existsSync } f
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const APP = process.env['DSH_APP_ASAR'] ??
-  '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar'
+/**
+ * Default location of the installed app's `app.asar`.
+ *
+ * Only macOS has a default that can be named without guessing: the app bundle.
+ * No Windows or Linux install path is hardcoded here, because none can be
+ * verified from this repository — there `DSH_APP_ASAR` is required, and the
+ * failure below names the platform and the variable instead of a wrong path.
+ */
+const DEFAULT_ASAR = process.platform === 'darwin'
+  ? '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar'
+  : undefined
+const APP = process.env['DSH_APP_ASAR'] ?? DEFAULT_ASAR
 const TARGET = join('dsh', 'node_modules', '@deepseek-ai', 'dsh-api-session-controller', 'lib', 'typert.host.js')
 const OUT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '.tooling', 'conformance')
 
@@ -71,8 +81,15 @@ function readEntry(fd, entry, dataStart) {
 
 /** Write the generated contract next to the zod it imports. */
 function main() {
-  if (!existsSync(APP)) {
-    console.error(`not found: ${APP}\nSet DSH_APP_ASAR to the app.asar path, or install DeepSeek Harness at the default location.`)
+  if (APP === undefined || !existsSync(APP)) {
+    const problem = APP === undefined
+      ? `DSH_APP_ASAR is not set and there is no default for ${process.platform}`
+      : `not found: ${APP} (${process.platform})`
+    console.error(
+      `${problem}\n` +
+        'Set DSH_APP_ASAR to the app.asar path inside the installed DeepSeek Harness ' +
+        '(on macOS the default is /Applications/DeepSeek Harness.app/Contents/Resources/app.asar).',
+    )
     process.exit(1)
   }
   const { fd, directory, dataStart } = readArchive(APP)

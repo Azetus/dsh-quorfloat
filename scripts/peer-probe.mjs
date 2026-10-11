@@ -29,10 +29,12 @@
  */
 
 import { writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const MODE = process.env['DSH_QUORFLOAT_PEER_MODE'] ?? 'auto'
 /** Always leave a report somewhere findable, even when nothing was configured. */
-const REPORT = process.env['DSH_QUORFLOAT_PEER_REPORT'] ?? '/tmp/dsh-quorfloat-probe.json'
+const REPORT = process.env['DSH_QUORFLOAT_PEER_REPORT'] ?? join(tmpdir(), 'dsh-quorfloat-probe.json')
 const PROMPT = process.env['DSH_QUORFLOAT_PEER_PROMPT'] ??
   '请用一句话说明你收到了这条消息，然后运行 `echo dsh-quorfloat-probe` 并给出它的输出。'
 
