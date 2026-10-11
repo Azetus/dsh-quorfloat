@@ -7,21 +7,97 @@
      y 0.6..14.2, so its centre is (9.1, 7.4), not (8, 8) — hence the offset viewBox below, which
      puts that centre in the middle of an 18-unit square (2px of margin at 32px).
 
+     COLOUR 2026-10-11: the ink is #5C6CFF, not black. macOS reads this image as a *template* (only
+     the alpha channel is used; the menu bar recolours it for light and dark), but Windows draws it
+     as-is, and a black glyph on a dark taskbar is invisible. One mid-tone blue is the single file
+     that stays legible on both grounds — 4.16:1 on white, 3.91:1 on a #202020 taskbar — so the
+     panel's own accent pair (#505CAF light / #A8B1FF dark) is deliberately NOT used: each half of
+     that pair fails on the opposite taskbar mode (2.71:1 and 2.02:1). #5C6CFF is the blue the app
+     icon already carries, so the tray and the icon now share a colour as well as a shape.
+
      STATUS 2026-10-10: the PNG next to this file IS this whale tail — the user confirmed it in the
      menu bar. Note the accepted render came from the un-offset viewBox (`0 0 16 16`), which leaves
      the tail 4px from the left and flush against the right edge; it looked right in place, but a
      re-render worth keeping should use the centred viewBox below and, if Chrome still lays it out
      wrongly, render at 64x64 and let Pillow centre-and-scale to 32x32 (the headless page layout
      proved unreliable: three attempts came out flush right, flush left/bottom, then identical).
+     The 2026-10-11 recolour moved no pixel of the alpha channel (verified bit-identical against
+     the pre-change PNG), so that accepted geometry — flush right, the ink reaching x=31 at alpha
+     21 — is exactly what still ships.
+
+     RECIPE, tray.png — the shipped file is a recolour of the accepted render, not a re-render, so
+     the confirmed silhouette survives unchanged and only the ink's RGB moves:
        python3 - <<'EOF'
-       svg = open('icons/tray.svg').read().split('-->', 1)[1]
-       open('/tmp/tray.html', 'w').write('<!doctype html><body style="margin:0;background:transparent">' + svg + '</body>')
+       from PIL import Image
+       im = Image.open('icons/tray.png').convert('RGBA'); px = im.load()
+       for y in range(im.height):
+           for x in range(im.width):
+               a = px[x, y][3]
+               px[x, y] = (92, 108, 255, a) if a else (0, 0, 0, 0)
+       im.save('icons/tray.png', optimize=True)
+       EOF
+
+     RECIPE, re-rendering the geometry (only if the tail itself must change). Take everything from
+     the LAST tag in the file, the one that opens the drawing; do NOT split the file on the comment
+     terminator — the prose you are reading contains that terminator nowhere, precisely because an
+     earlier version of this recipe did split on it, landed inside this comment, and spilled the
+     rest of the prose into the page as black text that the screenshot then baked in.
+       python3 - <<'EOF'
+       raw = open('icons/tray.svg').read()
+       svg = raw[raw.rindex('<svg'):].replace('width="32" height="32"', 'width="512" height="512"')
+       open('/tmp/tray.html', 'w').write(
+           '<!doctype html><body style="margin:0;background:transparent">' + svg + '</body>')
        EOF
        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless --no-sandbox \
          --disable-gpu --hide-scrollbars --disable-lcd-text --default-background-color=00000000 \
-         --user-data-dir=/tmp/chrome-tray-profile --window-size=32,32 --virtual-time-budget=4000 \
-         --screenshot=tray.png file:///tmp/tray.html
-     Chrome writes the file but does not exit; kill it once the PNG appears. -->
+         --user-data-dir=/tmp/chrome-tray-profile --window-size=512,512 --virtual-time-budget=4000 \
+         --screenshot=/tmp/tray-512.png file:///tmp/tray.html
+     Chrome writes the file but does not exit; kill it once the PNG appears. Then force every pixel
+     with alpha to #5C6CFF (Chrome's near-zero-alpha pixels carry junk RGB), crop to the alpha bbox,
+     scale so the ink spans 28px of a 32px canvas, and paste at (4, 1) to keep today's placement.
+
+     RECIPE, icon.ico — one-off, hand-run, in this directory. There is deliberately no README here:
+     every one-off recipe for this folder lives in this comment. The app icon is load-bearing —
+     `tauri::generate_context!` panics without `icons/icon.png`, `tauri-build` on Windows needs the
+     `.ico` before `rc.exe` can embed it, and macOS falls back from `.icns` to the first `.png` in
+     `bundle.icon` — so both files stay present at all times. The `.ico` mirrors `icon.png` at seven
+     sizes: 16/24/32/48/64 as 32bpp DIB (no AND mask, ICO's doubled height) and 128/256 as
+     PNG-compressed entries. The 256 entry is a 2x LANCZOS upscale because the source is only
+     128x128 — an upscale invents no geometry. This exact script reproduces the shipped
+     `icons/icon.ico` byte for byte (40,279 B):
+       python3 - <<'EOF'
+       import io, struct
+       from PIL import Image
+       src = Image.open('icons/icon.png').convert('RGBA')
+       sizes = [16, 24, 32, 48, 64, 128, 256]
+       entries, blobs, offset = [], [], 6 + 16 * len(sizes)
+       for size in sizes:
+           frame = src.copy() if size == 128 else src.resize((size, size), Image.LANCZOS)
+           buf = io.BytesIO()
+           if size <= 64:
+               frame.save(buf, format='DIB')
+               b = buf.getvalue()
+               b = b[:8] + struct.pack('<i', size * 2) + b[12:]
+           else:
+               frame.save(buf, format='PNG', optimize=True)
+               b = buf.getvalue()
+           entries.append(
+               (size if size < 256 else 0, size if size < 256 else 0, 0, 0, 1, 32, len(b), offset))
+           offset += len(b)
+           blobs.append(b)
+       out = bytearray(struct.pack('<HHH', 0, 1, len(entries)))
+       for e in entries:
+           out += struct.pack('<BBBBHHII', *e)
+       for b in blobs:
+           out += b
+       open('icons/icon.ico', 'wb').write(bytes(out))
+       EOF
+     Regenerate the `.ico` only when `icon.png` changes: it is a derivative, and an `.ico` that
+     disagrees with `icon.png` is worse than a stale one. `icons/icon.candidate.png` and
+     `icons/icon.candidate.ico` (2026-10-11) are the proposed unified mark — this same tail, on
+     `icon.png`'s own backing panel, replacing the placeholder blue bar — built from the 512px
+     render above scaled so the ink spans 72px of the 128px panel and centred. They are not listed
+     in `bundle.icon` and must not be renamed over `icon.png`/`icon.ico` until the user has looked. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0.1 -1.58 18 18" fill="none">
-  <path d="M8.844 13.742C8.967 12.328 8.45 10.4 8.45 9.65C8.45 8.94 8.88 8.43 9.6 8.43C11.285 8.43 12.106 8.281 12.685 8.104C13.71 7.791 14.585 6.768 15.055 5.945C15.137 5.803 14.99 5.641 14.829 5.671C13.829 5.86 12.828 5.376 11.827 4.978C10.659 4.514 9.491 4.707 8.935 4.876C8.805 4.915 8.658 4.819 8.636 4.686C8.468 3.643 7.405 2.615 5.498 2.238C4.54 2.048 3.748 1.574 3.347 1.202C3.252 1.113 3.088 1.125 3.03 1.242C2.628 2.059 2.168 3.82 5.248 6.115C5.82 6.494 6.31 6.785 6.574 7.637C6.72 8.104 6.157 9.168 6.061 9.368C5.157 11.27 5.089 12.19 4.926 13.742" stroke="#000000" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M8.844 13.742C8.967 12.328 8.45 10.4 8.45 9.65C8.45 8.94 8.88 8.43 9.6 8.43C11.285 8.43 12.106 8.281 12.685 8.104C13.71 7.791 14.585 6.768 15.055 5.945C15.137 5.803 14.99 5.641 14.829 5.671C13.829 5.86 12.828 5.376 11.827 4.978C10.659 4.514 9.491 4.707 8.935 4.876C8.805 4.915 8.658 4.819 8.636 4.686C8.468 3.643 7.405 2.615 5.498 2.238C4.54 2.048 3.748 1.574 3.347 1.202C3.252 1.113 3.088 1.125 3.03 1.242C2.628 2.059 2.168 3.82 5.248 6.115C5.82 6.494 6.31 6.785 6.574 7.637C6.72 8.104 6.157 9.168 6.061 9.368C5.157 11.27 5.089 12.19 4.926 13.742" stroke="#5C6CFF" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

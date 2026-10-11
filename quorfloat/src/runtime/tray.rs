@@ -80,11 +80,9 @@ pub fn labels(language: Language) -> TrayLabels {
     }
 }
 
-/// The menu-bar image, embedded so the staged sidecar stays one self-contained executable.
-///
-/// It is a *template* image: colour is ignored, macOS recolours the alpha channel for light and
-/// dark menu bars. The current one is a placeholder (a Phosphor message mark rendered to a
-/// monochrome PNG by `scripts/…`); swapping it means re-rendering `icons/tray.svg`.
+/// The tray image: the Harness running-whale-tail mark, brand blue (#5C6CFF).
+/// macOS treats it as a template (alpha only, the system recolours it); Windows draws
+/// the colour as-is, which is why the ink is blue rather than black.
 const ICON: &[u8] = include_bytes!("../../icons/tray.png");
 
 /// Menu item ids, matched back in the menu-event handler below.
@@ -199,9 +197,8 @@ pub fn install<R: Runtime>(
     let sender = wake;
     let tray = TrayIconBuilder::with_id("quorfloat-tray")
         .icon(icon)
-        // Template on macOS: the menu bar's own colour decides, so the icon follows light and
-        // dark without two assets. Ignored elsewhere.
-        .icon_as_template(true)
+        // macOS-only semantics (`cfg!` is compile-time); elsewhere the brand-blue PNG is drawn as-is.
+        .icon_as_template(cfg!(target_os = "macos"))
         .tooltip(table.tooltip)
         .menu(&menu)
         .show_menu_on_left_click(true)
