@@ -19,8 +19,8 @@
 //! **Membership, not paths.** Which conversations belong to a workspace is the registry's own
 //! `sessionIds` account, carried on every `workspaces/list` row, and no path comparison remains
 //! on any hot path. (A path-equality fallback for a conversation the registry did not account
-//! for had no callers and was deleted on 2026-10-11; the separator/case rule it encoded is now
-//! recorded in `docs/AGENT.md`.)
+//! for had no callers and was deleted on 2026-10-11. If a path comparison is ever unavoidable:
+//! normalise `\` and `/`, trim trailing separators, and fold case under `cfg!(windows)`.)
 
 use crate::app::session::follow::{SessionSummary, Workspace};
 

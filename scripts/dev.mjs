@@ -105,16 +105,33 @@ const CORE_BUNDLES = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
 /**
  * The workspace the generated profile starts with.
  *
- * Written by hand because nothing else will do it: the default workspace is created
- * by `@deepseek-ai/dsh-web-app`'s client half on first page load, and this script
- * runs with `--no-open`. Without a registered workspace, `workspaces/list` is empty
- * and every session operation fails at the far end of the protocol — which reads as
+ * Written by hand because a dev run must not depend on it: the default workspace would
+ * otherwise be created by `@deepseek-ai/dsh-web-app`'s client half on first page load, and
+ * this script runs with `--no-open`. Without a registered workspace, `workspaces/list` is
+ * empty and every session operation fails at the far end of the protocol — which reads as
  * a plugin fault rather than a missing prerequisite.
  *
  * Fixed rather than random, so a run is reproducible and a stored session still
  * belongs to the workspace that owns it.
+ *
+ * `--empty-workspaces` deliberately leaves this out: with no registry, the Harness's own
+ * first-use creation answers `workspace/default` instead — see {@link DEV_DOCUMENTS_PATH}.
  */
 const DEV_WORKSPACE_ID = '00000000-0000-4000-8000-000000000001'
+
+/** The workspace directory the generated profile points at. */
+const DEV_WORKSPACE_PATH = join(DEV_HOME, 'workspace')
+
+/**
+ * Where `--empty-workspaces` points the Harness's Documents directory.
+ *
+ * The Harness creates its first-use workspace at
+ * `<documentsDirectory>/deepseek-harness/default-workspace`, and it really creates the
+ * directory: the default would otherwise land in the developer's own Documents folder.
+ * Inside the throwaway home the whole first-use workspace is one deletable directory,
+ * like everything else a dev run touches.
+ */
+const DEV_DOCUMENTS_PATH = join(DEV_HOME, 'documents')
 
 /** Parse the options this script owns; anything else is passed through to dsh. */
 export function parseArgs(argv) {
@@ -125,6 +142,7 @@ export function parseArgs(argv) {
     rustProfile: 'debug',
     perf: false,
     open: false,
+    emptyWorkspaces: false,
     dshHome: undefined,
     passthrough: [],
     help: false,
@@ -153,6 +171,9 @@ export function parseArgs(argv) {
       case '--open':
         options.open = true
         break
+      case '--empty-workspaces':
+        options.emptyWorkspaces = true
+        break
       case '--dsh-home':
         options.dshHome = argv[++index]
         break
@@ -178,12 +199,19 @@ Options:
   --perf             record CPU/active-frame timing; disable screenshot capture
   --no-build         skip both JS and Rust builds; require the chosen Rust binary
   --open             let dsh open a browser (default: do not)
+  --empty-workspaces start with no workspace registry and no carried-over session
+                     history, so the panel asks the host to create the Harness's
+                     default workspace under ${DEV_DOCUMENTS_PATH}
   -h, --help         this text
 
 Staged into ${DEV_HOME}, rebuilt on every run except for sessions/, which is
 carried over so a previous run stays readable. The plugin is staged from the
 manifest's own files/exports, so what runs is what would be published — and a
 missing entry there fails here rather than at a user's install.
+
+With --empty-workspaces nothing is carried over, and a home-level cordis.patch.yml
+redirects the Harness's first-use workspace to ${DEV_DOCUMENTS_PATH}: the run starts
+with zero workspaces, which is what exercises the panel's default-workspace request.
 
 The dsh profile is generated from scratch: core bundles plus this plugin. No
 profile in a real DSH_HOME is read or modified.
@@ -382,6 +410,40 @@ function writeWorkspaceRegistry(home, path) {
   mkdirSync(path, { recursive: true })
 }
 
+/**
+ * Write the home-level patch layer that keeps first-use workspace creation inside the dev home.
+ *
+ * The generated profile has no workspace registry under `--empty-workspaces`, so the plugin
+ * asks the host for a default and the host calls `workspaceController.initializeDefault` —
+ * which makes a real directory. The row that owns that call is mounted from a core bundle,
+ * so the only place a generated profile can retarget it is the home patch layer
+ * (`$DSH_HOME/cordis.patch.yml`), which dsh applies over the profile's own layer.
+ *
+ * A patch replaces a row's whole config by id, so this carries exactly the one key the row
+ * needs; the row has no other config, and `documentsLookupTimeoutMs` keeps its default.
+ * Nothing is written when the flag is off, and a leftover file from an earlier flagged run
+ * is gone anyway: the home is rebuilt from scratch on every run.
+ *
+ * @param home - the `DSH_HOME` being generated.
+ */
+function writeHomePatch(home) {
+  // Single-quoted because the value is a filesystem path: on Windows it holds backslashes
+  // and possibly spaces, which a plain YAML scalar would still read literally but which
+  // invites a mistyped patch; `''` is YAML's own escape and works on every platform.
+  const documents = DEV_DOCUMENTS_PATH.replaceAll("'", "''")
+  writeFileSync(join(home, 'cordis.patch.yml'), [
+    '# Generated by scripts/dev.mjs for --empty-workspaces — safe to delete.',
+    '#',
+    '# Applied over the profile\'s own layer, this points the first-use workspace at the',
+    '# throwaway dev home. Without it `workspaceController.initializeDefault` would create',
+    '# it in the real Documents directory.',
+    '- id: workspace-controller',
+    '  config:',
+    `    documentsDirectory: '${documents}'`,
+    '',
+  ].join('\n'))
+}
+
 // Exported for `tests/dev-script.test.mjs`: the registry builder is the one piece of
 // this script with behaviour worth pinning, and a script cannot be imported by the
 // test runner without running it.
@@ -405,9 +467,10 @@ export { buildWorkspaceRegistry, DEV_WORKSPACE_ID }
  * @param credentialsHome - the real `DSH_HOME` to read model credentials from.
  * @param profile - the profile name to generate.
  * @param workspacePath - the directory the generated workspace points at.
+ * @param emptyWorkspaces - start with no registry and no carried-over session history.
  * @returns the `DSH_HOME` to run against, and what was staged.
  */
-function stageHome(credentialsHome, profile, workspacePath) {
+function stageHome(credentialsHome, profile, workspacePath, emptyWorkspaces = false) {
   const home = join(DEV_HOME, '.dsh')
   const profileDir = join(home, 'profiles', profile)
 
@@ -416,22 +479,33 @@ function stageHome(credentialsHome, profile, workspacePath) {
   // without the other would leave sessions that nothing can reach — they would look
   // lost rather than restored. The workspace record is then re-pointed at this run's
   // path, so a home copied between machines still resolves.
-  const durable = join(DEV_HOME, 'durable')
-  rmSync(durable, { recursive: true, force: true })
-  for (const entry of ['sessions', 'storages']) {
-    const existing = join(home, entry)
-    if (existsSync(existing)) cpSync(existing, join(durable, entry), { recursive: true, force: true })
-  }
+  //
+  // `--empty-workspaces` carries neither over, and that is not a convenience: the
+  // Harness's first-use initialization is gated on an empty session store as well as
+  // an empty registry, so a carried-over session would make the flag reachable only
+  // until the first run wrote one — the "reproducible once" trap it exists to remove.
+  if (emptyWorkspaces) {
+    rmSync(home, { recursive: true, force: true })
+    mkdirSync(profileDir, { recursive: true })
+    writeHomePatch(home)
+  } else {
+    const durable = join(DEV_HOME, 'durable')
+    rmSync(durable, { recursive: true, force: true })
+    for (const entry of ['sessions', 'storages']) {
+      const existing = join(home, entry)
+      if (existsSync(existing)) cpSync(existing, join(durable, entry), { recursive: true, force: true })
+    }
 
-  rmSync(home, { recursive: true, force: true })
-  mkdirSync(profileDir, { recursive: true })
-  for (const entry of ['sessions', 'storages']) {
-    const kept = join(durable, entry)
-    if (existsSync(kept)) cpSync(kept, join(home, entry), { recursive: true, force: true })
-  }
-  rmSync(durable, { recursive: true, force: true })
+    rmSync(home, { recursive: true, force: true })
+    mkdirSync(profileDir, { recursive: true })
+    for (const entry of ['sessions', 'storages']) {
+      const kept = join(durable, entry)
+      if (existsSync(kept)) cpSync(kept, join(home, entry), { recursive: true, force: true })
+    }
+    rmSync(durable, { recursive: true, force: true })
 
-  writeWorkspaceRegistry(home, workspacePath)
+    writeWorkspaceRegistry(home, workspacePath)
+  }
 
   // An empty entry list: the tree is composed from `bundles`, then this file, then
   // any `--patch` overlays. Writing `[]` rather than omitting the file keeps the
@@ -562,6 +636,14 @@ function start(options, home, sidecar, staged) {
     NODE_NO_WARNINGS: '1',
   }
 
+  // Printed rather than inferred from the home, because "which of the two workspace
+  // arrangements this run started from" is the first thing a missing-workspace report
+  // has to establish, and reading it off the filesystem afterwards is guesswork.
+  const workspaceLine = options.emptyWorkspaces
+    ? '     workspaces=none (--empty-workspaces): no registry is written, and the home patch\n'
+      + `     redirects the Harness's default workspace to ${DEV_DOCUMENTS_PATH}\n`
+    : `     workspaces=1 pre-registered at ${DEV_WORKSPACE_PATH}\n`
+
   process.stdout.write(`\ndev: dsh --profile ${options.profile} --port ${options.port}\n`
     + `     DSH_HOME=${home}\n`
     + `     staged=${staged.destination} (${countFiles(staged.destination)} files,`
@@ -573,7 +655,8 @@ function start(options, home, sidecar, staged) {
     + `     pins=${sidecar === undefined ? '(no panel)' : PINNED_PATH}\n`
     + `     panel font=${panelFonts(sidecar)}\n`
     + `     bundles=${profileBundles(home, options.profile).join(', ')}\n`
-    + `     workspace=${join(DEV_HOME, 'workspace')}\n\n`)
+    + workspaceLine
+    + '\n')
 
   const child = spawn('dsh', args, { cwd: ROOT, stdio: 'inherit', env, shell: NEEDS_SHELL })
 
@@ -634,10 +717,12 @@ function main() {
   sidecarSource(ROOT, options.rustProfile)
 
   const credentialsHome = options.dshHome ?? join(homedir(), '.dsh')
-  // Inside the throwaway home so the whole environment stays one deletable
-  // directory and session data cannot land in a real project.
-  const workspacePath = join(DEV_HOME, 'workspace')
-  const { home, staged } = stageHome(credentialsHome, options.profile, workspacePath)
+  const { home, staged } = stageHome(
+    credentialsHome,
+    options.profile,
+    DEV_WORKSPACE_PATH,
+    options.emptyWorkspaces,
+  )
   const sidecar = stageDevSidecar(options.rustProfile)
   start(options, home, sidecar, staged)
 }
