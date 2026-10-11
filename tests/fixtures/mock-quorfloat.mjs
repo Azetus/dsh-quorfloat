@@ -240,6 +240,14 @@ function handle(message) {
       // keep shutdown inside its grace budget.
       setTimeout(() => finish(0), 5)
       return
+    case 'workspace/default':
+      // The host-side half of the first-use default workspace, answered for the same reason
+      // every other host method is: a fixture that does not know a method would report the
+      // *mock's* ignorance as a host refusal, and the two are indistinguishable from the
+      // sidecar's log. `{ items: [] }` is "the host declined to create one", which is what a
+      // test harness with no workspace controller can honestly say.
+      reply(message.id, { items: [] })
+      return
     default:
       replyError(message.id, -32601, `mock does not implement ${message.method}`)
   }

@@ -547,8 +547,6 @@ function start(options, home, sidecar, staged) {
     DSH_QUORFLOAT_RUST_MARKER: MARKER_PATH,
     ...(options.perf ? {
       DSH_QUORFLOAT_PERF: '1',
-      DSH_QUORFLOAT_SCREENSHOT: '',
-      DSH_QUORFLOAT_ANIMATION_CAPTURE: '',
     } : {}),
     // Where the panel remembers where the user put it. Pointed at the throwaway home so
     // that developing never edits the real user's remembered position.

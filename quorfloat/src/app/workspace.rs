@@ -8,13 +8,19 @@
 //! | P0 | the directory this window last chose | our own pinned workspace, **validated** against the host's list |
 //! | P1 | the running conversation's directory | the session list's `running` flag |
 //! | P2 | the first-use default | left to the host, by asking for no particular workspace |
-//! | P3 | the most recently active workspace | the list, aggregated by newest conversation |
+//! | P3 | the most recently active workspace | the list, aggregated by its own members' newest conversation |
 //! | P4 | ask the user | the picker, when there is nothing to go on at all |
 //!
 //! P0 is validated because a pinned workspace can stop existing — the Harness can forget a
 //! directory between two runs — and a creation aimed at a workspace that is gone is a failure
 //! the user cannot act on. P2 is not a value at all: it is the absence of one, which the host
 //! answers by creating or choosing its default.
+//!
+//! **Membership, not paths.** Which conversations belong to a workspace is the registry's own
+//! `sessionIds` account, carried on every `workspaces/list` row, and no path comparison remains
+//! on any hot path. (A path-equality fallback for a conversation the registry did not account
+//! for had no callers and was deleted on 2026-10-11; the separator/case rule it encoded is now
+//! recorded in `docs/AGENT.md`.)
 
 use crate::app::session::follow::{SessionSummary, Workspace};
 
@@ -52,32 +58,29 @@ pub fn to_create_in(
 
 /// The workspace whose newest conversation is the newest overall.
 ///
+/// The score is the newest `updatedAt` among the workspace's own members — the `sessionIds` the
+/// registry accounts to it, **not** every conversation whose path happens to be under the same
+/// directory: a conversation can be moved out of a workspace without its directory changing, and
+/// the registry is what knows. A workspace with no members scores its own `createdAt`, so a
+/// directory that was just added is still a candidate. Replacement is strictly greater, so two
+/// workspaces with the same score keep the first the host listed.
+///
 /// @param workspaces - the host's list.
 /// @param sessions - the host's conversations.
 /// @returns that workspace's id, or `None` when nothing can be told from the lists.
 #[must_use]
 pub fn recent(workspaces: &[Workspace], sessions: &[SessionSummary]) -> Option<String> {
-    workspaces
-        .iter()
-        .filter_map(|workspace| {
-            let newest = sessions
-                .iter()
-                .filter(|session| session.cwd.as_deref().is_some_and(|cwd| same_directory(&workspace.path, cwd)))
-                .map(|session| session.updated_at)
-                .max()?;
-            Some((workspace.workspace_id.clone(), newest))
-        })
-        .max_by_key(|(_, newest)| *newest)
-        .map(|(workspace_id, _)| workspace_id)
-}
-
-/// Whether two paths name the same directory.
-///
-/// @param left - one path, as the host wrote it.
-/// @param right - the other.
-/// @returns whether they are the same directory, trailing separators aside.
-#[must_use]
-pub fn same_directory(left: &str, right: &str) -> bool {
-    let trim = |path: &str| path.trim_end_matches(['/', '\\']).to_owned();
-    !left.is_empty() && trim(left) == trim(right)
+    let mut best: Option<(String, i64)> = None;
+    for workspace in workspaces {
+        let newest = sessions
+            .iter()
+            .filter(|session| workspace.session_ids.iter().any(|id| id == &session.session_id))
+            .map(|session| session.updated_at)
+            .max()
+            .unwrap_or(workspace.created_at);
+        if best.as_ref().is_none_or(|(_, score)| newest > *score) {
+            best = Some((workspace.workspace_id.clone(), newest));
+        }
+    }
+    best.map(|(workspace_id, _)| workspace_id)
 }

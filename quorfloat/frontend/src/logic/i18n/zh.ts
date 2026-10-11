@@ -46,6 +46,10 @@ export const zh: Record<MessageKey, string> = {
   'workspace.listPending': '工作区列表还没到。',
   'workspace.chooseHint': '选择工作区后，新会话在此开始。',
   'workspace.pinName': '工作区 {name}',
+  // 不属于任何工作区的会话：只是一个说法，不是可选目标，也不会出现在工作区选择器里。
+  'workspace.ungrouped': '未分组',
+  // 宿主无法提供首个工作区，只能去 Harness 里建一个；仅在上报"请求已失败"时出现。
+  'workspace.needHost': '还没有工作区，请先在 Harness 窗口里创建一个。',
 
   // Conversation (session) picker.
   'session.heading': '会话',
@@ -56,6 +60,9 @@ export const zh: Record<MessageKey, string> = {
   'session.pinnedHint': '呼出时继续固定会话。',
   'session.unpinnedHint': '固定会话后，每次呼出继续此会话。',
   'session.pinName': '会话 {name}',
+  // 固定失效的原因：线上只传 reason，句子在这里。
+  'session.pinNotice.sessionGone': '固定会话已不存在，已取消固定。',
+  'session.pinNotice.workspaceGone': '固定工作区已不存在，已取消该固定。',
 
   // Pin toggles.
   'pin.pinName': '固定{name}',

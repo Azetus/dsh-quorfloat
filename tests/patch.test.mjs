@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { join } from 'node:path'
 
-import { loadModule, repoRoot } from './helpers.mjs'
+import { homeDir, loadModule, repoRoot } from './helpers.mjs'
 
 const { Config, DEFAULT_CONFIG } = await loadModule('config.js')
 
@@ -27,9 +27,11 @@ async function loadPatch() {
 
 /** Import a YAML parser from the Harness installation or the toolchain. */
 async function importYaml() {
+  // `homeDir()` rather than `process.env['HOME']`: on Windows the profile lives
+  // under `USERPROFILE` and a relative specifier would throw here too.
   const candidates = [
-    join(process.env['HOME'] ?? '', '.dsh/profiles/node_modules/yaml/dist/index.js'),
-    join(process.env['HOME'] ?? '', '.dsh/profiles/node_modules/js-yaml/index.js'),
+    join(homeDir(), '.dsh/profiles/node_modules/yaml/dist/index.js'),
+    join(homeDir(), '.dsh/profiles/node_modules/js-yaml/index.js'),
   ]
   for (const candidate of candidates) {
     try {

@@ -8,7 +8,7 @@
  */
 
 import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -19,10 +19,30 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
  */
 export const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 
+/**
+ * The home directory that holds the Harness profile (`~/.dsh`).
+ *
+ * `HOME` is a POSIX convention: cmd.exe and PowerShell do not set it, they set
+ * `USERPROFILE`. Reading `HOME` alone therefore produced the *empty* base on
+ * Windows, so `join('', '.dsh/profiles/...')` was a **relative** module
+ * specifier and `await import()` threw `ERR_INVALID_MODULE_SPECIFIER`. In
+ * `loadCordis` that rejection happens at the top level of `plugin-smoke.test.mjs`
+ * and took the whole file — and therefore the Windows leg — red for
+ * infrastructure reasons rather than plugin reasons.
+ *
+ * Every test that locates the profile resolves it here, so there is exactly one
+ * platform-sensitive spelling. `DSH_CORDIS_PATH` remains the explicit override.
+ */
+export function homeDir() {
+  const configured = process.env['HOME'] ?? process.env['USERPROFILE']
+  // An empty value is as unusable as an unset one, so it falls through too.
+  return configured !== undefined && configured !== '' ? configured : homedir()
+}
+
 /** Load the real Cordis framework. */
 export async function loadCordis() {
   const cordis = process.env['DSH_CORDIS_PATH'] ??
-    join(process.env['HOME'] ?? '', '.dsh/profiles/node_modules/@deepseek-ai/cordis/lib/index.js')
+    join(homeDir(), '.dsh/profiles/node_modules/@deepseek-ai/cordis/lib/index.js')
   const module = await import(pathToFileURL(cordis).href)
   if (typeof module.Context !== 'function') {
     throw new Error(`could not load the Cordis Context from ${cordis}`)
@@ -105,6 +125,9 @@ export async function buildSupervisor({ mode = 'normal', config = {}, reportPath
   const harnessHost = {
     hostVersion: () => 'test-host',
     listWorkspaces: async () => [{ workspaceId: 'w1', path: '/tmp/ws', title: 'ws' }],
+    // The host-side half of `workspace/default`: it creates or resolves the first-use default,
+    // and "nothing to create" is an empty list rather than a failure.
+    initializeDefaultWorkspace: async () => [],
     listSessions: async () => ({ items: [] }),
     createSession: async () => ({ sessionId: 'session-1' }),
     attachSession: async sessionId => ({ sessionId }),

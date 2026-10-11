@@ -50,6 +50,12 @@ export const en = {
   'workspace.listPending': 'The workspace list has not arrived yet.',
   'workspace.chooseHint': 'New conversations start in the chosen workspace.',
   'workspace.pinName': 'Workspace {name}',
+  // The fact that a conversation belongs to no workspace. A label, never a target: it is not
+  // offered in the picker and no conversation is created in it.
+  'workspace.ungrouped': 'Ungrouped',
+  // The host could not provide a first-use workspace, so only the Harness can. Shown **only**
+  // when the shell asked and was refused (or failed).
+  'workspace.needHost': 'No workspace yet — create one in the Harness window.',
 
   // Conversation (session) picker.
   'session.heading': 'Conversation',
@@ -60,6 +66,9 @@ export const en = {
   'session.pinnedHint': 'The pinned conversation opens on every summon.',
   'session.unpinnedHint': 'Pin a conversation to keep opening it on every summon.',
   'session.pinName': 'Conversation {name}',
+  // Why a half of the pin was forgotten. The wire carries the reason; the sentence is here.
+  'session.pinNotice.sessionGone': 'The pinned conversation is gone; the pin was cleared.',
+  'session.pinNotice.workspaceGone': 'The pinned workspace is gone; the workspace pin was cleared.',
 
   // Pin toggles.
   'pin.pinName': 'Pin {name}',

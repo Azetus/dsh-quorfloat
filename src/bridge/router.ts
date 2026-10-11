@@ -73,6 +73,15 @@ export interface RouterHost {
   channelSessionId(): string
   /** List Harness workspaces the user can choose from. */
   listWorkspaces(): Promise<readonly WorkspaceView[]>
+  /**
+   * Initialize (or resolve) the Harness's first-use default workspace.
+   *
+   * A command rather than a read, and deliberately its own method: `workspaces/list` never
+   * creates anything, so a peer that wants the host to make a workspace has to say so. An
+   * empty list means the host declined — never an error, because the peer's next step is to
+   * prompt the user rather than to fail.
+   */
+  initializeDefaultWorkspace(): Promise<readonly WorkspaceView[]>
   /** List sessions visible in the Harness session list. */
   listSessions(cursor?: string): Promise<{ items: readonly SessionSummaryView[] }>
   /** Create or idempotently adopt one session inside a workspace. */
@@ -126,6 +135,7 @@ export const METHODS = [
   'hello',
   'window/visibility',
   'workspaces/list',
+  'workspace/default',
   'sessions/list',
   'session/create',
   'session/attach',
@@ -228,6 +238,12 @@ export class HostRouter {
         return { visible: this.#readVisibility(params) }
       case 'workspaces/list':
         return { items: await this.#host.listWorkspaces() }
+      case 'workspace/default':
+        // No parameters, and no required ones: the peer is asking the host to make its
+        // first-use workspace, and the host decides the directory. The shape is the same
+        // `{ items }` as `workspaces/list`, so the peer reads both answers with one parser; an
+        // empty list is the host saying it will not (or cannot) create one.
+        return { items: await this.#host.initializeDefaultWorkspace() }
       case 'sessions/list':
         return await this.#host.listSessions(this.#optionalString(params, 'cursor'))
       case 'session/create':

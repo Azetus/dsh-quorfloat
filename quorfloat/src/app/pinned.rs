@@ -11,15 +11,17 @@
 //! - **A pin that cannot be honoured is dropped rather than kept.** A pinned conversation
 //!   the host no longer lists must not leave the panel attached to nothing: the follow
 //!   layer validates the pin against the list it receives and forgets an unlisted one,
-//!   which puts the panel back into "new conversation" mode.
+//!   which puts the panel back into "new conversation" mode. The workspace half is validated
+//!   the same way, against the workspace list, and forgotten on its own.
 //!
-//! **The two fields are not two facts.** The session pin is
-//! *the* pin — "which conversation opens next". The workspace field is either its
-//! projection (the pinned conversation's own workspace) or, with no session pin, the
-//! default directory for a new conversation (the P0 rung of the workspace ladder).
-//! The bridge (`app/bridge.rs`) is the one place that enforces this invariant on every
-//! write; a file written by an older build may hold any combination, and is read
-//! leniently: with a session pin, the workspace field is ignored at adoption.
+//! **The two fields are two independent facts.** The session field is *the* pin — "which
+//! conversation opens next", the panel's home. The workspace field is a pin of its own —
+//! "where a new conversation is created" — and it is never derived from the conversation, nor
+//! the other way around. Only a user gesture sets or clears either half, the program clears a
+//! half only when that half itself has been shown to be invalid, and a gesture on one half
+//! leaves the other exactly as it was. A file written by an older build (which did treat the
+//! workspace field as the session pin's projection) is read leniently: it is simply a file
+//! with two independent pins, and each is validated on its own.
 
 use std::path::PathBuf;
 
@@ -29,6 +31,8 @@ pub struct Pinned {
     /// The conversation to open, if one is pinned.
     pub session: Option<String>,
     /// The workspace new conversations are created in, if one is pinned.
+    ///
+    /// Independent of [`Pinned::session`]: either half may be remembered without the other.
     pub workspace: Option<String>,
 }
 

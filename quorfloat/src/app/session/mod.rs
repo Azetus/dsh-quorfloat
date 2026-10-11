@@ -857,6 +857,50 @@ impl Session {
         self.follow.workspaces_asked()
     }
 
+    /// Whether the workspace list has been answered at least once.
+    ///
+    /// The distinction the picker needs: "not arrived yet" and "there are none" are different
+    /// facts, and only the second one is a reason to ask the host for a default workspace.
+    #[must_use]
+    pub fn workspaces_loaded(&self) -> bool {
+        self.follow.workspaces_loaded()
+    }
+
+    /// What came of asking the host for its first-use default workspace.
+    #[must_use]
+    pub fn default_workspace(&self) -> crate::app::session::follow::DefaultWorkspaceState {
+        self.follow.default_workspace()
+    }
+
+    /// The workspace pinned as the default for a new conversation, if any.
+    #[must_use]
+    pub fn pinned_workspace(&self) -> Option<&str> {
+        self.follow.pinned_workspace()
+    }
+
+    /// Why a half of the pin was forgotten, until the user summons again.
+    #[must_use]
+    pub fn pin_notice(&self) -> Option<crate::app::session::follow::PinNotice> {
+        self.follow.pin_notice()
+    }
+
+    /// Take the fact that a half of the pin was forgotten, so the shell can write the file.
+    pub fn take_pins_changed(&mut self) -> bool {
+        self.follow.take_pins_changed()
+    }
+
+    /// Start a visit: a summon is a new visit, and the last one's explanation is over.
+    pub fn begin_visit(&mut self) {
+        self.follow.begin_visit();
+    }
+
+    /// Pin (or unpin) the workspace a new conversation defaults to.
+    ///
+    /// @param workspace_id - which workspace, or `None` to stop pinning one.
+    pub fn pin_workspace(&mut self, workspace_id: Option<String>) {
+        self.follow.set_pinned_workspace(workspace_id);
+    }
+
     /// The conversation the user pinned, if any.
     #[must_use]
     pub fn pinned_conversation(&self) -> Option<&str> {
@@ -875,11 +919,14 @@ impl Session {
     /// which conversation that answer attaches, so it has to be in place first.
     ///
     /// @param session_id - the pinned conversation, if one was remembered.
-    pub fn adopt_pinned(&mut self, session_id: Option<String>) {
+    /// @param workspace_id - the pinned workspace, if one was remembered. It is an independent
+    ///   fact: a file may hold either half without the other, and neither is derived from the
+    ///   other at adoption.
+    pub fn adopt_pinned(&mut self, session_id: Option<String>, workspace_id: Option<String>) {
         // The pinned conversation is a different one from whatever was attached before, so the
         // previous one's effort and permission must not be shown as this one's.
         self.forget_settings_for_another_conversation();
-        self.follow.adopt_pinned(session_id);
+        self.follow.adopt_pinned(session_id, workspace_id);
     }
 
     /// Open one conversation, now.
@@ -999,6 +1046,9 @@ impl Session {
         let frame = match &outgoing {
             Outgoing::ListSessions => rpc::request(id, "sessions/list", json!({})),
             Outgoing::ListWorkspaces => rpc::request(id, "workspaces/list", json!({})),
+            // No parameters: the host's `workspaceController.initializeDefault` decides the
+            // directory, creates it, and registers it. The panel only asks for it to exist.
+            Outgoing::DefaultWorkspace => rpc::request(id, "workspace/default", json!({})),
             Outgoing::PanelLifecycle { action } => {
                 rpc::request(id, "panel/lifecycle", json!({ "action": action.wire() }))
             }

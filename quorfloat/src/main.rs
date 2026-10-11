@@ -175,17 +175,18 @@ fn run() -> Result<SessionExit, String> {
             registered: hotkey.is_active(),
         },
     })));
-    // The pin file, read once: its session half is adopted by the follow layer
-    // (which validates it against the list it will receive), its workspace half
-    // seeds the new-conversation default (P0). The two are one fact, not two —
-    // see `app/pinned.rs`.
+    // The pin file, read once: its session half is adopted by the follow layer (which
+    // validates it against the list it will receive), and its workspace half is adopted as
+    // the new-conversation default (P0). They are **two independent facts** that happen to
+    // share a file — neither is derived from the other, and a gesture on one never clears
+    // the other — see `app/pinned.rs`.
     let pinned = pinned_path
         .as_deref()
         .map(dsh_quorfloat::app::pinned::Pinned::load)
         .unwrap_or_default();
     {
         let mut session = lock(&session);
-        session.adopt_pinned(pinned.session.clone());
+        session.adopt_pinned(pinned.session.clone(), pinned.workspace.clone());
     }
 
     // Shared with the sink, so a breadcrumb written from inside the session (an
@@ -210,9 +211,15 @@ fn run() -> Result<SessionExit, String> {
         hotkey_registered: hotkey.is_active(),
         hotkey_reason: hotkey.reason().map(str::to_owned),
         preferences,
-        pinned_workspace: pinned.workspace.clone(),
         visible: settings.start_visible,
         height: Height::new(),
+        // The summon counter's lifetime. A panel reload (a webview reload, or a restart of
+        // this process) resets the count, and the frontend must not read that reset as a
+        // summon — so the count is only meaningful beside a token that changes with the
+        // process. The pid and the start instant are the facts that change when this process
+        // does, and both are already read here.
+        summon_token: format!("{}-{}", std::process::id(), rpc::now_millis()),
+        summon_count: 0,
     }));
     // The effective settings at startup, on the record: the ground truth the
     // settings page's controls are rendered from, before any host frame or
@@ -333,7 +340,7 @@ fn run() -> Result<SessionExit, String> {
                 view: Arc::clone(&shell_view),
                 hotkey: Mutex::new(Some(hotkey)),
                 height_tx: wake_tx.clone(),
-                pinned_path,
+                pinned_path: pinned_path.clone(),
                 preferences_path,
                 tray: Arc::clone(&shell_tray),
                 marker: shell_marker.clone(),
@@ -395,6 +402,9 @@ fn run() -> Result<SessionExit, String> {
                 Arc::clone(&shell_sink),
                 Arc::clone(&shell_outcome),
                 emit,
+                // Where an invalidation decided in the follow layer becomes durable. The shell
+                // owns the path; the session owns the decision.
+                pinned_path.clone(),
             )
             .map_err(|error| format!("could not start the clock thread: {error}"))?;
 
@@ -551,10 +561,7 @@ fn submit(
     workspace_id: Option<String>,
 ) -> Value {
     with_session(&state, |session, sink| {
-        // The ladder's P0 rung is the shell's fact. It is read inside the closure so the lock
-        // order stays session-then-view, exactly as `with_session`'s own `emit` takes it.
-        let pinned = lock(&state.view).pinned_workspace.clone();
-        bridge::submit(session, sink, &text, workspace_id.as_deref(), pinned.as_deref())
+        bridge::submit(session, sink, &text, workspace_id.as_deref())
     })
 }
 
@@ -600,16 +607,23 @@ fn select_session(state: tauri::State<'_, ShellRuntime>, session_id: String) -> 
 }
 
 /// `start_new` — go back to "new conversation" mode.
+///
+/// The pin file is written by the bridge: this gesture lets go of the session pin, and a pin the
+/// user dropped must not be back on the next run. The workspace half is untouched.
 #[tauri::command]
 fn start_new(state: tauri::State<'_, ShellRuntime>) -> Value {
-    with_session(&state, |session, sink| bridge::start_new(session, sink))
+    let pinned_path = state.pinned_path.clone();
+    let mut session = lock(&state.session);
+    let result = state.sink.with(|sink| bridge::start_new(&mut session, sink, pinned_path.as_deref()));
+    drop(session);
+    (state.emit)();
+    result
 }
 
 /// `pin` — pin one conversation (or stop pinning), remembered across runs.
 ///
-/// The workspace projection the bridge computed is put into the shell's view
-/// *before* the snapshot is emitted, so the frontend sees the pin and its
-/// projection in one state.
+/// The bridge writes the file and the snapshot reads the pins back from the session, so there
+/// is nothing for the shell to patch in between: both halves are one state, emitted once.
 #[tauri::command]
 fn pin(state: tauri::State<'_, ShellRuntime>, session_id: Option<String>) -> Value {
     let pinned_path = state.pinned_path.clone();
@@ -618,13 +632,14 @@ fn pin(state: tauri::State<'_, ShellRuntime>, session_id: Option<String>) -> Val
         bridge::pin(&mut session, sink, session_id.as_deref(), pinned_path.as_deref())
     });
     drop(session);
-    apply_pinned_workspace(&state.view, &result);
     (state.emit)();
     result
 }
 
-/// `pin_workspace` — pin the default directory for a new conversation, leaving
-/// the current one (a new-conversation-state action by design).
+/// `pin_workspace` — pin the default directory for a new conversation.
+///
+/// The workspace half only, and it leaves the conversation on screen alone: the two pins are
+/// independent facts (see `app/pinned.rs`).
 #[tauri::command]
 fn pin_workspace(state: tauri::State<'_, ShellRuntime>, workspace_id: Option<String>) -> Value {
     let pinned_path = state.pinned_path.clone();
@@ -633,18 +648,8 @@ fn pin_workspace(state: tauri::State<'_, ShellRuntime>, workspace_id: Option<Str
         bridge::pin_workspace(&mut session, sink, workspace_id.as_deref(), pinned_path.as_deref())
     });
     drop(session);
-    apply_pinned_workspace(&state.view, &result);
     (state.emit)();
     result
-}
-
-/// Put the bridge's workspace projection into the shell's view.
-fn apply_pinned_workspace(view: &Arc<Mutex<ShellView>>, result: &Value) {
-    let mut view = lock(view);
-    view.pinned_workspace = result
-        .get("pinnedWorkspace")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
 }
 
 /// `request_workspaces` — ask the host for the workspace list.
@@ -1046,7 +1051,10 @@ fn spawn_dispatcher(
                             // do not reset — that is the host's intent, not a summon.
                             {
                                 let mut session = lock(&session);
-                                let _ = sink.with(|sink| bridge::on_show(&mut session, sink));
+                                // The shell's facts are locked second, the same order `emit`
+                                // takes them in: session, then view.
+                                let mut view = lock(&view);
+                                let _ = sink.with(|sink| bridge::on_show(&mut session, &mut view, sink));
                             }
                             report_visibility(&session, &sink, visible, &capabilities);
                             emit();
@@ -1337,11 +1345,13 @@ fn resize(
 /// @param sink - where the follow requests go.
 /// @param outcome - set when the session ends; the thread stops seeing it.
 /// @param nudge - how to tell the frontend the state changed.
+/// @param pinned_path - where a pin the follow layer invalidated is written down.
 fn spawn_clock(
     session: Arc<Mutex<Session>>,
     sink: Arc<SharedSink>,
     outcome: Arc<Mutex<Option<SessionExit>>>,
     nudge: Arc<dyn Fn() + Send + Sync>,
+    pinned_path: Option<std::path::PathBuf>,
 ) -> std::io::Result<()> {
     std::thread::Builder::new()
         .name("quorfloat-clock".to_owned())
@@ -1350,11 +1360,20 @@ fn spawn_clock(
             if lock(&outcome).is_some() {
                 return;
             }
-            {
+            let wrote_pin = {
                 let mut session = lock(&session);
                 sink.with(|sink| session.pump_follow(sink));
+                // A pin the follow layer forgot (an absent conversation, a gone workspace, a
+                // definitive refusal) has to stop being remembered across runs, and only this
+                // side knows where the file is. Written here so the decision and the record
+                // are the same tick.
+                bridge::persist_pins(&mut session, pinned_path.as_deref())
+            };
+            if wrote_pin {
+                // The panel's status line explains the loss; without this nudge it would keep
+                // drawing the old pin until the next clock tick happened to change something.
+                nudge();
             }
-            nudge();
         })
         .map(|_| ())
 }

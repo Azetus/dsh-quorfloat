@@ -88,7 +88,11 @@ function main() {
     console.error(
       `${problem}\n` +
         'Set DSH_APP_ASAR to the app.asar path inside the installed DeepSeek Harness ' +
-        '(on macOS the default is /Applications/DeepSeek Harness.app/Contents/Resources/app.asar).',
+        '(on macOS the default is /Applications/DeepSeek Harness.app/Contents/Resources/app.asar).\n' +
+        (process.platform === 'darwin'
+          ? 'The conformance tests skip while the contract is missing; that skip is not a green signal.'
+          : `Without it the conformance tests cannot skip on ${process.platform}; they fail, ` +
+            'because "not verifiable here" must not read as green.'),
     )
     process.exit(1)
   }

@@ -42,8 +42,11 @@ export function WorkspacePicker({ state, targetWorkspace, open, onToggle, onClos
       open={open}
       onToggle={() => {
         // The host sends the workspace list only when asked, and the panel asks when the user
-        // first looks at the picker — without this the picker would show an empty list.
-        if (state.session.workspaces.length === 0) void api.requestWorkspaces()
+        // first looks at the picker — without this the picker would show an empty list. An
+        // *answered* non-empty list is not asked for again; an empty one is, because that is
+        // the one state the user can fix outside this panel (by creating a workspace in the
+        // Harness), and a picker that refused to look again would leave them stuck.
+        if (!state.session.workspacesLoaded || state.session.workspaces.length === 0) void api.requestWorkspaces()
         onToggle()
       }}
       onClose={onClose}

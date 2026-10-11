@@ -170,6 +170,18 @@ export class SessionLayer {
     return this.#deps.harness.listWorkspaces()
   }
 
+  /**
+   * Initialize (or resolve) the Harness's first-use default workspace.
+   *
+   * A thin pass-through, like {@link SessionLayer.listWorkspaces}: the adapter owns what
+   * "initialize" means upstream, and this layer owns only the fact that the peer asked. The
+   * adapter's contract is "never throws, empty list means none" — so the peer's answer is
+   * always a list, and the panel's `defaultWorkspace` state is derived from whether it has one.
+   */
+  async initializeDefaultWorkspace(): Promise<readonly WorkspaceView[]> {
+    return await this.#deps.harness.initializeDefaultWorkspace()
+  }
+
   /** List Harness sessions. */
   async listSessions(): Promise<readonly SessionSummaryView[]> {
     return await this.#deps.harness.listSessions()

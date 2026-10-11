@@ -14,6 +14,7 @@ import { pinToBottom } from '../logic/bottom-pin'
 import { usePanelDynamics } from '../hooks/usePanelDynamics'
 import { SHADOW_ROOM, type Painted } from '../logic/panel'
 import type { Snapshot } from '../logic/state'
+import { observeSummon, type SummonMark } from '../logic/summon'
 import { isBusy, targetWorkspace } from '../logic/view-text'
 import { ConversationPage } from './conversation/ConversationPage'
 import { Footer } from './footer/Footer'
@@ -51,8 +52,21 @@ export function App({ state }: AppProps) {
   // is that pin, validated), so seeding would only add a second copy that can go stale when
   // the pin moves.
   const [workspaceChoice, setWorkspaceChoice] = useState<string | null>(null)
+  // The last summon counter this panel saw, with the process lifetime it belonged to. A reload
+  // or a sidecar restart changes the token, and that is *not* a summon: without the mark, the
+  // counter's reset would clear a choice the user is still making (see `logic/summon.ts`).
+  const summonMark = useRef<SummonMark | null>(null)
 
   useDocumentPreferences(state.settings)
+
+  // A summon begins a new visit, so the workspace chosen for the last one is over. Cleared
+  // here — the only place that knows a summon happened — rather than in the shell, because the
+  // choice belongs to this page's visit and dies with it.
+  useEffect(() => {
+    const observation = observeSummon(summonMark.current, state.window.summon)
+    summonMark.current = observation.mark
+    if (observation.summoned) setWorkspaceChoice(null)
+  }, [state.window.summon])
 
   // The room the native window gives the panel: the product cap is a ceiling, not a
   // promise. It is part of the markup (below) so that everything inside the panel —

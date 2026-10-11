@@ -73,6 +73,7 @@ struct Grab {
 // state has to be `Send`, and `Send` is all that `Mutex` asks of it — the `Sync` half of upstream's
 // macOS assertion is deliberately not claimed here, because no `&Grab` ever crosses a thread. Every
 // use goes through `Deref` and every drop through `Drop`, and both re-check `owner` in debug builds.
+// This `unsafe` is required by this crate's platform difference and is Tauri's official approach.
 unsafe impl Send for Grab {}
 
 impl Grab {

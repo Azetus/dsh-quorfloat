@@ -70,9 +70,26 @@ export function WorkspaceMenu({ state, targetWorkspace, onChoose, onClose }: Wor
         )
       })}
       <MenuSeparator />
-      <MenuHint text={state.session.workspaces.length === 0
-        ? t('workspace.listPending')
-        : t('workspace.chooseHint')} />
+      <MenuHint text={t(workspaceHint(state))} />
     </>
   )
+}
+
+/**
+ * What the workspace menu says when there is nothing to pick.
+ *
+ * Three different facts, and the whole point of `workspacesLoaded` is that they are not one:
+ * a list that has not been answered yet needs patience; a list that was answered empty is
+ * either waiting for the host's default (the request is out) or a refusal the user can only
+ * fix in the Harness. The `workspace.needHost` prompt belongs to the refusal and to nothing
+ * else — showing it while the default is still being created would send the user away from a
+ * panel that was about to have a workspace.
+ *
+ * @param state - the snapshot.
+ * @returns the dictionary key for the hint.
+ */
+function workspaceHint(state: Snapshot): 'workspace.listPending' | 'workspace.needHost' | 'workspace.chooseHint' {
+  if (!state.session.workspacesLoaded) return 'workspace.listPending'
+  if (state.session.workspaces.length > 0) return 'workspace.chooseHint'
+  return state.session.defaultWorkspace.state === 'failed' ? 'workspace.needHost' : 'workspace.listPending'
 }

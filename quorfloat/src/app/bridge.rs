@@ -50,11 +50,6 @@ pub struct ShellView {
     pub hotkey_registered: bool,
     /// Why the last attempt did not become the held one, when it did not.
     pub hotkey_reason: Option<String>,
-    /// The workspace a *new* conversation defaults to (the P0 rung), when there
-    /// is no session pin. With a session pin, this is its projection — the
-    /// pinned conversation's own workspace — and the frontend hides the pin
-    /// control for it.
-    pub pinned_workspace: Option<String>,
     /// Whether the panel's native window is on screen right now.
     ///
     /// Owned by the dispatcher — it is the only thread that touches the window —
@@ -63,6 +58,16 @@ pub struct ShellView {
     pub visible: bool,
     /// The height coordination state machine.
     pub height: Height,
+    /// Which lifetime of this process the summon counter belongs to.
+    ///
+    /// A count alone cannot tell a summon from a reload: a webview reload or a sidecar restart
+    /// starts the count over, and the frontend would read the reset as a new visit and throw
+    /// away the workspace the user chose. The token is derived once, at startup, from facts
+    /// that change when the process does (see `main.rs`), so "same token, higher count" is the
+    /// only thing the frontend treats as a summon.
+    pub summon_token: String,
+    /// How many times the user has summoned the panel in this process's lifetime.
+    pub summon_count: u64,
 }
 
 /// The state the frontend renders, as JSON.
@@ -101,6 +106,13 @@ pub fn snapshot(session: &Session, shell: &ShellView) -> Value {
         },
         "window": {
             "visible": shell.visible,
+            // The summon counter and the lifetime it belongs to. Both are shell facts; the
+            // frontend clears the visit's workspace choice only when the count rises *within
+            // one token* (see `logic/summon.ts`).
+            "summon": {
+                "token": shell.summon_token,
+                "count": shell.summon_count,
+            },
         },
         "session": {
             "ready": session.is_ready(),
@@ -114,13 +126,18 @@ pub fn snapshot(session: &Session, shell: &ShellView) -> Value {
                 "stale": follow.stale(),
             })),
             "pinned": session.pinned_conversation(),
-            "pinnedWorkspace": shell.pinned_workspace,
+            // The workspace half of the pin, which is *independent* of the conversation half:
+            // it is where a new conversation starts, never a projection of the pinned one.
+            "pinnedWorkspace": session.pinned_workspace(),
+            // Why a half of the pin was forgotten, as a reason the frontend turns into copy.
+            // Never a sentence: the panel's text lives in its own dictionaries.
+            "pinNotice": session.pin_notice().map(|notice| json!({ "kind": notice.wire() })),
             // Where a conversation submitted right now would be created. The panel shows it in
             // its workspace field, so that state and the ladder cannot disagree: without it the
             // field says "选择工作区" while the create is already resolved to a real one. It is
             // the same resolution `submit` uses, with no panel choice to prefer — the panel's own
             // pick is not the shell's to know.
-            "createWorkspace": create_workspace(session, None, shell.pinned_workspace.as_deref()),
+            "createWorkspace": create_workspace(session, None),
             "chosen": session.target_conversation(),
             "createFailure": follow.create_failure(),
             "conversations": session
@@ -143,9 +160,23 @@ pub fn snapshot(session: &Session, shell: &ShellView) -> Value {
                     "workspaceId": workspace.workspace_id,
                     "title": workspace.title,
                     "path": workspace.path,
+                    // The registry's own membership account. A consumer intersects it with the
+                    // conversations it can see: it can name a conversation the session list no
+                    // longer shows (or a subagent, which the session list never shows).
+                    "sessionIds": workspace.session_ids,
+                    // Epoch milliseconds, and one unit end to end: the host converts the
+                    // registry's ISO timestamp once, here it is a number, and the frontend
+                    // guards it again on the way in.
+                    "createdAt": workspace.created_at,
                 }))
                 .collect::<Vec<_>>(),
             "workspacesAsked": session.workspaces_asked(),
+            // Whether that ask has been *answered*: "not arrived yet" and "there are none" are
+            // different facts, and the picker says different things about them.
+            "workspacesLoaded": session.workspaces_loaded(),
+            // What came of asking the host for its first-use default workspace. The
+            // `workspace.needHost` prompt belongs to `failed` and to nothing else.
+            "defaultWorkspace": { "state": session.default_workspace().wire() },
             "options": session.options().map(options_view),
             "stats": session.stats().map(|stats| stats_view(&stats)),
             "settingFailure": session.setting_failure(),
@@ -358,18 +389,10 @@ fn theme_name(theme: crate::app::theme::Preference) -> &'static str {
 /// @param sink - where the request goes.
 /// @param text - the user's text; blank input is refused by the session.
 /// @param workspace_id - the workspace the panel chose for a new conversation, if any.
-/// @param pinned_workspace - the workspace this window last chose: the ladder's P0 rung,
-///   which the shell owns and the panel cannot see.
 /// @returns the delivery, in the frontend's vocabulary.
 #[must_use]
-pub fn submit(
-    session: &mut Session,
-    sink: &mut dyn FrameSink,
-    text: &str,
-    workspace_id: Option<&str>,
-    pinned_workspace: Option<&str>,
-) -> Value {
-    let workspace_id = create_workspace(session, workspace_id, pinned_workspace);
+pub fn submit(session: &mut Session, sink: &mut dyn FrameSink, text: &str, workspace_id: Option<&str>) -> Value {
+    let workspace_id = create_workspace(session, workspace_id);
     let delivery = session.send_prompt(text, workspace_id.as_deref(), sink);
     json!({ "delivery": delivery_view(&delivery) })
 }
@@ -379,18 +402,17 @@ pub fn submit(
 /// The panel's own choice wins while it still names one of the host's workspaces — the
 /// picker only offers those, so a value the list no longer has is a stale snapshot rather
 /// than an instruction. Everything else falls to the ladder in [`crate::app::workspace`],
-/// which validates its own rungs: P0 is this window's own choice, P3 is the most recently
+/// which validates its own rungs: P0 is this window's own pin, P3 is the most recently
 /// active workspace, and `None` is P4 — nothing to go on, so the panel has to ask the user.
 ///
 /// The panel sends its choice when it has one and usually has none in the new-conversation
 /// state, so without this the ladder is never consulted and a submit fails with "choose a
 /// workspace" while the host is listing several.
 ///
-/// @param session - the session, which holds the host's lists.
+/// @param session - the session, which holds the host's lists and the workspace pin.
 /// @param chosen - what the panel sent, if anything.
-/// @param pinned - this window's P0 rung, if any.
 /// @returns the workspace to ask for, or `None` when only the user can decide.
-fn create_workspace(session: &Session, chosen: Option<&str>, pinned: Option<&str>) -> Option<String> {
+fn create_workspace(session: &Session, chosen: Option<&str>) -> Option<String> {
     let follow = session.follow();
     let workspaces = follow.workspaces();
     chosen
@@ -399,7 +421,7 @@ fn create_workspace(session: &Session, chosen: Option<&str>, pinned: Option<&str
         .map(str::to_owned)
         // Nothing is on screen in the new-conversation state, so the ladder's P1 (the running
         // conversation's directory) cannot apply: this is P0, then P3, then the user.
-        .or_else(|| workspace::to_create_in(pinned, None, false, workspaces, follow.sessions()))
+        .or_else(|| workspace::to_create_in(session.pinned_workspace(), None, false, workspaces, follow.sessions()))
 }
 
 /// `cancel` — stop the turn being generated.
@@ -457,21 +479,29 @@ pub fn select_session(session: &mut Session, sink: &mut dyn FrameSink, session_i
 }
 
 /// `start_new` — go back to "new conversation" mode, dropping the followed one.
+///
+/// The panel's own "new conversation" action also lets go of the pin (that is what the gesture
+/// means here), so the file is brought up to date: a pin the user dropped must not come back on
+/// the next run. The workspace half is not touched.
+///
+/// @param pinned_path - where the pin is remembered; `None` is "nowhere to write".
 #[must_use]
-pub fn start_new(session: &mut Session, sink: &mut dyn FrameSink) -> Value {
+pub fn start_new(session: &mut Session, sink: &mut dyn FrameSink, pinned_path: Option<&std::path::Path>) -> Value {
     session.start_new_conversation(sink);
+    save_pins(session, pinned_path);
     json!({})
 }
 
 /// `pin` — pin one conversation (or stop pinning), and remember it across runs.
 ///
-/// The workspace field in the pin file is the session pin's **projection**: pinning a
-/// conversation rewrites it to that conversation's own workspace, so the file can never
-/// hold a pinned session and a different pinned workspace at once.
+/// **The session half only.** The workspace half of the file is left exactly as it was: the two
+/// pins are independent facts, and "always open this conversation" says nothing about where a
+/// *new* one starts. A file written by an older build is read leniently, and nothing here ever
+/// derives one half from the other.
 ///
 /// @param session_id - which one, or `None`.
 /// @param pinned_path - where the pin is remembered; `None` is "nowhere to write".
-/// @returns whether a request was written, and the resulting workspace projection.
+/// @returns whether a request was written, and the two halves as they now stand.
 #[must_use]
 pub fn pin(
     session: &mut Session,
@@ -480,51 +510,78 @@ pub fn pin(
     pinned_path: Option<&std::path::Path>,
 ) -> Value {
     let accepted = session.pin_conversation(session_id.map(str::to_owned), sink);
-    let mut workspace: Option<String> = None;
-    if let Some(path) = pinned_path {
-        let mut pinned = crate::app::pinned::Pinned::load(path);
-        pinned.session = session.pinned_conversation().map(str::to_owned);
-        pinned.workspace = pinned
-            .session
-            .as_deref()
-            .and_then(|id| conversation_workspace(session, id));
-        workspace = pinned.workspace.clone();
-        pinned.save(path);
-    }
-    json!({ "accepted": accepted, "pinnedWorkspace": workspace })
+    save_pins(session, pinned_path);
+    json!({
+        "accepted": accepted,
+        "pinned": session.pinned_conversation(),
+        "pinnedWorkspace": session.pinned_workspace(),
+    })
 }
 
 /// `pin_workspace` — pin the default directory for a new conversation.
 ///
-/// This is a *new-conversation-state* action by design: pinning a workspace
-/// leaves the current conversation (with a `session/detach`) and clears the
-/// session pin — the two fields can never disagree.
+/// **The workspace half only**, and it does not touch the conversation on screen: the session
+/// pin decides which conversation opens, this decides where a new one is created, and a gesture
+/// on one is not a statement about the other. (Choosing a directory in the picker *is* a
+/// new-conversation action; pinning one is not.)
 ///
 /// @param workspace_id - which workspace, or `None` to stop pinning one.
 /// @param pinned_path - where the pin is remembered; `None` is "nowhere to write".
-/// @returns the resulting workspace projection.
+/// @returns the two halves of the pin as they now stand.
 #[must_use]
 pub fn pin_workspace(
     session: &mut Session,
-    sink: &mut dyn FrameSink,
+    _sink: &mut dyn FrameSink,
     workspace_id: Option<&str>,
     pinned_path: Option<&std::path::Path>,
 ) -> Value {
-    // Leaving the current conversation is told to the host first: the detach
-    // is what keeps the approval ownership honest.
-    session.start_new_conversation(sink);
-    let mut workspace: Option<String> = None;
-    if let Some(path) = pinned_path {
-        let mut pinned = crate::app::pinned::Pinned::load(path);
-        pinned.session = None;
-        pinned.workspace = workspace_id
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned);
-        workspace = pinned.workspace.clone();
-        pinned.save(path);
+    session.pin_workspace(workspace_id.map(str::to_owned));
+    save_pins(session, pinned_path);
+    json!({
+        "pinned": session.pinned_conversation(),
+        "pinnedWorkspace": session.pinned_workspace(),
+    })
+}
+
+/// Write the pin file from the session's own two halves.
+///
+/// The file is one small JSON object and is written whole, but only the half the caller touched
+/// has changed: the other is whatever the session adopted from that same file at startup (see
+/// [`crate::app::pinned`]), or what an earlier gesture wrote. The write consumes the
+/// "something changed" flag so the clock thread does not write the same bytes again.
+///
+/// @param session - the session that owns the pins.
+/// @param path - where the pin is remembered; `None` is "nowhere to write".
+fn save_pins(session: &mut Session, path: Option<&std::path::Path>) {
+    session.take_pins_changed();
+    write_pins(session, path);
+}
+
+/// Write the pin file, without touching the changed flag.
+fn write_pins(session: &Session, path: Option<&std::path::Path>) {
+    let Some(path) = path else { return };
+    let pins = crate::app::pinned::Pinned {
+        session: session.pinned_conversation().map(str::to_owned),
+        workspace: session.pinned_workspace().map(str::to_owned),
+    };
+    pins.save(path);
+}
+
+/// Write the pin file when the reconciliation layer forgot a half of it.
+///
+/// The session layer decides *that* a half is invalid (it is the side that reads the host's
+/// lists); this is where the decision becomes durable, because only the shell knows where the
+/// file is. Called from the clock thread, right after the follow layer has been pumped.
+///
+/// @param session - the session that owns the pins.
+/// @param path - where the pin is remembered; `None` is "nowhere to write".
+/// @returns whether a write happened, so the caller can tell the frontend to re-render.
+pub fn persist_pins(session: &mut Session, path: Option<&std::path::Path>) -> bool {
+    if !session.take_pins_changed() {
+        return false;
     }
-    json!({ "pinnedWorkspace": workspace })
+    write_pins(session, path);
+    true
 }
 
 /// `on_show` — what a summon means for the conversation: **every summon lands on a
@@ -539,10 +596,21 @@ pub fn pin_workspace(
 /// The dispatcher calls this on the *hotkey* show path only: a show the host
 /// asks for (an approval, say) is the host's intent, not the user's summon.
 ///
+/// A summon is also the boundary of a **visit**: the last visit's explanation of a lost pin is
+/// over, one definitive refusal may cost a pin again, and the workspace list the
+/// new-conversation ladder needs is marked as wanted — the follow layer sends it on the next
+/// free poll slot, because this path may already be writing the attach that returns to the
+/// pinned conversation and this layer runs one request at a time. The counter the frontend
+/// watches rises here, and it only means something beside the token: see
+/// [`ShellView::summon_token`].
+///
+/// @param shell - the shell's own facts, whose summon counter rises.
 /// @returns an empty result — the frame the session may have written is the
 ///   outcome, not this value.
 #[must_use]
-pub fn on_show(session: &mut Session, sink: &mut dyn FrameSink) -> Value {
+pub fn on_show(session: &mut Session, shell: &mut ShellView, sink: &mut dyn FrameSink) -> Value {
+    session.begin_visit();
+    shell.summon_count = shell.summon_count.saturating_add(1);
     match session.pinned_conversation().map(str::to_owned) {
         Some(pinned) if session.follow().session_id() == Some(pinned.as_str()) => {}
         Some(pinned) => {
@@ -553,25 +621,6 @@ pub fn on_show(session: &mut Session, sink: &mut dyn FrameSink) -> Value {
         }
     }
     json!({})
-}
-
-/// The workspace a conversation belongs to, when both lists say so.
-///
-/// @param session - the session, which holds both lists.
-/// @param session_id - the conversation's id.
-/// @returns its workspace id, or `None` when the cwd or the workspace is
-///   unknown — an absent projection is absent, never guessed.
-fn conversation_workspace(session: &Session, session_id: &str) -> Option<String> {
-    let cwd = session
-        .conversations()
-        .iter()
-        .find(|summary| summary.session_id == session_id)
-        .and_then(|summary| summary.cwd.as_deref())?;
-    session
-        .workspaces()
-        .iter()
-        .find(|workspace| workspace.path == cwd)
-        .map(|workspace| workspace.workspace_id.clone())
 }
 
 /// `request_workspaces` — ask the host for the workspace list the picker draws.

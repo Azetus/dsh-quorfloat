@@ -275,6 +275,7 @@ export function createPlugin(overrides: PluginOverrides = {}) {
             // The peer-facing method names belong to the router; everything that
             // touches Harness state goes through the layers built above.
             listWorkspaces: async () => sessionLayer.listWorkspaces(),
+            initializeDefaultWorkspace: async () => await sessionLayer.initializeDefaultWorkspace(),
             listSessions: async () => ({ items: await sessionLayer.listSessions() }),
             createSession: async workspaceId => await sessionLayer.createSession(workspaceId),
             attachSession: async sessionId => await sessionLayer.attach(sessionId),

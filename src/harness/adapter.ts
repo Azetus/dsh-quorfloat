@@ -48,6 +48,21 @@ export interface WorkspaceView {
   readonly workspaceId: string
   readonly path: string
   readonly title: string
+  /**
+   * The conversations the registry accounts to this workspace, in its own order.
+   *
+   * **Membership, not the directory.** A conversation can be moved out of a workspace without
+   * its `cwd` changing, and this account is the only thing that knows; a consumer intersects it
+   * with the conversations it can actually see.
+   */
+  readonly sessionIds: readonly string[]
+  /**
+   * When the workspace was registered, as **epoch milliseconds**.
+   *
+   * Upstream declares an ISO string; the conversion happens once, here, so one unit travels
+   * end to end. An absent or unreadable value is `0` — "no time known" — never a `NaN`.
+   */
+  readonly createdAt: number
 }
 
 /** One row of the Harness session list. */
@@ -129,6 +144,19 @@ export interface QuorfloatHarness {
   describe(): Record<string, unknown>
   /** List workspaces the user may choose from, in Harness display order. */
   listWorkspaces(): readonly WorkspaceView[]
+  /**
+   * Initialize (or resolve) the Harness's first-use default workspace.
+   *
+   * A *command*, not a lookup: the host decides the directory, creates it, and registers it, so
+   * this is how a profile with no workspace at all can still start a conversation without
+   * sending the user to the Harness window. It is also allowed to decline — first-use
+   * initialization is ineligible once any workspace or session exists — and a refusal, a
+   * missing service, or a throw is an empty list, never an exception: the caller's next rung is
+   * to ask the user, and it cannot do that from a stack trace.
+   *
+   * @returns the workspace it created or resolved, or an empty list.
+   */
+  initializeDefaultWorkspace(): Promise<readonly WorkspaceView[]>
   /** Look up one workspace; `undefined` when it no longer exists. */
   workspace(workspaceId: string): WorkspaceView | undefined
   /**
@@ -360,6 +388,74 @@ interface WorkspaceEntityLike {
   readonly id: string
   readonly path: string
   readonly title: string
+  /** The registry's membership account, when this build's entity carries one. */
+  readonly sessionIds?: readonly unknown[]
+  /** Registration time: an ISO string upstream, and this adapter's `WorkspaceView` is epoch ms. */
+  readonly createdAt?: unknown
+}
+
+/**
+ * Structural view of the workspace controller: the service that owns *creating* the default.
+ *
+ * Separate from {@link WorkspaceRegistryLike}, which only reads: `initializeDefault` is a
+ * command that makes a directory and a registration, and a build without the controller simply
+ * has no way to offer one.
+ */
+interface WorkspaceControllerLike {
+  initializeDefault(signal: AbortSignal): Promise<{ workspace?: WorkspaceEntityLike } | undefined>
+}
+
+/**
+ * Read a workspace's registration time as epoch milliseconds.
+ *
+ * Upstream declares an ISO string; every consumer on this side of the adapter compares epoch
+ * milliseconds, so the conversion happens exactly once, here. An absent, unparseable, negative,
+ * or unsafe value becomes `0` — "no time known" — because a `NaN` would silently lose (or win)
+ * every comparison it takes part in, and a negative time is not a time.
+ *
+ * @param value - the raw field, in either spelling.
+ * @returns integer epoch milliseconds, or `0`.
+ */
+export function readEpochMs(value: unknown): number {
+  const parsed = typeof value === 'number'
+    ? value
+    : typeof value === 'string'
+      ? Date.parse(value)
+      : Number.NaN
+  const floored = Math.floor(parsed)
+  return Number.isSafeInteger(floored) && floored >= 0 ? floored : 0
+}
+
+/**
+ * Read a workspace's membership account, dropping anything that is not a usable id.
+ *
+ * @param value - the raw `sessionIds` field.
+ * @returns the ids, in the order the registry listed them.
+ */
+export function readSessionIds(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter((id): id is string => typeof id === 'string' && id !== '')
+}
+
+/**
+ * Project one registry entity into this plugin's own workspace view.
+ *
+ * The two fields that are not simply passed through are the two the whole grouping rule rests
+ * on: membership (`sessionIds`) and the registration time (`createdAt`, converted to epoch
+ * milliseconds). Both are read defensively so an older registry — one whose entity carries
+ * neither — still yields a usable workspace rather than a throw.
+ *
+ * @param entity - the registry's workspace entity.
+ * @returns the detached view.
+ */
+function workspaceView(entity: WorkspaceEntityLike): WorkspaceView {
+  return {
+    workspaceId: entity.id,
+    path: entity.path,
+    title: entity.title,
+    sessionIds: readSessionIds(entity.sessionIds),
+    createdAt: readEpochMs(entity.createdAt),
+  }
 }
 
 /** Minimal logger shape the adapter needs. */
@@ -372,6 +468,8 @@ export interface AdapterLogger {
 export interface ServicePresence {
   readonly sessionController: boolean
   readonly workspaceRegistry: boolean
+  /** The service that can *create* the first-use default workspace, when the build has one. */
+  readonly workspaceController: boolean
   readonly approval: boolean
   readonly userQuestions: boolean
 }
@@ -393,6 +491,7 @@ export function probeServices(get: (name: string) => unknown): ProbeResult {
   const presence: ServicePresence = {
     sessionController: get('sessionController') !== undefined,
     workspaceRegistry: get('workspaceRegistry') !== undefined,
+    workspaceController: get('workspaceController') !== undefined,
     approval: get('approval') !== undefined,
     userQuestions: get('userQuestions') !== undefined,
   }
@@ -418,6 +517,10 @@ export function createHarnessFromContext(
   if (probe.missing.length > 0) return { probe }
   const controller = get('sessionController') as SessionControllerLike
   const registry = get('workspaceRegistry') as WorkspaceRegistryLike | undefined
+  // The service that creates the first-use default workspace. Optional like the registry: a
+  // profile without the workspace API has no default to offer, and the panel then tells the
+  // user to make one in the Harness rather than pretending it can.
+  const workspaceController = get('workspaceController') as WorkspaceControllerLike | undefined
   // Permission presets are their own service, and **optional**: a build without the
   // interaction package has no presets to offer, and the panel then hides the picker
   // rather than showing one with nothing in it.
@@ -426,7 +529,7 @@ export function createHarnessFromContext(
   // consulted for the two writes that need one (a permission switch, a model switch);
   // the reads that answer pickers never need it.
   const sessions = get('sessions') as SessionsLike | undefined
-  return { harness: new CordisHarness(controller, registry, presets, sessions, log), probe }
+  return { harness: new CordisHarness(controller, registry, workspaceController, presets, sessions, log), probe }
 }
 
 /**
@@ -436,6 +539,7 @@ export function createHarnessFromContext(
 class CordisHarness implements QuorfloatHarness {
   readonly #controller: SessionControllerLike
   readonly #registry: WorkspaceRegistryLike | undefined
+  readonly #workspaceController: WorkspaceControllerLike | undefined
   readonly #presets: PermissionPresetsLike | undefined
   readonly #sessions: SessionsLike | undefined
   readonly #log: AdapterLogger
@@ -451,6 +555,7 @@ class CordisHarness implements QuorfloatHarness {
     selectModelCalls: 0,
     permissionCalls: 0,
     statsCalls: 0,
+    workspaceDefaultCalls: 0,
   }
   /** Titles by session, with the `updatedAt` they were read at. */
   readonly #titles = new Map<string, { updatedAt: number; title: string | undefined }>()
@@ -458,6 +563,7 @@ class CordisHarness implements QuorfloatHarness {
   /**
    * @param controller - the live session controller service.
    * @param registry - the workspace registry, when composed.
+   * @param workspaceController - the workspace controller (default creation), when composed.
    * @param presets - the permission-preset service, when composed.
    * @param sessions - the live-session store, when composed.
    * @param log - logger for translation warnings.
@@ -465,12 +571,14 @@ class CordisHarness implements QuorfloatHarness {
   constructor(
     controller: SessionControllerLike,
     registry: WorkspaceRegistryLike | undefined,
+    workspaceController: WorkspaceControllerLike | undefined,
     presets: PermissionPresetsLike | undefined,
     sessions: SessionsLike | undefined,
     log: AdapterLogger,
   ) {
     this.#controller = controller
     this.#registry = registry
+    this.#workspaceController = workspaceController
     this.#presets = presets
     this.#sessions = sessions
     this.#log = log
@@ -485,13 +593,28 @@ class CordisHarness implements QuorfloatHarness {
   listWorkspaces(): readonly WorkspaceView[] {
     if (this.#registry === undefined) return []
     try {
-      return this.#registry.list().map(entity => ({
-        workspaceId: entity.id,
-        path: entity.path,
-        title: entity.title,
-      }))
+      return this.#registry.list().map(entity => workspaceView(entity))
     } catch (error) {
       this.#log.warn('workspace listing failed', error)
+      return []
+    }
+  }
+
+  /** {@inheritDoc QuorfloatHarness.initializeDefaultWorkspace} */
+  async initializeDefaultWorkspace(): Promise<readonly WorkspaceView[]> {
+    const controller = this.#workspaceController
+    if (controller === undefined) return []
+    this.#counters.workspaceDefaultCalls += 1
+    const signal = new AbortController().signal
+    try {
+      const result = await controller.initializeDefault(signal)
+      const workspace = result?.workspace
+      // "Ineligible" and "no such method" are both an empty list rather than a failure to
+      // propagate: the caller's answer to either is the same — ask the user to make one in the
+      // Harness — and a rejected promise would only turn that into a missing prompt.
+      return workspace === undefined ? [] : [workspaceView(workspace)]
+    } catch (error) {
+      this.#log.warn('could not initialize a default workspace', error)
       return []
     }
   }
@@ -500,7 +623,7 @@ class CordisHarness implements QuorfloatHarness {
   workspace(workspaceId: string): WorkspaceView | undefined {
     if (this.#registry === undefined) return undefined
     const entity = this.#registry.get(workspaceId)
-    return entity === undefined ? undefined : { workspaceId: entity.id, path: entity.path, title: entity.title }
+    return entity === undefined ? undefined : workspaceView(entity)
   }
 
   /** {@inheritDoc QuorfloatHarness.createSession} */
@@ -522,19 +645,27 @@ class CordisHarness implements QuorfloatHarness {
     const signal = new AbortController().signal
     const value = await this.#controller.list({}, signal)
     const items = Array.isArray(value?.items) ? value.items : []
-    const summaries = items.map(item => {
-      const sessionId = typeof item['sessionId'] === 'string' ? item['sessionId'] : ''
-      const cwd = typeof item['cwd'] === 'string' ? item['cwd'] : undefined
-      const title = typeof item['title'] === 'string' && item['title'] !== '' ? item['title'] : undefined
-      return {
-        sessionId,
-        ...(title === undefined ? {} : { title }),
-        ...(cwd === undefined ? {} : { cwd }),
-        updatedAt: typeof item['updatedAt'] === 'number' ? item['updatedAt'] : 0,
-        running: item['running'] === true,
-        blank: item['blank'] === true,
-      }
-    }).filter(item => item.sessionId !== '')
+    const summaries = items
+      // **The one place subagent conversations are dropped**, and they are dropped *here*,
+      // before the title pass: a subagent is not a conversation the user can open, it must not
+      // appear in the picker or count as a workspace member, and reading its title would be an
+      // `inspect` — work done for a row that is about to be thrown away. Nothing else in this
+      // plugin filters on `origin`, so a session that reaches the wire has already passed it.
+      .filter(item => item['origin'] !== 'subagent')
+      .map(item => {
+        const sessionId = typeof item['sessionId'] === 'string' ? item['sessionId'] : ''
+        const cwd = typeof item['cwd'] === 'string' ? item['cwd'] : undefined
+        const title = typeof item['title'] === 'string' && item['title'] !== '' ? item['title'] : undefined
+        return {
+          sessionId,
+          ...(title === undefined ? {} : { title }),
+          ...(cwd === undefined ? {} : { cwd }),
+          updatedAt: typeof item['updatedAt'] === 'number' ? item['updatedAt'] : 0,
+          running: item['running'] === true,
+          blank: item['blank'] === true,
+        }
+      })
+      .filter(item => item.sessionId !== '')
     return await this.#withTitles(summaries, signal)
   }
 

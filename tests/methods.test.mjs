@@ -23,6 +23,7 @@ function stubHost() {
     hostVersion: () => 'test',
     channelSessionId: () => 'channel-1',
     listWorkspaces: async () => [],
+    initializeDefaultWorkspace: async () => [],
     listSessions: async () => ({ items: [] }),
     createSession: async () => ({ sessionId: 'session-1' }),
     attachSession: async () => ({ sessionId: 'session-1' }),
@@ -99,6 +100,19 @@ test('the new session methods are in the table', () => {
   for (const method of ['session/options', 'session/select', 'session/permission']) {
     assert.ok(METHODS.includes(method), `${method} must be answerable`)
   }
+})
+
+test('workspace/default answers the same { items } shape as workspaces/list', async () => {
+  // The one method that *creates* rather than reads, and it deliberately looks like the read it
+  // sits beside: the peer parses both with one parser, and an empty list is the host saying it
+  // will not create one (never an error the peer has to catch). Asserted here, as the
+  // cross-process shape it is: the peer's parser is written against exactly this envelope.
+  const rows = [{ workspaceId: 'w1', path: '/tmp/ws', title: 'ws', sessionIds: [], createdAt: 1 }]
+  const host = stubHost()
+  host.initializeDefaultWorkspace = async () => rows
+  const router = new HostRouter(host)
+  assert.deepEqual(await router.handle('workspace/default', {}), { items: rows })
+  assert.ok(METHODS.includes('workspace/default'), 'and it is part of the table the supervisor registers')
 })
 
 test('panel/lifecycle forwards the requested action and reports it', async () => {

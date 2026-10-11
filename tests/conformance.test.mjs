@@ -13,8 +13,12 @@
  * this plugin sends would pass the Harness' own parameter validation, and that
  * every response shape it assumes is the response shape the Harness declares.
  *
- * The test skips itself when the contract has not been extracted, so a fresh
- * clone can run the rest of the suite without a Harness installation.
+ * The test skips itself only on macOS, where the app bundle location has a
+ * verifiable default and a fresh clone may run the rest of the suite without a
+ * Harness installation. On every other platform a missing contract is a hard
+ * failure: `tests/fixtures/extract-harness-contract.mjs` has no default
+ * `app.asar` path there, and a skip would turn "we cannot check on this
+ * platform" into a green suite.
  */
 
 import assert from 'node:assert/strict'
@@ -26,7 +30,31 @@ import { loadModule, repoRoot } from './helpers.mjs'
 
 const CONTRACT = join(repoRoot, '.tooling/conformance/typert.host.js')
 const hasContract = existsSync(CONTRACT)
-const skip = hasContract ? false : 'run `node tests/fixtures/extract-harness-contract.mjs` first (needs DeepSeek Harness installed)'
+
+/**
+ * Whether this platform has a default `app.asar` location the extractor can use
+ * without guessing. Only macOS ships a bundle path that can be named from here;
+ * Windows and Linux must be told through `DSH_APP_ASAR`.
+ */
+const platformHasDefaultAsar = process.platform === 'darwin'
+
+/** The actionable failure shown wherever a missing contract cannot be skipped. */
+const CONTRACT_MISSING =
+  `the Harness contract (${CONTRACT}) has not been extracted, and ${process.platform} has no default app.asar path. ` +
+  'Set DSH_APP_ASAR to the app.asar inside the installed DeepSeek Harness ' +
+  '(on macOS the default is /Applications/DeepSeek Harness.app/Contents/Resources/app.asar), ' +
+  'then run `node tests/fixtures/extract-harness-contract.mjs`. ' +
+  'This platform does not skip these tests, because a rising skip count is a false green.'
+
+if (!hasContract && !platformHasDefaultAsar) {
+  // Failing the file at load is deliberate: all 11 checks below depend on the
+  // contract, so there is no honest way to report them as anything but red.
+  throw new Error(CONTRACT_MISSING)
+}
+
+const skip = hasContract
+  ? false
+  : 'run `node tests/fixtures/extract-harness-contract.mjs` first (needs DeepSeek Harness installed)'
 
 /** The generated manifest, loaded once. */
 const contract = hasContract ? (await import(CONTRACT)).TYPERT : undefined

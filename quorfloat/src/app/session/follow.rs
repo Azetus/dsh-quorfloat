@@ -21,6 +21,7 @@
 use serde_json::Value;
 
 use crate::app::session::FrameSink;
+use crate::ipc::protocol::error_code;
 
 /// How often to look for a conversation that is more recent than the current one.
 ///
@@ -36,6 +37,14 @@ pub const POLL_INTERVAL_MS: i64 = 3000;
 /// panel with nothing to do.
 const REQUEST_TIMEOUT_MS: i64 = 10_000;
 
+/// How many consecutive list revisions must omit the pinned conversation before it is forfeit.
+///
+/// One is not evidence: a conversation the user just created, or just pinned, may not have
+/// reached the host's list yet, and a panel that takes a pin away on a slow answer is a panel
+/// that answers a question nobody asked. Two consecutive revisions is the conservative floor —
+/// by then the list has been read twice, seconds apart, and the conversation is still not there.
+const MISSING_REVISIONS_BEFORE_UNPIN: u32 = 2;
+
 /// What the follow layer wants to ask the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outgoing {
@@ -43,6 +52,11 @@ pub enum Outgoing {
     ListSessions,
     /// Ask which workspaces exist.
     ListWorkspaces,
+    /// Ask the host to initialize (or resolve) its first-use default workspace.
+    ///
+    /// The host creates and registers it, so this is a command, not a lookup: it is how an
+    /// empty list becomes a usable one without sending the user to the Harness window.
+    DefaultWorkspace,
     /// Create a conversation, in a chosen workspace.
     CreateSession {
         /// The workspace to create it in, or `None` for the host's own default.
@@ -102,6 +116,11 @@ enum InFlight {
         /// When it was sent.
         sent_at: i64,
     },
+    /// A `workspace/default` request, sent at this time.
+    DefaultWorkspace {
+        /// When it was sent.
+        sent_at: i64,
+    },
     /// A `session/create` request, sent at this time.
     Create {
         /// When it was sent.
@@ -113,7 +132,10 @@ impl InFlight {
     /// When this request was sent.
     fn sent_at(&self) -> i64 {
         match self {
-            Self::List { sent_at } | Self::Workspaces { sent_at } | Self::Create { sent_at } => *sent_at,
+            Self::List { sent_at }
+            | Self::Workspaces { sent_at }
+            | Self::DefaultWorkspace { sent_at }
+            | Self::Create { sent_at } => *sent_at,
             Self::Attach { sent_at, .. } => *sent_at,
         }
     }
@@ -128,6 +150,62 @@ pub struct Workspace {
     pub title: String,
     /// Its directory, which is what tells two same-named workspaces apart.
     pub path: String,
+    /// The conversations the registry accounts to it, in its own order.
+    ///
+    /// Membership, not the directory: a conversation can be moved out of a workspace without
+    /// its `cwd` changing, and this list is the only account of which is which. It may name a
+    /// conversation the session list no longer shows, so a consumer intersects it with the
+    /// conversations it can actually see.
+    pub session_ids: Vec<String>,
+    /// When the workspace was registered, in epoch milliseconds; `0` when the host did not say.
+    pub created_at: i64,
+}
+
+/// Why a half of the pin was forgotten, for the status line to explain.
+///
+/// A *reason*, never a sentence: the panel's copy lives in the frontend dictionaries, and a
+/// user-facing string does not originate in this process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PinNotice {
+    /// The pinned conversation is not in the list any more.
+    SessionGone,
+    /// The pinned workspace is not in the list any more.
+    WorkspaceGone,
+}
+
+impl PinNotice {
+    /// The wire spelling the snapshot carries.
+    #[must_use]
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::SessionGone => "sessionGone",
+            Self::WorkspaceGone => "workspaceGone",
+        }
+    }
+}
+
+/// What came of asking the host for its first-use default workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DefaultWorkspaceState {
+    /// Not asked — the list has not been read yet, or it already had workspaces.
+    #[default]
+    Idle,
+    /// Asked and answered: there is now a workspace to create in.
+    Done,
+    /// Asked and there is still no workspace to use: the host refused, failed, or declined.
+    Failed,
+}
+
+impl DefaultWorkspaceState {
+    /// The wire spelling the snapshot carries.
+    #[must_use]
+    pub fn wire(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Done => "done",
+            Self::Failed => "failed",
+        }
+    }
 }
 
 /// The conversation this panel follows.
@@ -172,8 +250,45 @@ pub struct Follow {
     /// means. The two are separate because they answer different questions, and collapsing
     /// them would make switching conversations silently permanent.
     pinned: Option<String>,
+    /// The workspace the user pinned as the default for a new conversation, if any.
+    ///
+    /// **Independent of [`Follow::pinned`].** The session pin decides which conversation opens;
+    /// the workspace pin decides where a *new* one is created. A user gesture sets one at a
+    /// time and never clears the other, and the program clears each half only when that half
+    /// itself has been shown to be invalid.
+    pinned_workspace: Option<String>,
+    /// How many consecutive list revisions have omitted the pinned conversation.
+    absent_revisions: u32,
+    /// Whether a refused attach has already cost the pin during this visit.
+    ///
+    /// An attach that is refused is only evidence when the refusal is definitive, and even then
+    /// it is worth one action per visit: the pin is gone after the first, and a later refusal
+    /// in the same visit must not report the same loss again.
+    refused_this_visit: bool,
+    /// Why a half of the pin was forgotten, until the user summons again.
+    pin_notice: Option<PinNotice>,
+    /// Whether this layer forgot a half of the pin since the shell last wrote the pin file.
+    pins_changed: bool,
+    /// Whether the workspace list has been answered at least once.
+    ///
+    /// A list that has not answered is no evidence: an empty list before the first answer is
+    /// "unknown", not "no workspaces", and clearing a pin on it would be reading silence as a
+    /// fact.
+    workspaces_loaded: bool,
+    /// What came of asking for the host's first-use default workspace.
+    default_workspace: DefaultWorkspaceState,
+    /// Whether that ask was already made, so an empty list asks once.
+    default_requested: bool,
     /// Whether the workspace list has been asked for yet.
     workspaces_asked: bool,
+    /// Whether the next free poll slot should ask for the workspace list.
+    ///
+    /// Set by a summon: the workspace field's ladder (the pin, the most recent workspace, the
+    /// host's default) is answered from that list, and a panel whose user just called it up has
+    /// to be able to say where a new conversation would start. Deferred to the poll loop rather
+    /// than sent from the summon itself because this layer runs one request at a time, and the
+    /// summon is already sending the attach that returns to a pinned conversation.
+    workspaces_wanted: bool,
     /// The workspace a `session/create` was asked for, kept for the log line that says
     /// where the conversation the user is now in was created.
     choosing_workspace: Option<String>,
@@ -199,6 +314,7 @@ impl Follow {
             return None;
         }
         self.workspaces_asked = true;
+        self.workspaces_wanted = false;
         self.in_flight = Some(InFlight::Workspaces { sent_at: now });
         Some(Outgoing::ListWorkspaces)
     }
@@ -240,6 +356,141 @@ impl Follow {
     #[must_use]
     pub fn workspaces_asked(&self) -> bool {
         self.workspaces_asked
+    }
+
+    /// Whether the workspace list has been answered at least once.
+    #[must_use]
+    pub fn workspaces_loaded(&self) -> bool {
+        self.workspaces_loaded
+    }
+
+    /// What came of asking the host for its first-use default workspace.
+    #[must_use]
+    pub fn default_workspace(&self) -> DefaultWorkspaceState {
+        self.default_workspace
+    }
+
+    /// The workspace pinned as the default for a new conversation, if any.
+    #[must_use]
+    pub fn pinned_workspace(&self) -> Option<&str> {
+        self.pinned_workspace.as_deref()
+    }
+
+    /// Why a half of the pin was forgotten, while the explanation is still current.
+    #[must_use]
+    pub fn pin_notice(&self) -> Option<PinNotice> {
+        self.pin_notice
+    }
+
+    /// Take the fact that a half of the pin was forgotten, so the shell can write the file.
+    ///
+    /// Reading clears it: one write per invalidation, not one per tick.
+    ///
+    /// @returns whether anything is waiting to be persisted.
+    pub fn take_pins_changed(&mut self) -> bool {
+        std::mem::take(&mut self.pins_changed)
+    }
+
+    /// Start a visit: a summon is a new visit, and an explanation of the last one is over.
+    ///
+    /// It also marks the workspace list as wanted, so the first free poll slot asks for it: the
+    /// new-conversation ladder is answered from that list, and the panel has just been called up
+    /// to show it.
+    pub fn begin_visit(&mut self) {
+        self.pin_notice = None;
+        self.refused_this_visit = false;
+        self.workspaces_wanted = true;
+    }
+
+    /// Pin (or unpin) the workspace a new conversation defaults to.
+    ///
+    /// The session half is not touched: the two pins answer different questions, and a gesture
+    /// on one of them is not a statement about the other.
+    ///
+    /// @param workspace_id - which workspace, or `None` to stop pinning one.
+    pub fn set_pinned_workspace(&mut self, workspace_id: Option<String>) {
+        let next = workspace_id
+            .map(|id| id.trim().to_owned())
+            .filter(|id| !id.is_empty());
+        if self.pinned_workspace != next {
+            self.pins_changed = true;
+        }
+        self.pinned_workspace = next;
+        self.pin_notice = None;
+    }
+
+    /// Ask for the host's first-use default workspace, when there is nothing else to use.
+    ///
+    /// Asked once, and only about a list that has actually been read and found empty: a list
+    /// that has not answered, or one that already names a workspace, has nothing to fix.
+    ///
+    /// @param now - caller-local time in milliseconds.
+    /// @returns the request to send, or `None` when it is not wanted.
+    fn ask_for_default_workspace(&mut self, now: i64) -> Option<Outgoing> {
+        if !self.workspaces_loaded || !self.workspaces.is_empty() || self.default_requested {
+            return None;
+        }
+        self.default_requested = true;
+        self.in_flight = Some(InFlight::DefaultWorkspace { sent_at: now });
+        Some(Outgoing::DefaultWorkspace)
+    }
+
+    /// Record why a half of the pin was forgotten, keeping the first explanation of a visit.
+    ///
+    /// The snapshot carries one reason, and the session pin — the panel's *home* — is the one a
+    /// user is most likely to be looking for, so the caller checks it first.
+    fn note_pin_notice(&mut self, notice: PinNotice) {
+        if self.pin_notice.is_none() {
+            self.pin_notice = Some(notice);
+        }
+    }
+
+    /// Forget the pinned conversation if two consecutive list revisions have omitted it.
+    ///
+    /// @param sink - where the explanation goes.
+    fn reconcile_session_pin(&mut self, sink: &mut dyn FrameSink) {
+        let Some(pinned) = self.pinned.clone() else {
+            self.absent_revisions = 0;
+            return;
+        };
+        if self.sessions.iter().any(|summary| summary.session_id == pinned) {
+            self.absent_revisions = 0;
+            return;
+        }
+        self.absent_revisions += 1;
+        if self.absent_revisions < MISSING_REVISIONS_BEFORE_UNPIN {
+            // Said out loud even when nothing is cleared: "the pin survived one silent list" is
+            // the fact that explains why the panel is still showing something the host did not
+            // mention.
+            sink.mark(&format!("pin {pinned} absent from a list revision; keeping it"));
+            return;
+        }
+        sink.log(&format!("the pinned conversation {pinned} is gone; forgetting the pin"));
+        sink.mark(&format!("unpin {pinned} (absent from two list revisions)"));
+        self.pinned = None;
+        self.absent_revisions = 0;
+        self.pins_changed = true;
+        self.note_pin_notice(PinNotice::SessionGone);
+        if self.session_id.as_deref() == Some(pinned.as_str()) {
+            self.forget_attachment();
+        }
+    }
+
+    /// Forget the pinned workspace if the list it was validated against no longer names it.
+    ///
+    /// @param sink - where the explanation goes.
+    fn reconcile_workspace_pin(&mut self, sink: &mut dyn FrameSink) {
+        let Some(pinned) = self.pinned_workspace.clone() else {
+            return;
+        };
+        if self.workspaces.iter().any(|workspace| workspace.workspace_id == pinned) {
+            return;
+        }
+        sink.log(&format!("the pinned workspace {pinned} is gone; forgetting the pin"));
+        sink.mark(&format!("unpin workspace {pinned} (not listed)"));
+        self.pinned_workspace = None;
+        self.pins_changed = true;
+        self.note_pin_notice(PinNotice::WorkspaceGone);
     }
 
     /// Start discovery, as soon as the channel can carry it.
@@ -305,11 +556,23 @@ impl Follow {
 
     /// The next request to send, if one is due.
     ///
+    /// A wanted workspace list wins the slot over the discovery poll: the discovery poll is a
+    /// standing question, while the workspace list is what a panel that was just summoned has to
+    /// answer to say where a new conversation would start. The request is sent from here rather
+    /// than from the summon itself because this layer runs one request at a time, and the summon
+    /// is already busy writing the attach that returns to a pinned conversation.
+    ///
     /// @param now - caller-local time in milliseconds.
     /// @returns the request, or `None` when nothing is due or one is outstanding.
     pub fn next(&mut self, now: i64) -> Option<Outgoing> {
         if !self.started || self.in_flight.is_some() || now < self.next_poll_at {
             return None;
+        }
+        if self.workspaces_wanted && !self.workspaces_asked {
+            self.workspaces_wanted = false;
+            self.workspaces_asked = true;
+            self.in_flight = Some(InFlight::Workspaces { sent_at: now });
+            return Some(Outgoing::ListWorkspaces);
         }
         self.in_flight = Some(InFlight::List { sent_at: now });
         Some(Outgoing::ListSessions)
@@ -369,7 +632,16 @@ impl Follow {
     /// @param now - caller-local time in milliseconds.
     /// @returns the request to send, when pinning means switching to it.
     pub fn set_pinned(&mut self, session_id: Option<String>, now: i64) -> Option<Outgoing> {
+        // Only a *change* is worth writing down. A summon re-attaches the pinned conversation
+        // through this method, and a pin that already says what it said before is not news.
+        if self.pinned != session_id {
+            self.pins_changed = true;
+        }
         self.pinned = session_id;
+        // A new decision is a fresh count: whatever the list said about the old pin is no
+        // longer evidence about this one.
+        self.absent_revisions = 0;
+        self.pin_notice = None;
         if self.pinned.is_some() {
             // A pin is the user's *latest* decision about where the panel belongs, so it
             // supersedes the run-time choice: left in place, the choice would win at the next
@@ -407,21 +679,32 @@ impl Follow {
     /// [`Follow::set_pinned`], whose whole job is to switch to the pinned one right now.
     ///
     /// @param session_id - the pinned conversation, if one was remembered.
-    pub fn adopt_pinned(&mut self, session_id: Option<String>) {
+    /// @param workspace_id - the pinned workspace, if one was remembered. It is a separate
+    ///   fact, read from the same file but never derived from the conversation: either half
+    ///   can be remembered without the other.
+    pub fn adopt_pinned(&mut self, session_id: Option<String>, workspace_id: Option<String>) {
         self.pinned = session_id.clone();
         // Opened *into* the choice, which is what makes the pin a starting point rather than a
         // standing order (see `target`).
         self.choice = session_id;
+        self.pinned_workspace = workspace_id;
+        self.absent_revisions = 0;
     }
 
     /// Go back to "new conversation" mode: nothing pinned, nothing chosen, nothing attached.
     ///
     /// This is what "start a new conversation" means under the design — the conversation
     /// itself is created when the user submits, so this only clears the decision that was
-    /// keeping the panel on an existing one.
+    /// keeping the panel on an existing one. Clearing the pin is a *user gesture* here (the
+    /// panel's own "new conversation" action), which is why it is marked for the shell to
+    /// write down: a pin the user let go of must not come back on the next run.
     pub fn start_new(&mut self) {
         self.choice = None;
-        self.pinned = None;
+        if self.pinned.is_some() {
+            self.pinned = None;
+            self.pins_changed = true;
+        }
+        self.absent_revisions = 0;
         self.forget_attachment();
     }
 
@@ -532,17 +815,9 @@ impl Follow {
                 // honoured. Keeping it would leave the panel attached to something that is not
                 // there — and looking, from the outside, exactly like a panel with nothing to
                 // say. Forgetting it puts the panel back into "new conversation" mode, which
-                // is what the design asks for.
-                if let Some(pinned) = self.pinned.clone() {
-                    if !self.sessions.iter().any(|summary| summary.session_id == pinned) {
-                        sink.log(&format!("the pinned conversation {pinned} is gone; forgetting the pin"));
-                        sink.mark(&format!("unpin {pinned} (no longer listed)"));
-                        self.pinned = None;
-                        if self.session_id.as_deref() == Some(pinned.as_str()) {
-                            self.forget_attachment();
-                        }
-                    }
-                }
+                // is what the design asks for — but only once the absence is evidence, which
+                // two consecutive revisions are and one is not (see `reconcile_session_pin`).
+                self.reconcile_session_pin(sink);
                 // Who to attach to is a decision the user made — pinned, or chosen for this
                 // run. The newest conversation is *not* a decision: following it is how a panel
                 // ends up talking about whatever the harness happened to touch last.
@@ -575,16 +850,54 @@ impl Follow {
             }
             (InFlight::Workspaces { .. }, Ok(result)) => {
                 self.workspaces = workspaces(&result);
+                // The answer is now a fact. Before it, an empty list meant "not asked yet".
+                self.workspaces_loaded = true;
                 // A mark, not a log: the host swallows the peer's stderr, so the marker is the
                 // only place this is visible after the fact — and "which workspace was chosen,
                 // and why" is a question about exactly this list.
                 sink.mark(&format!("workspaces {}", self.workspaces.len()));
-                None
+                // A pinned workspace the host no longer lists cannot be created in: the list is
+                // the authority the pin was validated against, so the pin goes — and only that
+                // half of it.
+                self.reconcile_workspace_pin(sink);
+                // An empty list is not an answer the user can act on. The host can create its
+                // first-use workspace itself, and when it will not, the panel says so rather
+                // than showing a picker with nothing in it.
+                self.ask_for_default_workspace(now)
             }
             (InFlight::Workspaces { .. }, Err(error)) => {
                 // Asked for once. A host that cannot answer leaves the picker without
                 // workspaces, which is a smaller problem than asking every three seconds.
+                // The list stays *unloaded*: a request that failed is not a list that is empty.
                 sink.mark(&format!("workspaces failed: {}", error.message));
+                None
+            }
+            (InFlight::DefaultWorkspace { .. }, Ok(result)) => {
+                let defaults = workspaces(&result);
+                if defaults.is_empty() {
+                    // The host answered and there is still nothing to create in. Ineligible
+                    // first-use initialization (a host with sessions but no workspaces) looks
+                    // exactly like this, and both mean the user has to make one in the Harness.
+                    self.default_workspace = DefaultWorkspaceState::Failed;
+                    sink.mark("workspace/default: none");
+                    return None;
+                }
+                // The returned rows are authoritative registry projections, so they are merged
+                // like any other list answer — the panel does not have to ask again to see the
+                // workspace it is now going to use.
+                for workspace in defaults {
+                    match self.workspaces.iter_mut().find(|known| known.workspace_id == workspace.workspace_id) {
+                        Some(known) => *known = workspace,
+                        None => self.workspaces.push(workspace),
+                    }
+                }
+                self.default_workspace = DefaultWorkspaceState::Done;
+                sink.mark(&format!("workspace/default: {}", self.workspaces.len()));
+                None
+            }
+            (InFlight::DefaultWorkspace { .. }, Err(error)) => {
+                self.default_workspace = DefaultWorkspaceState::Failed;
+                sink.mark(&format!("workspace/default failed: {}", error.message));
                 None
             }
             (InFlight::Create { .. }, Ok(result)) => {
@@ -636,14 +949,26 @@ impl Follow {
                     code = error.code,
                     message = error.message,
                 ));
-                // And the decision goes with it. Keeping a pin or a choice that the host has
-                // just refused would retry it every few seconds for the rest of the run, and
-                // the panel would sit there looking attached to nothing. The design's answer
-                // to "the conversation is not available" is a new one, made on submit.
+                // The pin goes only when the refusal is *definitive*: `stale` is the host saying
+                // the identity itself is no longer valid, which is the one answer that cannot be
+                // better on a retry. A transient refusal — an unavailable service, a timeout, a
+                // closed channel — is a statement about the moment, and a panel that throws a
+                // pin away for it is a panel that blames the user for a restart. At most one
+                // such loss is recorded per visit: after the first, the pin is already gone.
                 if self.pinned.as_deref() == Some(session_id.as_str()) {
-                    sink.mark(&format!("unpin {session_id} (refused)"));
-                    self.pinned = None;
+                    if error.code == error_code::STALE && !self.refused_this_visit {
+                        self.refused_this_visit = true;
+                        sink.mark(&format!("unpin {session_id} (refused: stale)"));
+                        self.pinned = None;
+                        self.pins_changed = true;
+                        self.note_pin_notice(PinNotice::SessionGone);
+                    } else if error.code != error_code::STALE {
+                        sink.mark(&format!("kept pin {session_id} (transient refusal {})", error.code));
+                    }
                 }
+                // The run-time choice is not a pin: it is where this visit happened to be, and
+                // a conversation the host will not attach to is not a place to stay. Dropping it
+                // puts the panel back to waiting, which is what "start a new one" means.
                 if self.choice.as_deref() == Some(session_id.as_str()) {
                     self.choice = None;
                 }
@@ -813,7 +1138,13 @@ fn summaries(result: &Value) -> Vec<SessionSummary> {
     found
 }
 
-/// Read every workspace out of a `workspaces/list` result.
+/// Read every workspace out of a `workspaces/list` (or `workspace/default`) result.
+///
+/// The item shape is the host's `WorkspaceView`, and the two halves this layer needs beside the
+/// name and the directory are the membership account (`sessionIds`) and the registration time
+/// (`createdAt`, epoch milliseconds). Both are read defensively: a host that does not send them
+/// leaves a workspace with no members and no time, which is a workspace that simply never wins
+/// "most recent" — not a workspace that disappears.
 ///
 /// @param result - the response value.
 /// @returns the workspaces, in the order the host listed them.
@@ -832,6 +1163,22 @@ fn workspaces(result: &Value) -> Vec<Workspace> {
                 workspace_id: workspace_id.to_owned(),
                 title: item.get("title").and_then(Value::as_str).unwrap_or_default().to_owned(),
                 path: item.get("path").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                session_ids: item
+                    .get("sessionIds")
+                    .and_then(Value::as_array)
+                    .map(|ids| {
+                        ids.iter()
+                            .filter_map(Value::as_str)
+                            .filter(|id| !id.is_empty())
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                created_at: item
+                    .get("createdAt")
+                    .and_then(Value::as_i64)
+                    .filter(|value| *value >= 0)
+                    .unwrap_or(0),
             })
         })
         .collect()

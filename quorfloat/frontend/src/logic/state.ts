@@ -31,6 +31,18 @@ export interface Snapshot {
   }
   window: {
     visible: boolean
+    /**
+     * The summon counter, and the process lifetime it belongs to.
+     *
+     * A count alone cannot tell a summon from a reload: a webview reload or a sidecar restart
+     * starts the count over, and reading that reset as a summon would throw away the workspace
+     * the user chose for this visit. Only "same token, higher count" is a summon — see
+     * `logic/summon.ts`, which owns that rule.
+     */
+    summon: {
+      token: string
+      count: number
+    }
   }
   session: {
     ready: boolean
@@ -44,10 +56,16 @@ export interface Snapshot {
       stale: number
     } | null
     pinned: string | null
-    /** The pinned workspace: with a session pin it is that session's own
-     *  workspace (a projection); in new-conversation state it is the default
-     *  directory (P0). */
+    /** The pinned **workspace**: where a new conversation starts. Independent of `pinned`,
+     *  which decides which conversation opens — neither is derived from the other. */
     pinnedWorkspace: string | null
+    /**
+     * Why a half of the pin was forgotten, while the explanation is still current.
+     *
+     * A reason, never a sentence: the panel's copy lives in the dictionaries, and this is what
+     * `view-text.ts` turns into the status line. Valid for one visit — a summon clears it.
+     */
+    pinNotice: { kind: 'sessionGone' | 'workspaceGone' } | null
     chosen: string | null
     /** Where a conversation submitted now would be created (the ladder's answer, or null
      *  when only the user can decide). */
@@ -56,6 +74,15 @@ export interface Snapshot {
     conversations: Conversation[]
     workspaces: Workspace[]
     workspacesAsked: boolean
+    /**
+     * Whether the workspace list has been *answered*.
+     *
+     * "Not arrived yet" and "there are none" are different facts, and only the second one is a
+     * reason to ask the host for a default workspace or to tell the user to make one.
+     */
+    workspacesLoaded: boolean
+    /** What came of asking the host for its first-use default workspace. */
+    defaultWorkspace: { state: 'idle' | 'done' | 'failed' }
     options: Options | null
     stats: Stats | null
     settingFailure: string | null
@@ -95,6 +122,16 @@ export interface Workspace {
   workspaceId: string
   title: string
   path: string
+  /**
+   * The conversations the registry accounts to this workspace, in its own order.
+   *
+   * **Membership, not the directory.** It can name a conversation the session list no longer
+   * shows, so a consumer intersects it with the conversations it can see — see `logic/scope.ts`,
+   * which is the one place that derivation lives.
+   */
+  sessionIds: string[]
+  /** Registration time in epoch milliseconds: one unit end to end, and never negative. */
+  createdAt: number
 }
 
 export interface Options {
