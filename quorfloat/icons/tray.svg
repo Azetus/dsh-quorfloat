@@ -93,8 +93,8 @@
        open('icons/icon.ico', 'wb').write(bytes(out))
        EOF
      Regenerate the `.ico` only when `icon.png` changes: it is a derivative, and an `.ico` that
-     disagrees with `icon.png` is worse than a stale one. `icons/icon.candidate.png` and
-     `icons/icon.candidate.ico` (2026-10-11) are the proposed unified mark — this same tail, on
+     disagrees with `icon.png` is worse than a stale one. `icons/icon.png` and
+     `icons/icon.ico` (2026-10-11) are the unified mark (landed) — this same tail, on
      `icon.png`'s own backing panel, replacing the placeholder blue bar — built from the 512px
      render above scaled so the ink spans 72px of the 128px panel and centred. They are not listed
      in `bundle.icon` and must not be renamed over `icon.png`/`icon.ico` until the user has looked. -->
