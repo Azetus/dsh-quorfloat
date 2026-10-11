@@ -1,6 +1,6 @@
 // The card strip above the thread: pending interactions and the handoff notice.
 
-import type { Snapshot } from '../../lib/state'
+import type { Snapshot } from '../../logic/state'
 import { ApprovalCard } from './ApprovalCard'
 import { HandoffBanner } from './HandoffBanner'
 import { QuestionCard } from './QuestionCard'

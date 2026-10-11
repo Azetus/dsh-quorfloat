@@ -8,7 +8,7 @@
  * happened to contain. The frontend is a compile-time input, so this unit builds it
  * itself rather than trusting a caller to have run `build:frontend` first.
  *
- * The cargo half is `scripts/lib/cargo.mjs`, shared with `scripts/release.mjs`, so a
+ * The cargo half is `scripts/cargo.mjs`, shared with `scripts/release.mjs`, so a
  * debug build and a release slice cannot drift in their command line or artifact path.
  * `--release` selects the same helper's release profile; the default is debug, which
  * is what the local full build `build:local` uses. The publishable `build` does not
@@ -27,7 +27,7 @@ import { existsSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { buildSidecar, hostTriple } from './lib/cargo.mjs'
+import { buildSidecar, hostTriple } from './cargo.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 

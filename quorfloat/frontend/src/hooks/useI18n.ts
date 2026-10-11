@@ -10,7 +10,7 @@
 import { createContext, useCallback, useContext } from 'react'
 import {
   resolveText, translate, type Language, type MessageKey, type Params, type Text,
-} from '../lib/i18n'
+} from '../logic/i18n'
 
 /** The language in force. `'zh'` until a snapshot says otherwise. */
 export const I18nContext = createContext<Language>('zh')

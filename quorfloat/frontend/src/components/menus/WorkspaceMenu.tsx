@@ -2,9 +2,9 @@
 
 import { api } from '../../api'
 import { useT } from '../../hooks/useI18n'
-import { workspaceLabel } from '../../lib/labels'
-import type { Snapshot } from '../../lib/state'
-import { workspaceTitle } from '../../lib/view-text'
+import { workspaceLabel } from '../../logic/labels'
+import type { Snapshot } from '../../logic/state'
+import { workspaceTitle } from '../../logic/view-text'
 import { MenuHeading } from './MenuHeading'
 import { MenuHint } from './MenuHint'
 import { MenuOption } from './MenuOption'

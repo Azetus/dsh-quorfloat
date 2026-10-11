@@ -1,6 +1,6 @@
 // The panel's box: measure it, tell the shell, and carry a swap's height change.
 //
-// The DOM half of `lib/panel.ts`'s policy. It runs after every commit, because every
+// The DOM half of `logic/panel.ts`'s policy. It runs after every commit, because every
 // snapshot can change the panel's height; the *decision* to animate is `swapFor` (did the
 // page or the conversation move?) and `heightPlan` (pin the box, and what to report).
 //
@@ -12,8 +12,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, type RefObject } from 
 import { api } from '../api'
 import {
   heightPlan, SETTLE_MARGIN_MS, SWAP_CLASS, swapFor, tokenMs, type Painted,
-} from '../lib/panel'
-import type { Snapshot } from '../lib/state'
+} from '../logic/panel'
+import type { Snapshot } from '../logic/state'
 
 /**
  * Keep the panel's height coordinated with the shell, and animate a swap.

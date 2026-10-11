@@ -1,9 +1,9 @@
 // The footer's right half: the conversation's numbers, each only when it can be computed.
 
 import { useT } from '../../hooks/useI18n'
-import { ring } from '../../lib/icons'
-import type { Stats } from '../../lib/state'
-import { contextLabel, roundsText, tokensLabel } from '../../lib/stats'
+import { ring } from '../../logic/icons'
+import type { Stats } from '../../logic/state'
+import { contextLabel, roundsText, tokensLabel } from '../../logic/stats'
 import { Icon } from '../common/Icon'
 
 /** Props for {@link StatsRow}. */

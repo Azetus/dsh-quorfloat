@@ -13,7 +13,7 @@
 // does not define or a visibly foreign widget.
 
 import { useT } from '../../hooks/useI18n'
-import type { Language } from '../../lib/i18n'
+import type { Language } from '../../logic/i18n'
 import { PickerPopover } from '../chrome/PickerPopover'
 import { Icon } from '../common/Icon'
 import { LanguageMenu } from '../menus/LanguageMenu'

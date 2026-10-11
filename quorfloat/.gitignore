@@ -28,4 +28,6 @@ assets/fonts/*
 
 .npm-cache/
 node_modules/
-dist/
+
+# npm run build:frontend 的产物
+/frontend/dist/

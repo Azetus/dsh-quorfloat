@@ -67,7 +67,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { FONT_LICENCE, FONT_NAME, SIDECAR_NAME, stageSidecar } from './lib/assemble.mjs'
+import { FONT_LICENCE, FONT_NAME, SIDECAR_NAME, stageSidecar } from './assemble.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -295,7 +295,7 @@ export function sidecarSource(root, profile) {
 /**
  * Stage the chosen build into the throwaway home, beside the font it needs.
  *
- * The copying itself is `scripts/lib/assemble.mjs`, shared with the release script:
+ * The copying itself is `scripts/assemble.mjs`, shared with the release script:
  * the development home and a release bundle must stage the same tree, or one of
  * them stops predicting what a user installs.
  */

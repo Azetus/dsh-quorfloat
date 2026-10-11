@@ -2,7 +2,7 @@
 
 import type { ReactNode } from 'react'
 import { I18nContext } from '../../hooks/useI18n'
-import type { Language } from '../../lib/i18n'
+import type { Language } from '../../logic/i18n'
 
 /** Props for {@link I18nProvider}. */
 export interface I18nProviderProps {

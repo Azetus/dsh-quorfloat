@@ -2,8 +2,8 @@
 
 import { api } from '../../api'
 import { useT } from '../../hooks/useI18n'
-import type { Snapshot } from '../../lib/state'
-import { pinnedWorkspaceMark, workspaceTitle } from '../../lib/view-text'
+import type { Snapshot } from '../../logic/state'
+import { pinnedWorkspaceMark, workspaceTitle } from '../../logic/view-text'
 import { Icon } from '../common/Icon'
 import { PickerPopover } from './PickerPopover'
 import { WorkspaceMenu } from '../menus/WorkspaceMenu'

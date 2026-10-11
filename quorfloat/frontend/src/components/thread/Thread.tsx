@@ -6,10 +6,10 @@
 // height is measured rather than guessed, because an answer is as tall as its Markdown says.
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { setBottomPin } from '../../lib/bottom-pin'
+import { setBottomPin } from '../../logic/bottom-pin'
 import { useVirtualizer } from '@tanstack/react-virtual'
-import type { Snapshot } from '../../lib/state'
-import { foldTurns, type Turn as TurnModel } from '../../lib/turns'
+import type { Snapshot } from '../../logic/state'
+import { foldTurns, type Turn as TurnModel } from '../../logic/turns'
 import { JumpToBottom } from './JumpToBottom'
 import { Turn } from './Turn'
 
@@ -127,7 +127,7 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
 
   // The other half of the promise: whoever moves the reader (today, the composer growing as
   // the user types, which comes out of this box while the panel is at its cap) asks for the
-  // pin instead of waiting for a render. See `lib/bottom-pin.ts`.
+  // pin instead of waiting for a render. See `logic/bottom-pin.ts`.
   //
   // Both readers are served, because a box that changes around somebody is two different
   // problems: the one at the bottom wants to stay at the bottom, and the one reading further up

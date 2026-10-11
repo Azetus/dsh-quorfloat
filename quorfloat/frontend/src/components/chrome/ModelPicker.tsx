@@ -1,7 +1,7 @@
 // The runtime row's model + reasoning-effort picker.
 
 import { useT } from '../../hooks/useI18n'
-import type { Snapshot } from '../../lib/state'
+import type { Snapshot } from '../../logic/state'
 import { Icon } from '../common/Icon'
 import { ModelMenu } from '../menus/ModelMenu'
 import { PickerPopover } from './PickerPopover'

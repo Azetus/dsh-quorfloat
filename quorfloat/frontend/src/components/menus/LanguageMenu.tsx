@@ -9,7 +9,7 @@
 
 import { api } from '../../api'
 import { useT } from '../../hooks/useI18n'
-import type { Language, MessageKey } from '../../lib/i18n'
+import type { Language, MessageKey } from '../../logic/i18n'
 import { MenuHeading } from './MenuHeading'
 import { MenuOption } from './MenuOption'
 

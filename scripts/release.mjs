@@ -44,8 +44,8 @@ import {
 import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { SIDECAR_NAME, stageSidecar } from './lib/assemble.mjs'
-import { buildSidecar, hostTriple } from './lib/cargo.mjs'
+import { SIDECAR_NAME, stageSidecar } from './assemble.mjs'
+import { buildSidecar, hostTriple } from './cargo.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -175,7 +175,7 @@ function buildJavaScript() {
  *
  * Run here rather than through `npm run build:sidecar`, because a release builds one
  * slice per target and every slice has to embed the same `dist/`; the shared cargo
- * half of both paths is `scripts/lib/cargo.mjs`. Doing it before the slices also means
+ * half of both paths is `scripts/cargo.mjs`. Doing it before the slices also means
  * a missing frontend fails before any cross target is touched.
  */
 function buildFrontend() {

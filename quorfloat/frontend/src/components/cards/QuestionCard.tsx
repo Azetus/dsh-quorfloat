@@ -16,8 +16,8 @@ import { useT } from '../../hooks/useI18n'
 import {
   answerPayload, emptyDrafts, isComplete, setCustom, toggleChoice,
   type QuestionDraft, type QuestionDrafts,
-} from '../../lib/questions'
-import type { Interaction, InteractionQuestion } from '../../lib/state'
+} from '../../logic/questions'
+import type { Interaction, InteractionQuestion } from '../../logic/state'
 import { Icon } from '../common/Icon'
 import { QuestionBlock } from './QuestionBlock'
 

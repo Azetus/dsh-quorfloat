@@ -2,8 +2,8 @@
 
 import { useLayoutEffect, useRef } from 'react'
 import { useT } from '../../hooks/useI18n'
-import type { QuestionDraft } from '../../lib/questions'
-import type { InteractionQuestion } from '../../lib/state'
+import type { QuestionDraft } from '../../logic/questions'
+import type { InteractionQuestion } from '../../logic/state'
 import { QuestionChoice } from './QuestionChoice'
 
 /** Props for {@link QuestionBlock}. */

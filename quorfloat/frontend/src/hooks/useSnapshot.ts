@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
-import type { Snapshot } from '../lib/state'
+import type { Snapshot } from '../logic/state'
 
 /**
  * Subscribe to `quorfloat/state`.

@@ -2,8 +2,8 @@
 // permission actually in force.
 
 import { useT } from '../../hooks/useI18n'
-import { permissionIcon } from '../../lib/icons'
-import type { Snapshot } from '../../lib/state'
+import { permissionIcon } from '../../logic/icons'
+import type { Snapshot } from '../../logic/state'
 import { Icon } from '../common/Icon'
 import { PickerPopover } from './PickerPopover'
 import { PermissionMenu } from '../menus/PermissionMenu'

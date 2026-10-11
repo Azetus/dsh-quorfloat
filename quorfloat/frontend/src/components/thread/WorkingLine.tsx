@@ -2,7 +2,7 @@
 // a tool result.
 
 import { useT } from '../../hooks/useI18n'
-import type { Turn } from '../../lib/turns'
+import type { Turn } from '../../logic/turns'
 
 /** Props for {@link WorkingLine}. */
 export interface WorkingLineProps {

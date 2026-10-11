@@ -2,7 +2,7 @@
 // first snapshot arrives (the native window is transparent until then).
 
 import { useSnapshot } from '../hooks/useSnapshot'
-import { languageOf } from '../lib/i18n'
+import { languageOf } from '../logic/i18n'
 import { App } from './App'
 import { I18nProvider } from './common/I18nProvider'
 

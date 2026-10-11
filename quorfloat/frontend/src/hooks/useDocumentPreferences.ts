@@ -2,8 +2,8 @@
 // `color-scheme`) and reduced motion (the `q-reduce-motion` class).
 
 import { useEffect } from 'react'
-import { themeColorScheme } from '../lib/settings'
-import type { Snapshot } from '../lib/state'
+import { themeColorScheme } from '../logic/settings'
+import type { Snapshot } from '../logic/state'
 
 /**
  * Apply the host's appearance preferences to `<html>`.

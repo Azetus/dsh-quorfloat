@@ -1,7 +1,7 @@
 // One turn: the question, the folded working, and the answer.
 
 import { useT } from '../../hooks/useI18n'
-import type { Turn as TurnModel } from '../../lib/turns'
+import type { Turn as TurnModel } from '../../logic/turns'
 import { AnswerBar } from './AnswerBar'
 import { AnswerBody } from './AnswerBody'
 import { Disclosure } from './Disclosure'

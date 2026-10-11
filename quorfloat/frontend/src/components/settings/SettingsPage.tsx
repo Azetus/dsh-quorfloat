@@ -1,8 +1,8 @@
 // The settings page: appearance, language, the summon shortcut, and the keep-open switch.
 
 import { useT } from '../../hooks/useI18n'
-import { languageOf } from '../../lib/i18n'
-import type { Snapshot } from '../../lib/state'
+import { languageOf } from '../../logic/i18n'
+import type { Snapshot } from '../../logic/state'
 import { HotkeyField } from './HotkeyField'
 import { KeepOpenSwitch } from './KeepOpenSwitch'
 import { LanguagePicker } from './LanguagePicker'

@@ -6,7 +6,7 @@
 import { createRoot } from 'react-dom/client'
 import { api } from './api'
 import { Root } from './components/Root'
-import { reportedLanguages } from './lib/languages'
+import { reportedLanguages } from './logic/languages'
 
 const host = document.getElementById('root')
 if (host === null) throw new Error('#root is missing from the document')

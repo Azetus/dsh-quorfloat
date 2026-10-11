@@ -1,6 +1,6 @@
 // A turn's answer body: the model's Markdown, rendered and sanitised.
 
-import { renderMarkdown } from '../../lib/markdown'
+import { renderMarkdown } from '../../logic/markdown'
 
 /** Props for {@link AnswerBody}. */
 export interface AnswerBodyProps {

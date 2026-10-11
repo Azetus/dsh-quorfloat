@@ -4,8 +4,8 @@
 // whole body (and the runtime row with it) belongs to the conversation.
 
 import type { RefObject } from 'react'
-import type { Snapshot } from '../../lib/state'
-import { isBusy } from '../../lib/view-text'
+import type { Snapshot } from '../../logic/state'
+import { isBusy } from '../../logic/view-text'
 import { Cards } from '../cards/Cards'
 import { Composer } from './Composer'
 import { RuntimeRow } from './RuntimeRow'

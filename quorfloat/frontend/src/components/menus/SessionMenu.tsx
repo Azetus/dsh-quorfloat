@@ -2,8 +2,8 @@
 
 import { api } from '../../api'
 import { useT } from '../../hooks/useI18n'
-import type { Snapshot } from '../../lib/state'
-import { conversationTitle, relativeTime, workspaceTitle } from '../../lib/view-text'
+import type { Snapshot } from '../../logic/state'
+import { conversationTitle, relativeTime, workspaceTitle } from '../../logic/view-text'
 import { MenuHeading } from './MenuHeading'
 import { MenuHint } from './MenuHint'
 import { MenuOption } from './MenuOption'

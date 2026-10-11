@@ -2,7 +2,7 @@
 
 import { api } from '../../api'
 import { useT } from '../../hooks/useI18n'
-import type { Interaction } from '../../lib/state'
+import type { Interaction } from '../../logic/state'
 import { Icon } from '../common/Icon'
 
 /** Props for {@link ApprovalCard}. */

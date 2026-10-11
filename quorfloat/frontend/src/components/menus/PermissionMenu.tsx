@@ -2,8 +2,8 @@
 
 import { api } from '../../api'
 import { useT } from '../../hooks/useI18n'
-import { permissionIcon } from '../../lib/icons'
-import type { Snapshot } from '../../lib/state'
+import { permissionIcon } from '../../logic/icons'
+import type { Snapshot } from '../../logic/state'
 import { MenuHeading } from './MenuHeading'
 import { MenuHint } from './MenuHint'
 import { MenuOption } from './MenuOption'

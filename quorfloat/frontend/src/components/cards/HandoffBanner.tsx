@@ -2,7 +2,7 @@
 
 import { api } from '../../api'
 import { useT } from '../../hooks/useI18n'
-import type { Snapshot } from '../../lib/state'
+import type { Snapshot } from '../../logic/state'
 
 /** Props for {@link HandoffBanner}. */
 export interface HandoffBannerProps {

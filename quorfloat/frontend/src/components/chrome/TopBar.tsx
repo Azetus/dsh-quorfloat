@@ -1,7 +1,7 @@
 // The panel's top bar: brand, the two context pickers, and the window tools.
 
 import { useT } from '../../hooks/useI18n'
-import type { Snapshot } from '../../lib/state'
+import type { Snapshot } from '../../logic/state'
 import { Icon } from '../common/Icon'
 import { SessionPicker } from './SessionPicker'
 import { WorkspacePicker } from './WorkspacePicker'

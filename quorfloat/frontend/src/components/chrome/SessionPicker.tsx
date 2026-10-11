@@ -1,8 +1,8 @@
 // The top bar's conversation picker.
 
 import { useT } from '../../hooks/useI18n'
-import type { Snapshot } from '../../lib/state'
-import { sessionTitle } from '../../lib/view-text'
+import type { Snapshot } from '../../logic/state'
+import { sessionTitle } from '../../logic/view-text'
 import { Icon } from '../common/Icon'
 import { PickerPopover } from './PickerPopover'
 import { SessionMenu } from '../menus/SessionMenu'

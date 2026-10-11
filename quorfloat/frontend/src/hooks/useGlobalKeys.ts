@@ -3,7 +3,7 @@
 
 import { useEffect, type RefObject } from 'react'
 import { api } from '../api'
-import { chordFromEvent, validateChord } from '../lib/hotkey'
+import { chordFromEvent, validateChord } from '../logic/hotkey'
 import { useT } from './useI18n'
 
 /** Everything the keyboard handler needs from the app. */

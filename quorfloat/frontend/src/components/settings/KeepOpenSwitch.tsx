@@ -6,7 +6,7 @@
 
 import { useEffect, useRef } from 'react'
 import { api } from '../../api'
-import { keepOpenChecked } from '../../lib/settings'
+import { keepOpenChecked } from '../../logic/settings'
 
 /** Props for {@link KeepOpenSwitch}. */
 export interface KeepOpenSwitchProps {

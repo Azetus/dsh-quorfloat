@@ -3,7 +3,7 @@
 // them back to the Rust snake_case names.
 
 import { invoke } from '@tauri-apps/api/core'
-import type { QuestionAnswer } from './lib/questions'
+import type { QuestionAnswer } from './logic/questions'
 
 export const api = {
   submit: (text: string, workspaceId: string | null) => invoke('submit', { text, workspaceId }),
@@ -36,7 +36,7 @@ export const api = {
    *
    * Sent verbatim and in the browser's own order: the shell keeps the raw list as the
    * record of what this machine says, and resolves it only when nobody has chosen a
-   * language (see `lib/languages.ts`).
+   * language (see `logic/languages.ts`).
    */
   reportLanguages: (languages: readonly string[]) => invoke('report_languages', { languages }),
 }

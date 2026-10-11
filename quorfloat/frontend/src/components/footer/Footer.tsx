@@ -1,7 +1,7 @@
 // The panel footer: key hints, the status line, and the conversation's numbers.
 
-import type { Snapshot } from '../../lib/state'
-import { statusText } from '../../lib/view-text'
+import type { Snapshot } from '../../logic/state'
+import { statusText } from '../../logic/view-text'
 import { StatsRow } from './StatsRow'
 import { StatusLine } from './StatusLine'
 

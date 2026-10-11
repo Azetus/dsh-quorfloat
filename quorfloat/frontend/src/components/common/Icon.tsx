@@ -3,11 +3,11 @@
 // The panel's CSS positions the svg itself (`.q-option > svg`, `.q-picker > svg:first-child`,
 // `.q-check`), so this renders the element rather than wrapping the markup in a span.
 
-import { iconParts } from '../../lib/icons'
+import { iconParts } from '../../logic/icons'
 
 /** Props for {@link Icon}. */
 export interface IconProps {
-  /** Asset key from the embedded map (`lib/icons.ts`). */
+  /** Asset key from the embedded map (`logic/icons.ts`). */
   readonly name: string
   /** Extra class, e.g. `q-check` or `q-chevron`. */
   readonly className?: string

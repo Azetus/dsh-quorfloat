@@ -1,6 +1,6 @@
 // The conversation page's bottom row: permission on the left, model and effort on the right.
 
-import type { Snapshot } from '../../lib/state'
+import type { Snapshot } from '../../logic/state'
 import { ModelPicker } from '../chrome/ModelPicker'
 import { PermissionPicker } from '../chrome/PermissionPicker'
 

@@ -6,9 +6,9 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { api } from '../api'
-import { hidesOnBlur } from '../lib/settings'
-import type { Snapshot } from '../lib/state'
-import { hotkeyAction, stepVisibility, type VisibilityState } from '../lib/visibility'
+import { hidesOnBlur } from '../logic/settings'
+import type { Snapshot } from '../logic/state'
+import { hotkeyAction, stepVisibility, type VisibilityState } from '../logic/visibility'
 
 /** What the panel's visibility flight exposes to the tree. */
 export interface Flight {
