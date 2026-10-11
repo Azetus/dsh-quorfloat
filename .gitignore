@@ -17,6 +17,9 @@ lib/
 # scripts/dev.mjs 的产物：暂存的分发形态与一次性的 DSH_HOME
 .dev-home/
 
+# scripts/release.mjs 的产物：各平台的发布包目录
+bundles/
+
 # npm run toolchain
 .tooling/
 

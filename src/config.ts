@@ -83,8 +83,10 @@ export interface QuorfloatConfig {
    */
   readonly hotkey: string
   /**
-   * Absolute path to the quorfloat executable. Empty string selects the
-   * platform package convention resolved by `src/host/binary.ts`.
+   * Path to the quorfloat executable. A relative path is resolved against this
+   * package's root, which is what lets a bundle name its own `./bin/dsh-quorfloat`;
+   * an absolute path is used as it is. Empty string selects the platform package
+   * convention resolved by `src/host/binary.ts`.
    */
   readonly quorfloatPath: string
   /**

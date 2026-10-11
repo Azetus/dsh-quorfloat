@@ -6,7 +6,10 @@
  *    developer can point at `quorfloat/target/release/...` without touching
  *    anything else, and so a user can work around a broken installation;
  * 2. the `DSH_QUORFLOAT_PATH` environment variable, for scripted runs and CI;
- * 3. the platform package convention `dsh-quorfloat-<platform>-<arch>/bin/...`,
+ * 3. the platform package convention, most specific first:
+ *    `dsh-quorfloat-<platform>-<arch>/bin/...` and then the architecture-less
+ *    `dsh-quorfloat-<platform>/bin/...`, which is what actually ships — one
+ *    payload per platform, carrying a universal executable on macOS. Both are
  *    resolved through Node's module resolver from this package, which is what
  *    makes `optionalDependencies` + `os`/`cpu` work without code changes.
  *    On macOS the payload may also be the shipping `.app` bundle
@@ -31,6 +34,15 @@ export const EXECUTABLE_NAME = process.platform === 'win32' ? 'dsh-quorfloat.exe
 
 /** npm package suffix for the current platform, mirroring `os`/`cpu` package names. */
 export const PLATFORM_PACKAGE = `dsh-quorfloat-${process.platform}-${process.arch}`
+
+/**
+ * The architecture-less package name, which is the form that ships: one payload
+ * per platform (`dsh-quorfloat-darwin` carries a universal executable,
+ * `dsh-quorfloat-win32` an x64 one) rather than one per chip. It is tried after
+ * {@link PLATFORM_PACKAGE}, so a per-architecture package still wins wherever
+ * one exists.
+ */
+export const PLATFORM_PACKAGE_ARCHLESS = `dsh-quorfloat-${process.platform}`
 
 /** One resolution attempt, kept for diagnostics. */
 export interface ResolutionAttempt {
@@ -75,19 +87,38 @@ export function resolveQuorfloatBinary(lookup: BinaryLookup): ResolvedBinary {
   const packageRoot = lookup.packageRoot ?? findPackageRoot()
   const envPath = lookup.envPath ?? process.env['DSH_QUORFLOAT_PATH']
 
-  const candidates: { source: ResolutionAttempt['source']; path: string | undefined }[] = []
+  /**
+   * One candidate. `detail` names what was looked for when a candidate could not
+   * be resolved at all, so two platform-package attempts do not both read as
+   * `(not resolved)`.
+   */
+  const candidates: { source: ResolutionAttempt['source']; path: string | undefined; detail?: string }[] = []
   if (lookup.configuredPath !== '') {
     candidates.push({ source: 'config', path: resolvePath(lookup.configuredPath, packageRoot) })
   }
   if (typeof envPath === 'string' && envPath !== '') {
     candidates.push({ source: 'env', path: resolvePath(envPath, packageRoot) })
   }
-  candidates.push({ source: 'platform-package', path: resolvePlatformPackage(packageRoot) })
+  candidates.push({
+    source: 'platform-package',
+    path: resolvePlatformPackage(packageRoot, PLATFORM_PACKAGE),
+    detail: PLATFORM_PACKAGE,
+  })
+  candidates.push({
+    source: 'platform-package',
+    path: resolvePlatformPackage(packageRoot, PLATFORM_PACKAGE_ARCHLESS),
+    detail: PLATFORM_PACKAGE_ARCHLESS,
+  })
   candidates.push({ source: 'dev-build', path: devBuildPath(packageRoot) })
 
   for (const candidate of candidates) {
     if (candidate.path === undefined) {
-      attempts.push({ source: candidate.source, candidate: '(not resolved)', ok: false, reason: 'not found' })
+      attempts.push({
+        source: candidate.source,
+        candidate: candidate.detail ?? '(not resolved)',
+        ok: false,
+        reason: 'not found',
+      })
       continue
     }
     const inspection = inspectCandidate(candidate.path, candidate.source)
@@ -107,8 +138,15 @@ export function resolveQuorfloatBinary(lookup: BinaryLookup): ResolvedBinary {
   throw new ChannelError(
     'unavailable',
     `quorfloat executable not found for ${process.platform}/${process.arch}. Tried:\n${summary}\n` +
-      `Install the platform package "${PLATFORM_PACKAGE}", build it locally, or set config.quorfloatPath / DSH_QUORFLOAT_PATH.`,
-    { attempts, platform: process.platform, arch: process.arch, platformPackage: PLATFORM_PACKAGE },
+      `Install the platform package "${PLATFORM_PACKAGE}" or "${PLATFORM_PACKAGE_ARCHLESS}", build it locally, `
+      + 'or set config.quorfloatPath / DSH_QUORFLOAT_PATH.',
+    {
+      attempts,
+      platform: process.platform,
+      arch: process.arch,
+      platformPackage: PLATFORM_PACKAGE,
+      platformPackageArchless: PLATFORM_PACKAGE_ARCHLESS,
+    },
   )
 }
 
@@ -159,7 +197,7 @@ function resolvePath(value: string, packageRoot: string): string {
 }
 
 /**
- * Locate the executable inside the platform package, if that package is installed.
+ * Locate the executable inside one platform package, if that package is installed.
  *
  * The shipping form on macOS is a Tauri `.app` bundle, whose real executable is
  * `bin/<name>.app/Contents/MacOS/<name>`; the bare `bin/<name>` layout is the
@@ -168,13 +206,14 @@ function resolvePath(value: string, packageRoot: string): string {
  * exists wins so a package carrying only one form resolves without noise.
  *
  * @param packageRoot - this package's root, used as the resolution base.
+ * @param packageName - the platform package to look for, most specific first.
  * @returns the candidate path, or `undefined` when the package is absent.
  */
-function resolvePlatformPackage(packageRoot: string): string | undefined {
+function resolvePlatformPackage(packageRoot: string, packageName: string): string | undefined {
   const require = createRequire(join(packageRoot, 'package.json'))
   let manifest
   try {
-    manifest = require.resolve(`${PLATFORM_PACKAGE}/package.json`)
+    manifest = require.resolve(`${packageName}/package.json`)
   } catch {
     return undefined
   }

@@ -67,20 +67,9 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+import { FONT_LICENCE, FONT_NAME, SIDECAR_NAME, stageSidecar } from './lib/assemble.mjs'
+
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
-
-/** The executable name, matching what the host half resolves per platform. */
-const SIDECAR_NAME = process.platform === 'win32' ? 'dsh-quorfloat.exe' : 'dsh-quorfloat'
-
-/** The font the panel loads. The egui-era lookup (`quorfloat/src/ui/fonts.rs`) is
- *  gone with the view layer; the web frontend (M4) consumes it from the bundled
- *  assets, and the staged `fonts/` directory stays so the shipped layout rule
- *  keeps being exercised. */
-const FONT_NAME = 'NotoSansSC-VF.otf'
-
-/** The licence that must sit beside it. Same directory, so they travel together. */
-const FONT_LICENCE = 'OFL.txt'
-
 
 /** Whether `npm` and `dsh` need a shell to be resolved (they do on Windows). */
 const NEEDS_SHELL = process.platform === 'win32'
@@ -303,68 +292,22 @@ export function sidecarSource(root, profile) {
   return source
 }
 
-/** Copy the chosen build; fail rather than retaining a stale executable. */
-function stageSidecar(profile) {
-  const source = sidecarSource(ROOT, profile)
-  const directory = join(DEV_HOME, 'sidecar')
-  mkdirSync(directory, { recursive: true })
-  const destination = join(directory, SIDECAR_NAME)
-  if (existsSync(destination)) {
-    try {
-      rmSync(destination, { force: true })
-    } catch {
-      throw new Error('cannot replace the staged sidecar; stop the existing dev instance and retry')
-    }
-  }
-  cpSync(source, destination, { force: true })
-  stageFonts(directory)
-  return destination
-}
-
 /**
- * Put the font and its licence where the sidecar looks for them.
+ * Stage the chosen build into the throwaway home, beside the font it needs.
  *
- * The sidecar resolves `fonts/<file>` next to its own executable, which is exactly the
- * layout the platform package ships (`bin/`, `fonts/`) — so the development harness
- * exercises the same lookup rule as production rather than a special case. Both files
- * are copied together because they ship together: a font without its licence is the
- * packaging mistake this layout is meant to make impossible.
+ * The copying itself is `scripts/lib/assemble.mjs`, shared with the release script:
+ * the development home and a release bundle must stage the same tree, or one of
+ * them stops predicting what a user installs.
  */
-function stageFonts(sidecarDirectory) {
-  const groups = [{ directory: 'fonts', names: [FONT_NAME, FONT_LICENCE] }]
-  // An asset directory the repository no longer has is removed rather than left behind:
-  // a stale copy in the dev home is how a panel keeps working on a machine whose checkout
-  // would not — the same reason each file below is mirrored, not merely added.
-  for (const stale of ['icons']) {
-    rmSync(join(sidecarDirectory, stale), { recursive: true, force: true })
-  }
-  const missing = []
-  for (const group of groups) {
-    const target = join(sidecarDirectory, group.directory)
-    for (const name of group.names) {
-      const source = join(ROOT, 'quorfloat', 'assets', group.directory, name)
-      const destination = join(target, name)
-      if (!existsSync(source)) {
-        missing.push(name)
-        // Mirror the repository rather than keeping a copy from an earlier run: a staged
-        // asset the repository no longer has would let the panel look healthy while a
-        // fresh checkout is broken — and it is the very failure this harness exists to
-        // show you.
-        rmSync(destination, { force: true })
-        continue
-      }
-      mkdirSync(target, { recursive: true })
-      cpSync(source, destination, { force: true })
-    }
-  }
-  if (missing.length > 0) {
-    process.stdout.write(
-      `dev: missing ${missing.join(' and ')} in quorfloat/assets/fonts/\n`
-      + 'dev: the panel will fall back to Latin only — run `npm run fonts` to fetch them\n',
-    )
-    return
-  }
-  process.stdout.write(`dev: staged the font and its licence in ${sidecarDirectory}\n`)
+function stageDevSidecar(profile) {
+  const directory = join(DEV_HOME, 'sidecar')
+  return stageSidecar({
+    root: ROOT,
+    source: sidecarSource(ROOT, profile),
+    binaryDirectory: directory,
+    assetDirectory: directory,
+    label: 'dev',
+  }).path
 }
 
 /** One line describing what the staged sidecar will find. */
@@ -665,7 +608,9 @@ function main() {
     process.exit(1)
   }
 
-  if (options.build && !run('npm', ['run', 'build'])) {
+  // `build:plugin` rather than the full `build`: the Rust half below is chosen by
+  // `--release`, and the full build would hard-code the debug profile here.
+  if (options.build && !run('npm', ['run', 'build:plugin'])) {
     process.stderr.write('dev: the build failed; not starting\n')
     process.exit(1)
   }
@@ -689,7 +634,7 @@ function main() {
   // directory and session data cannot land in a real project.
   const workspacePath = join(DEV_HOME, 'workspace')
   const { home, staged } = stageHome(credentialsHome, options.profile, workspacePath)
-  const sidecar = stageSidecar(options.rustProfile)
+  const sidecar = stageDevSidecar(options.rustProfile)
   start(options, home, sidecar, staged)
 }
 
