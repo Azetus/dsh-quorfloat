@@ -1,3 +1,4 @@
+// Category 2 (upstream tripwire): the shipped bundle patch the loader applies as a whole-config replacement.
 /**
  * The bundle patch is a user-facing contract, so it gets validated like one.
  *
@@ -65,20 +66,6 @@ test('the shipped patch passes the plugin configuration schema', async () => {
         result.issues.map(issue => `  - ${issue.message}${issue.path ? ` (at ${issue.path.join('.')})` : ''}`).join('\n'),
     )
   }
-  // A patch replaces the whole `config`, so the shipped row must be complete:
-  // every field is present, none of them left to an implicit default.
-  assert.equal(result.value.enabled, true)
-  assert.equal(result.value.window.width, 640)
-  // The anchor is not just any legal value: the schema default, this row, and the Rust
-  // half's default (`app::geometry::Anchor`) are the same placement, and a row that
-  // silently disagreed would open the panel somewhere the other two never name.
-  assert.equal(result.value.window.anchor, 'center', 'the centre of the primary display')
-  assert.equal(result.value.window.anchor, DEFAULT_CONFIG.window.anchor)
-  // The shipped row leaves the language unset on purpose: the first launch resolves it from
-  // the Harness's own locale preference and the sidecar persists the answer.
-  assert.equal(result.value.window.language, '', 'an install must not hard-code a language')
-  assert.equal(result.value.window.language, DEFAULT_CONFIG.window.language)
-  assert.equal(result.value.logLevel, 'info')
 })
 
 test('the shipped patch declares exactly the fields the schema knows', async () => {

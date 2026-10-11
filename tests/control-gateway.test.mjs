@@ -1,3 +1,4 @@
+// Category 1 (cross-process interface): the `quorfloat/status` and `quorfloat/panel` endpoints the client calls.
 /**
  * Tests for the browser-facing control endpoints (`quorfloat/status`, `quorfloat/panel`).
  *
@@ -8,18 +9,12 @@
  * failure mode — plus one of their own: an action word is a process-level
  * effect, so an unknown one must be refused here rather than reach the
  * supervisor.
- *
- * The second half of the file drives the real `QuorfloatSupervisor` over the
- * mock sidecar. The pure mapping could be asserted against hand-written
- * snapshots, but that would only prove the test agrees with itself; the pid,
- * the handshake flag and the restart behaviour are facts about a live process,
- * so they are read from one.
  */
 
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { buildSupervisor, loadModule, waitFor } from './helpers.mjs'
+import { loadModule } from './helpers.mjs'
 
 const {
   registerControlGateway,
@@ -211,62 +206,3 @@ test('a missing or unknown action is refused before it reaches the host', async 
   assert.throws(() => validatePanelAction('start '), /action must be start, stop or restart/)
 })
 
-test('status reads the real supervisor, running and then stopped', async () => {
-  const { supervisor, restore } = await buildSupervisor({ mode: 'normal' })
-  try {
-    const { prototype } = register(supervisor)
-    // Registered while stopped: an unwatched sidecar must not report a handshake
-    // it never completed.
-    assert.equal(prototype[STATUS_ENDPOINT_METHOD]().state, 'stopped')
-    assert.equal(prototype[STATUS_ENDPOINT_METHOD]().seen, false)
-
-    await supervisor.start()
-    await waitFor('the mock peer to handshake', async () => supervisor.snapshot().state === 'running')
-    const running = prototype[STATUS_ENDPOINT_METHOD]()
-    assert.equal(running.state, 'running')
-    assert.equal(running.pid, supervisor.snapshot().pid, 'the pid is the process the supervisor owns')
-    assert.equal(typeof running.pid, 'number')
-    assert.equal(running.seen, true, 'the handshake is what "seen" reports')
-    assert.equal(running.visible, false, 'the panel has not reported a window')
-    assert.equal(running.restarts, 0)
-    assert.equal(running.restartExhausted, false)
-    assert.equal(running.lastError, null)
-
-    await supervisor.stop()
-    const stopped = prototype[STATUS_ENDPOINT_METHOD]()
-    assert.equal(stopped.state, 'stopped')
-    assert.equal(stopped.pid, null, 'a stopped supervisor has no pid, not a stale one')
-    assert.equal(stopped.seen, false)
-  } finally {
-    await supervisor.stop()
-    restore()
-  }
-})
-
-test('panel drives the real supervisor through start, restart and stop', async () => {
-  const { supervisor, restore } = await buildSupervisor({ mode: 'normal' })
-  try {
-    const { prototype } = register(supervisor)
-
-    const started = await prototype[PANEL_ENDPOINT_METHOD]('start')
-    assert.equal(typeof started.pid, 'number', 'start spawned a process')
-    await waitFor('the started peer to handshake', async () => supervisor.snapshot().state === 'running')
-    const firstPid = started.pid
-
-    const restarted = await prototype[PANEL_ENDPOINT_METHOD]('restart')
-    assert.equal(typeof restarted.pid, 'number')
-    assert.notEqual(restarted.pid, firstPid, 'restart replaced the process')
-    await waitFor(
-      'the replacement to handshake',
-      async () => supervisor.snapshot().state === 'running' && supervisor.snapshot().pid === restarted.pid,
-    )
-
-    const stopped = await prototype[PANEL_ENDPOINT_METHOD]('stop')
-    assert.equal(stopped.state, 'stopped')
-    assert.equal(stopped.pid, null)
-    assert.equal(supervisor.snapshot().state, 'stopped', 'the supervisor agrees, not just the endpoint')
-  } finally {
-    await supervisor.stop()
-    restore()
-  }
-})

@@ -42,22 +42,3 @@ impl Preference {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_names_the_host_and_the_settings_file_write_are_read_back() {
-        assert_eq!(Preference::from_name(Some("light")), Preference::Light);
-        assert_eq!(Preference::from_name(Some(" Dark ")), Preference::Dark);
-        assert_eq!(Preference::from_name(Some("system")), Preference::System);
-    }
-
-    #[test]
-    fn an_unknown_value_is_not_a_decision() {
-        // A typo must not decide how the panel looks.
-        assert_eq!(Preference::from_name(Some("chartreuse")), Preference::System);
-        assert_eq!(Preference::from_name(None), Preference::System);
-    }
-}

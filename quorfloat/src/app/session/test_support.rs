@@ -78,21 +78,6 @@ pub(crate) fn hello_ok() -> Inbound {
     }
 }
 
-pub(crate) fn conversation_snapshot() -> serde_json::Value {
-    json!({
-        "sessionId": "session-1", "generation": 1, "cursor": 1, "hasMore": false,
-        "records": [
-            // The two wrappers are the real asymmetry: `user/message` carries its
-            // content directly, the assistant's is inside `message`.
-            {"type": "event", "event": {"type": "user/message", "seq": 0, "time": 1,
-             "data": {"role": "user", "content": [{"type": "text", "text": "帮我看看"}]}}},
-            {"type": "event", "event": {"type": "assistant/message", "seq": 1, "time": 2,
-             "data": {"message": {"role": "assistant",
-                "content": [{"type": "text", "text": "看到了"}]}}}},
-        ],
-    })
-}
-
 pub(crate) fn approval_open(id: &str) -> Inbound {
     notification(
         "interaction/open",

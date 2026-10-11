@@ -1,3 +1,4 @@
+// Category 1 (cross-process protocol): the method table every peer-visible method must agree with.
 // The protocol's method table, and the one failure it is prone to.
 //
 // A method is answered only if three things agree: the router's dispatch, the method list the

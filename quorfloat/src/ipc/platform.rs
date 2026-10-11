@@ -38,6 +38,8 @@ pub fn host_arch() -> &'static str {
     }
 }
 
+// Protocol contract: the `hello` payload's platform and arch are the host's own
+// vocabulary (`process.platform` / `process.arch`), not Rust's.
 #[cfg(test)]
 mod tests {
     use super::*;

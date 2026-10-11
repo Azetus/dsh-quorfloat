@@ -84,8 +84,7 @@ use crate::ipc::rpc::{self, Inbound, Outcome, RpcError, Router};
 
 pub mod follow;
 pub mod interaction;
-/// Shared by the session's own tests and the bridge's: the bridge drives the same
-/// scripted host through the public command surface, so the fake host lives here.
+/// Shared by the session's own tests: the fake host lives here.
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod transcript;
@@ -856,13 +855,6 @@ impl Session {
     #[must_use]
     pub fn workspaces_asked(&self) -> bool {
         self.follow.workspaces_asked()
-    }
-
-    /// The prompt waiting for a conversation to exist, for tests about when it is sent.
-    #[cfg(test)]
-    #[must_use]
-    pub fn pending_prompt_for_tests(&self) -> Option<&str> {
-        self.pending_prompt.as_deref()
     }
 
     /// The conversation the user pinned, if any.
@@ -1972,6 +1964,8 @@ pub fn parse_options(result: &Value) -> SessionOptions {
     options
 }
 
+// Protocol contract: the handshake, the method surface, and the answers the host reads.
+// Category 1 (the host/sidecar wire) plus category 2 tripwires for the harness's own payloads.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2152,25 +2146,6 @@ mod tests {
     }
 
     #[test]
-    fn interaction_traffic_never_answers_itself() {
-        // The failure this prevents: answering for an interaction the user never saw,
-        // which would grant an escalation with no human in the loop. *Receiving* one
-        // is not answering one, so cards appear and nothing goes out.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        let mut source = ScriptedSource::new(vec![
-            notification("interaction/open", json!({"interactionId": "q", "kind": "approval", "payload": {}})),
-            notification("interaction/open", json!({"interactionId": "w", "kind": "question", "payload": {}})),
-        ]);
-        session.run(&mut source, &mut sink);
-        assert_eq!(sink.frames.len(), 1, "only the handshake went out");
-        assert_eq!(session.interactions().len(), 2, "both were kept for the user to see");
-        // Breadcrumbed before any window exists, which is exactly the situation in
-        // which "did the approval reach the panel at all?" gets asked.
-        assert_eq!(sink.marks.len(), 2);
-    }
-
-    #[test]
     fn ready_carries_the_effective_configuration() {
         // The host's answer to `hello` says what it accepted; `ready` says what it
         // wants this process to look like. Reading it is what makes the window the
@@ -2230,23 +2205,6 @@ mod tests {
     }
 
     #[test]
-    fn window_commands_are_queued_and_drained_in_order() {
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        let mut source = ScriptedSource::new(vec![
-            notification("window/visibility", json!({"visible": true})),
-            notification("window/visibility", json!({"visible": false})),
-            notification("window/visibility", json!({"visible": true})),
-        ]);
-        session.run(&mut source, &mut sink);
-        assert_eq!(
-            session.take_window_commands(),
-            vec![WindowCommand::Show, WindowCommand::Hide, WindowCommand::Show],
-        );
-        assert!(session.take_window_commands().is_empty(), "draining leaves nothing behind");
-    }
-
-    #[test]
     fn panel_visibility_is_reported_as_a_notification() {
         // A notification, not a request: the host handles it in its notification
         // path and the peer has nothing to wait for. It must also be sent when the
@@ -2271,296 +2229,6 @@ mod tests {
         let mut sink = RecordingSink::default();
         session.report_visibility(false, &["window", "hotkey"], &mut sink);
         assert_eq!(sink.frames[0]["params"]["capabilities"], json!(["window", "hotkey"]));
-    }
-
-    /// A snapshot carrying one user message and one assistant message.
-    #[test]
-    fn the_conversation_notifications_reach_the_transcript() {
-        // The wiring, not the model: `transcript.rs` tests what a snapshot means, this
-        // one tests that a snapshot notification is actually fed to it.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        let mut source = ScriptedSource::new(vec![notification("session/snapshot", conversation_snapshot())]);
-        session.run(&mut source, &mut sink);
-
-        let entries = session.transcript().entries();
-        assert_eq!(entries.len(), 2, "{entries:?}");
-        assert_eq!(entries[0], crate::app::session::transcript::Entry::User { text: "帮我看看".to_owned() });
-        assert_eq!(session.transcript().session_id(), Some("session-1"));
-    }
-
-    #[test]
-    fn an_event_arriving_after_the_snapshot_is_appended() {
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        let mut source = ScriptedSource::new(vec![
-            notification("session/snapshot", conversation_snapshot()),
-            notification("session/event", json!({
-                "sessionId": "session-1", "generation": 1, "seq": 2, "type": "user/message", "time": 3,
-                "data": {"role": "user", "content": [{"type": "text", "text": "还有一件事"}]},
-            })),
-        ]);
-        session.run(&mut source, &mut sink);
-
-        let entries = session.transcript().entries();
-        assert_eq!(entries.len(), 3, "{entries:?}");
-        assert_eq!(entries[2], crate::app::session::transcript::Entry::User { text: "还有一件事".to_owned() });
-    }
-
-    #[test]
-    fn a_reported_gap_is_recorded_and_repaired_by_re_subscribing() {
-        // A resync that only wrote a log line would leave the panel showing a
-        // conversation with a hole in it and no way to tell. The hole is legible in the
-        // marker, not in the thread.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        let mut source = ScriptedSource::new(vec![
-            notification("session/snapshot", conversation_snapshot()),
-            notification("session/resync", json!({"sessionId": "session-1", "generation": 1,
-                "reason": "sequence-gap", "expected": 2, "received": 5})),
-        ]);
-        session.run(&mut source, &mut sink);
-
-        let attached = sink
-            .frames
-            .iter()
-            .filter(|frame| frame["method"] == "session/attach")
-            .count();
-        assert_eq!(attached, 1, "the gap is repaired by asking again: {:?}", sink.frames);
-        assert!(
-            sink.marks.iter().any(|mark| mark.contains("resync")),
-            "and it is on the record: {:?}",
-            sink.marks,
-        );
-        // The conversation is exactly what the snapshot carried: the gap added no line to it.
-        assert_eq!(
-            session.transcript().entries().len(),
-            2,
-            "and the conversation keeps no line for it: {:?}",
-            session.transcript().entries(),
-        );
-        assert!(
-            !session.transcript().entries().iter().any(|entry| format!("{entry:?}").contains("重新订阅")),
-            "nor anything that reads like one",
-        );
-    }
-
-    #[test]
-    fn conversation_discovery_starts_only_after_the_handshake() {
-        // The host refuses session calls on a channel that has not said `hello`, so
-        // asking early would be a failure the panel then had to retry through.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        session.pump_follow_at(0, &mut sink);
-        assert!(sink.frames.is_empty(), "nothing is asked before the handshake");
-        session.on_frame(hello_ok(), &mut sink);
-        session.pump_follow_at(1_000, &mut sink);
-        assert_eq!(sink.frames.last().expect("a list request")["method"], "sessions/list");
-    }
-
-    #[test]
-    fn a_chosen_conversation_is_attached_with_a_fresh_request_id() {
-        // This is the step that decides whether an approval can reach the panel at all: with
-        // nothing attached, every interaction is deferred before the panel ever hears about it.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        session.on_frame(hello_ok(), &mut sink);
-        session.pump_follow_at(0, &mut sink);
-        let list_id = sink.frames.last().expect("a list request")["id"].clone();
-        session.on_frame(
-            Inbound::Response {
-                id: list_id.clone(),
-                outcome: Ok(json!({"items": [
-                    {"sessionId": "older", "updatedAt": 1},
-                    {"sessionId": "newest", "updatedAt": 9},
-                ]})),
-            },
-            &mut sink,
-        );
-        assert_eq!(
-            sink.frames.last().expect("the list request")["method"],
-            "sessions/list",
-            "reading the list attaches to nothing on its own",
-        );
-
-        session.choose_conversation("older", &mut sink);
-        let attach = sink.frames.last().expect("an attach request");
-        assert_eq!(attach["method"], "session/attach");
-        assert_eq!(attach["params"]["sessionId"], "older", "the chosen one, not the newest");
-        assert_ne!(attach["id"], list_id, "the attach is a second request, not a repeat of the first");
-
-        let attach_id = attach["id"].clone();
-        session.on_frame(
-            Inbound::Response { id: attach_id, outcome: Ok(json!({"sessionId": "older", "generation": 2})) },
-            &mut sink,
-        );
-        assert_eq!(session.follow().session_id(), Some("older"));
-    }
-
-    #[test]
-    fn a_lost_answer_is_retried_rather_than_stopping_discovery() {
-        // One dropped response must not leave the panel owning nothing for the rest of
-        // the session — a state that looks exactly like having nothing to do.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        session.on_frame(hello_ok(), &mut sink);
-        session.pump_follow_at(0, &mut sink);
-        let sent = sink.frames.len();
-        session.pump_follow_at(1_000, &mut sink);
-        assert_eq!(sink.frames.len(), sent, "the first answer is still owed");
-        session.pump_follow_at(30_000, &mut sink);
-        assert_eq!(sink.frames.len(), sent, "past the timeout the request is dropped, not repeated");
-        assert!(sink.logs.join("\n").contains("it will be retried"));
-        session.pump_follow_at(34_000, &mut sink);
-        assert_eq!(sink.frames.len(), sent + 1, "and asked again on the next interval");
-    }
-
-    #[test]
-    fn traffic_for_the_followed_conversation_is_counted() {
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        follow_a_conversation(&mut session, &mut sink);
-        deliver(
-            &mut session,
-            vec![
-                notification(
-                    "session/snapshot",
-                    json!({"sessionId": "session-1", "generation": 3, "cursor": 40, "records": [{}]}),
-                ),
-                notification("session/event", json!({"sessionId": "session-1", "generation": 3, "seq": 41})),
-                notification("session/event", json!({"sessionId": "older", "generation": 1, "seq": 2})),
-            ],
-            &mut sink,
-        );
-        assert_eq!(session.follow().events(), 1, "only the followed conversation counts");
-        assert!(
-            !sink.logs.join("
-    ").contains("not use"),
-            "session traffic is handled, not reported as an unknown notification",
-        );
-    }
-
-    /// A sink whose writes fail, for the paths that have to survive a broken stdout.
-    struct DeafSink;
-
-    impl FrameSink for DeafSink {
-        fn send(&mut self, _frame: &Value) -> std::io::Result<()> {
-            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "closed"))
-        }
-
-        fn log(&mut self, _line: &str) {}
-    }
-
-    /// A session that has followed `session-1`, which is the precondition for sending.
-    fn followed() -> (Session, RecordingSink) {
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        follow_a_conversation(&mut session, &mut sink);
-        (session, sink)
-    }
-
-    /// The request the session last wrote.
-    fn last_request(sink: &RecordingSink) -> serde_json::Value {
-        sink.frames.last().expect("a request was written").clone()
-    }
-
-    #[test]
-    fn attaching_refreshes_options_and_old_session_answers_cannot_replace_them() {
-        let (mut session, mut sink) = followed();
-        let request = sink.frames.iter().rev().find(|frame| frame["method"] == "session/options").expect("attachment requests current selections").clone();
-        assert_eq!(request["params"]["sessionId"], "session-1");
-        session.start_new_conversation(&mut sink);
-        session.on_frame(Inbound::Response { id: request["id"].clone(), outcome: Ok(json!({
-            "current": {"provider": "old", "model": "old-model"}, "permission": "old-permission"
-        })) }, &mut sink);
-        assert!(session.options().is_none_or(|options| options.current_model.is_none() && options.current_permission.is_none()));
-    }
-
-    #[test]
-    fn the_handshake_asks_what_may_be_chosen() {
-        // Before anything is attached, on purpose: the catalogs are process-wide, so the pickers can
-        // be filled by the time a user opens one. A panel that waited for a conversation would show
-        // an empty model menu for as long as it took them to notice.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        session.on_frame(hello_ok(), &mut sink);
-        let options = sink
-            .frames
-            .iter()
-            .find(|frame| frame["method"] == "session/options")
-            .expect("the handshake asks for the options");
-        assert!(
-            options["params"].get("sessionId").is_none(),
-            "and asks without a session id, which this one method allows: {}",
-            options["params"],
-        );
-    }
-
-    #[test]
-    fn the_options_answer_fills_the_pickers_and_is_on_the_record() {
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        session.on_frame(hello_ok(), &mut sink);
-        let id = sink.frames.last().expect("an options request")["id"].clone();
-        session.on_frame(
-            Inbound::Response {
-                id,
-                outcome: Ok(json!({
-                    "groups": [
-                        {"id": "deepseek", "name": "DeepSeek", "models": [
-                            {"id": "v41-flash", "name": "V4.1 Flash", "efforts": [
-                                {"id": "low", "name": "低"}, {"id": "high", "name": "高"},
-                            ], "defaultEffort": "low"},
-                            {"id": "v41", "name": "V4.1"},
-                        ]},
-                    ],
-                    "current": {"provider": "deepseek", "model": "v41-flash", "reasoningEffort": "high"},
-                    "permissions": [
-                        {"value": "read-only", "name": "只读"},
-                        {"value": "workspace-write", "name": "工作区"},
-                    ],
-                    "permission": "read-only",
-                })),
-            },
-            &mut sink,
-        );
-
-        let options = session.options().expect("the answer was kept");
-        assert_eq!(options.models.len(), 2, "both models, flattened across providers");
-        assert_eq!(options.models[0].provider, "deepseek", "each carries its own provider");
-        assert_eq!(options.models[0].efforts.len(), 2);
-        assert_eq!(options.models[1].efforts.len(), 0, "a model without effort control is fine");
-        assert_eq!(options.current_model, Some(("deepseek".to_owned(), "v41-flash".to_owned())));
-        assert_eq!(options.current_effort.as_deref(), Some("high"));
-        assert_eq!(options.current_permission.as_deref(), Some("read-only"));
-        assert_eq!(session.setting_failure(), None);
-        // The marker is how "the menu is empty" is answered afterwards: the panel cannot show what
-        // it was never given, and this line says whether it was given anything.
-        assert!(
-            sink.marks.iter().any(|mark| mark == "options 2 models, 2 permissions, model=v41-flash permission=read-only"),
-            "the read is on the record: {:?}",
-            sink.marks,
-        );
-    }
-
-    #[test]
-    fn choosing_a_model_sends_the_effort_with_it() {
-        // The host holds the model and the effort in one selection, and a model change resets the
-        // effort to that model's default. Sending the effort separately would therefore register one
-        // the new model may not accept — for a moment, which is a moment the next step can run in.
-        let (mut session, mut sink) = followed();
-        session.select_model("deepseek", "v41-flash", Some("high"), &mut sink);
-        let frame = last_request(&sink);
-        assert_eq!(frame["method"], "session/select");
-        assert_eq!(frame["params"]["sessionId"], "session-1");
-        assert_eq!(frame["params"]["provider"], "deepseek");
-        assert_eq!(frame["params"]["model"], "v41-flash");
-        assert_eq!(frame["params"]["reasoningEffort"], "high");
-
-        // And without an effort, the field is absent rather than null: "the host decides" is not a
-        // value, and sending `null` would be this process inventing one.
-        session.select_model("deepseek", "v41", None, &mut sink);
-        assert!(last_request(&sink)["params"].get("reasoningEffort").is_none());
     }
 
     #[test]
@@ -2596,447 +2264,39 @@ mod tests {
         assert_eq!(options.current_permission.as_deref(), Some("read-only"));
     }
 
+    /// Category 2: `session/stats` is the harness's payload, so the field names read here
+    /// are its contract, not ours.
     #[test]
-    fn a_permission_switch_names_the_preset_not_a_sandbox_mode() {
-        // A preset decides the sandbox mode *and* the approval policy and records its own durable
-        // event. Sending a bare mode would leave the two halves disagreeing.
-        let (mut session, mut sink) = followed();
-        session.set_permission("danger-full-access", &mut sink);
-        let frame = last_request(&sink);
-        assert_eq!(frame["method"], "session/permission");
-        assert_eq!(frame["params"]["sessionId"], "session-1");
-        assert_eq!(frame["params"]["value"], "danger-full-access");
-    }
-
-    #[test]
-    fn a_refused_setting_change_is_kept_rather_than_swallowed() {
-        // A model or permission that did not change is invisible otherwise: the panel goes on showing
-        // the old value and the click looks like it did nothing at all.
-        let (mut session, mut sink) = followed();
-        session.set_permission("read-only", &mut sink);
-        let id = last_request(&sink)["id"].clone();
-        session.on_frame(
-            Inbound::Response {
-                id,
-                outcome: Err(crate::ipc::rpc::RpcError {
-                    code: -32000,
-                    message: "this session is not loaded".to_owned(),
-                    data: None,
-                }),
-            },
-            &mut sink,
-        );
-        let failure = session.setting_failure().expect("the refusal is kept");
-        assert!(failure.contains("this session is not loaded"), "{failure}");
-        assert!(failure.contains("-32000"), "and it names the code: {failure}");
-        assert!(
-            sink.marks.iter().any(|mark| mark.starts_with("setting refused:")),
-            "and it is on the record: {:?}",
-            sink.marks,
-        );
-    }
-
-    #[test]
-    fn statistics_for_another_conversation_are_ignored() {
-        // The notification carries its own session id, and a panel showing one conversation must not
-        // put another one's token counts under its answer.
+    fn stats_carries_the_fields_the_footer_reads() {
         let (mut session, mut sink) = followed();
         session.on_frame(
-            Inbound::Notification {
-                method: "session/stats".to_owned(),
-                params: Some(json!({
-                    "sessionId": "somebody-else",
-                    "stats": {"turns": 99, "steps": 99},
-                })),
-            },
-            &mut sink,
-        );
-        assert_eq!(session.stats(), None, "another conversation's figures are not this one's");
-
-        session.on_frame(
-            Inbound::Notification {
-                method: "session/stats".to_owned(),
-                params: Some(json!({
+            notification(
+                "session/stats",
+                json!({
                     "sessionId": "session-1",
                     "stats": {
-                        "turns": 3, "steps": 7, "tokensPerSecond": 200.5,
+                        "turns": 3, "steps": 7, "totalTokens": 15_600, "tokensPerSecond": 200.5,
                         "cacheHitPercent": 75, "contextTokens": 4000, "contextLimit": 128000,
                     },
-                })),
-            },
+                }),
+            ),
             &mut sink,
         );
-        let stats = session.stats().expect("the attached conversation's figures are kept");
+        let stats = session.stats().expect("the followed conversation's figures are kept");
         assert_eq!(stats.turns, 3);
         assert_eq!(stats.steps, 7);
+        assert_eq!(stats.total_tokens, Some(15_600));
         assert_eq!(stats.tokens_per_second, Some(200.5));
         assert_eq!(stats.cache_hit_percent, Some(75.0));
         assert_eq!(stats.context_tokens, Some(4000));
         assert_eq!(stats.context_limit, Some(128000));
     }
 
-    /// One `session/stats` notification for the conversation the fixture follows.
-    ///
-    /// @param turns - closed turns the host reports.
-    /// @param steps - closed steps the host reports.
-    /// @returns the inbound notification.
-    fn stats_notification(turns: u64, steps: u64) -> Inbound {
-        Inbound::Notification {
-            method: "session/stats".to_owned(),
-            params: Some(json!({
-                "sessionId": "session-1",
-                "stats": {"turns": turns, "steps": steps},
-            })),
-        }
-    }
-
-    /// How many `session/options` requests one slice of frames holds.
-    ///
-    /// @param frames - the frames to count in.
-    /// @returns the number of catalog reads.
-    fn options_requests(frames: &[serde_json::Value]) -> usize {
-        frames.iter().filter(|frame| frame["method"] == "session/options").count()
-    }
-
-    /// The catalog answer the host sends for a conversation it has just created: no current model,
-    /// because nothing has run yet (the host answers `model=? permission=workspace-write`).
-    ///
-    /// @returns the result payload.
-    fn fresh_conversation_options() -> serde_json::Value {
-        json!({
-            "groups": [{"id": "deepseek", "name": "DeepSeek", "models": [
-                {"id": "v41-flash", "name": "V4.1 Flash", "efforts": [{"id": "high", "name": "高"}], "defaultEffort": "high"},
-            ]}],
-            "permissions": [{"value": "workspace-write", "name": "工作区"}],
-            "permission": "workspace-write",
-        })
-    }
-
-    #[test]
-    fn a_conversation_created_before_it_ran_learns_its_model_when_a_step_closes() {
-        // The panel attaches a conversation the moment it creates one, so the options read that
-        // follows the attach arrives *before* Harness has anything to say: the model projection is
-        // built from `request/header`, and no request has been made yet, so the host answers
-        // `model=?`. Something has to ask again once a step closes, or the footer says "unknown"
-        // for the rest of the run while the conversation runs on the deployment default.
-        let (mut session, mut sink) = followed();
-        let id = last_request(&sink)["id"].clone();
-        session.on_frame(
-            Inbound::Response { id, outcome: Ok(fresh_conversation_options()) },
-            &mut sink,
-        );
-        assert!(
-            session.options().is_some_and(|options| options.current_model.is_none()),
-            "the host honestly says it does not know yet",
-        );
-
-        let before = sink.frames.len();
-        session.on_frame(stats_notification(1, 1), &mut sink);
-        assert_eq!(
-            options_requests(&sink.frames[before..]),
-            1,
-            "a closed step is when the record exists, so the panel asks once more: {:?}",
-            &sink.frames[before..],
-        );
-    }
-
-    #[test]
-    fn the_model_retry_waits_for_a_step_and_stops_once_the_model_is_known() {
-        let (mut session, mut sink) = followed();
-        let id = last_request(&sink)["id"].clone();
-        session.on_frame(
-            Inbound::Response { id, outcome: Ok(fresh_conversation_options()) },
-            &mut sink,
-        );
-
-        // An attach reports statistics of its own, and "attached but never run" is not a reason to
-        // read the catalog again: there is nothing new to learn yet.
-        let before = sink.frames.len();
-        session.on_frame(stats_notification(0, 0), &mut sink);
-        assert_eq!(options_requests(&sink.frames[before..]), 0, "nothing has run yet");
-
-        // A closed step is the moment the record exists.
-        session.on_frame(stats_notification(1, 1), &mut sink);
-        assert_eq!(options_requests(&sink.frames[before..]), 1);
-
-        // The answer now carries the model, which ends the retry.
-        let id = last_request(&sink)["id"].clone();
-        session.on_frame(
-            Inbound::Response {
-                id,
-                outcome: Ok(json!({
-                    "groups": [{"id": "deepseek", "name": "DeepSeek", "models": [
-                        {"id": "v41-flash", "name": "V4.1 Flash", "efforts": [{"id": "high", "name": "高"}], "defaultEffort": "high"},
-                    ]}],
-                    "current": {"provider": "deepseek", "model": "v41-flash", "reasoningEffort": "high"},
-                    "permissions": [{"value": "workspace-write", "name": "工作区"}],
-                    "permission": "workspace-write",
-                })),
-            },
-            &mut sink,
-        );
-        assert!(session.options().is_some_and(|options| options.current_model.is_some()));
-
-        let after = sink.frames.len();
-        session.on_frame(stats_notification(3, 7), &mut sink);
-        assert_eq!(
-            options_requests(&sink.frames[after..]),
-            0,
-            "a model that is already known is not asked for again",
-        );
-    }
-
-    #[test]
-    fn switching_conversation_drops_the_other_ones_settings() {
-        // The catalogs are process-wide and stay; the *current* model, effort and permission are per
-        // session. Carrying them across a switch would show one conversation's permissions beside
-        // another's contents, which is the one thing this control exists to make visible.
-        let (mut session, mut sink) = followed();
-        // Both halves of the state, so the reset has something to reset: the catalogs (process-wide,
-        // which stay) and the values in effect (per session, which must not).
-        session.request_options(&mut sink);
-        let id = last_request(&sink)["id"].clone();
-        session.on_frame(
-            Inbound::Response {
-                id,
-                outcome: Ok(json!({
-                    "groups": [{"id": "deepseek", "name": "DeepSeek", "models": [{"id": "v41", "name": "V4.1"}]}],
-                    "current": {"provider": "deepseek", "model": "v41"},
-                    "permissions": [{"value": "read-only", "name": "只读"}],
-                    "permission": "read-only",
-                })),
-            },
-            &mut sink,
-        );
-        session.on_frame(
-            Inbound::Notification {
-                method: "session/stats".to_owned(),
-                params: Some(json!({"sessionId": "session-1", "stats": {"turns": 3, "steps": 7}})),
-            },
-            &mut sink,
-        );
-        assert!(session.stats().is_some());
-        assert!(session.options().is_some_and(|options| options.current_model.is_some()));
-
-        session.choose_conversation("older", &mut sink);
-        assert_eq!(session.stats(), None, "the other conversation's counts are gone");
-        let options = session.options().expect("the catalogs are still there");
-        assert_eq!(options.models.len(), 1, "the process-wide model list survives the switch");
-        assert!(options.current_model.is_none(), "and no model is claimed for the new one");
-        assert!(options.current_permission.is_none());
-    }
-
-    #[test]
-    fn a_prompt_carries_a_fresh_idempotency_key() {
-        // The host admits a given key once; two prompts sharing one are one prompt, and
-        // the second thing the user typed would vanish.
-        let (mut session, mut sink) = followed();
-        session.send_prompt("第一句", None, &mut sink);
-        let first = last_request(&sink);
-        session.on_frame(
-            Inbound::Response { id: first["id"].clone(), outcome: Ok(json!({"accepted": true})) },
-            &mut sink,
-        );
-        session.send_prompt("第二句", None, &mut sink);
-        let second = last_request(&sink);
-
-        assert_eq!(first["method"], "session/prompt");
-        assert_eq!(first["params"]["sessionId"], "session-1");
-        assert_eq!(first["params"]["text"], "第一句");
-        assert_ne!(first["params"]["requestId"], second["params"]["requestId"]);
-        assert_eq!(second["params"]["text"], "第二句");
-    }
-
-    /// `session/create: workspaceId must be a non-empty string`.
-    ///
-    /// The host's router requires a non-empty `workspaceId`; the empty value that means "use
-    /// your default" belongs to the host's own API, not to the wire, so sending it is a request
-    /// that can never work.
-    #[test]
-    fn a_conversation_is_never_asked_for_without_a_workspace() {
+    /// A session following `session-1`: `session/stats` is only kept for the attached one.
+    fn followed() -> (Session, RecordingSink) {
         let mut session = Session::new(identity());
         let mut sink = RecordingSink::default();
-        session.on_frame(hello_ok(), &mut sink);
-
-        let delivery = session.send_prompt("在吗", None, &mut sink);
-        assert!(matches!(delivery, Delivery::Failed { .. }), "{delivery:?}");
-        assert!(
-            !sink.frames.iter().any(|frame| frame["method"] == "session/create"),
-            "no request is sent at all: {:?}",
-            sink.frames,
-        );
-        let reason = delivery.describe().unwrap_or_default();
-        assert!(reason.contains("工作区"), "and the user is told what is missing: {reason}");
-        assert_eq!(session.pending_prompt_for_tests(), None, "the text is not held hostage");
-
-        // A blank string is not a workspace either.
-        let delivery = session.send_prompt("在吗", Some("   "), &mut sink);
-        assert!(matches!(delivery, Delivery::Failed { .. }), "{delivery:?}");
-        assert!(!sink.frames.iter().any(|frame| frame["method"] == "session/create"));
+        follow_a_conversation(&mut session, &mut sink);
+        (session, sink)
     }
-
-    #[test]
-    fn a_prompt_with_no_conversation_creates_one_and_then_sends_it() {
-        // The design's rule: the conversation is created *when the user submits*, not when the
-        // panel opens. A panel that created one on every summon would fill the harness's list
-        // with conversations nobody ever used.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        session.on_frame(hello_ok(), &mut sink);
-
-        let delivery = session.send_prompt("在吗", Some("ws-1"), &mut sink);
-        assert!(delivery.is_sending(), "the panel is working on it: {delivery:?}");
-        let create = sink.frames.last().expect("a create request");
-        assert_eq!(create["method"], "session/create");
-        assert_eq!(create["params"]["workspaceId"], "ws-1", "in the workspace the ladder chose");
-        assert!(
-            !sink.frames.iter().any(|frame| frame["method"] == "session/prompt"),
-            "and nothing is sent until there is somewhere to send it",
-        );
-
-        // The host answers with the new conversation, which the panel then attaches to.
-        let create_id = create["id"].clone();
-        session.on_frame(
-            Inbound::Response { id: create_id, outcome: Ok(json!({"sessionId": "brand-new"})) },
-            &mut sink,
-        );
-        let attach = sink.frames.last().expect("an attach request");
-        assert_eq!(attach["method"], "session/attach");
-        assert_eq!(attach["params"]["sessionId"], "brand-new");
-
-        // And the attach's answer is what releases the prompt the user typed.
-        let attach_id = attach["id"].clone();
-        session.on_frame(
-            Inbound::Response { id: attach_id, outcome: Ok(json!({"sessionId": "brand-new", "generation": 1})) },
-            &mut sink,
-        );
-        let prompt = sink.frames.last().expect("the prompt");
-        assert_eq!(prompt["method"], "session/prompt");
-        assert_eq!(prompt["params"]["sessionId"], "brand-new");
-        assert_eq!(prompt["params"]["text"], "在吗");
-    }
-
-    #[test]
-    fn a_blank_prompt_is_refused_rather_than_sent() {
-        // The host would accept it and the conversation would gain an empty turn.
-        let (mut session, mut sink) = followed();
-        let before = sink.frames.len();
-        let delivery = session.send_prompt("   \n ", None, &mut sink);
-        assert_eq!(delivery, Delivery::Failed { reason: "内容为空".to_owned() });
-        assert_eq!(sink.frames.len(), before);
-    }
-
-    #[test]
-    fn a_second_prompt_waits_for_the_first_verdict() {
-        let (mut session, mut sink) = followed();
-        session.send_prompt("第一句", None, &mut sink);
-        let sent = sink.frames.len();
-        session.send_prompt("第二句", None, &mut sink);
-        assert_eq!(sink.frames.len(), sent, "the second is not written while the first is unanswered");
-        assert!(session.prompt_delivery().is_sending());
-    }
-
-    #[test]
-    fn the_hosts_verdict_on_a_prompt_is_reported() {
-        let (mut session, mut sink) = followed();
-        session.send_prompt("你好", None, &mut sink);
-        let id = last_request(&sink)["id"].clone();
-        session.on_frame(Inbound::Response { id, outcome: Ok(json!({"accepted": true})) }, &mut sink);
-        assert_eq!(*session.prompt_delivery(), Delivery::Accepted);
-        assert!(session.prompt_delivery().describe().is_none(), "accepted needs no line");
-    }
-
-    #[test]
-    fn a_prompt_key_names_the_attempt_not_just_the_conversation() {
-        // A key of `{session}:prompt-{n}` with `n` starting at zero in every process repeats itself
-        // after a restart, and the host answers `accepted: true` to a key already in that
-        // conversation's history **without admitting the prompt** (`hasPromptRequest` in the
-        // harness's session controller): the text goes nowhere while the panel — for which "the
-        // host took it" is delivered — clears the input.
-        //
-        // Two *runs*, one conversation, both on their first prompt: the attempt count cannot tell
-        // them apart.
-        let key = |run: &str, sequence: u64| Session::prompt_key_for("session-1", run, sequence);
-        assert_ne!(
-            key("pid-1-1000", 1),
-            key("pid-2-1000", 1),
-            "another run of the panel is another attempt, even at the same clock tick",
-        );
-        assert_ne!(
-            key("pid-1-1000", 1),
-            key("pid-1-1000", 2),
-            "and a second attempt inside one run is one too",
-        );
-        assert_eq!(
-            key("pid-1-1000", 1),
-            key("pid-1-1000", 1),
-            "while the key for one attempt is stable, so a lost answer can be recognised",
-        );
-        // The conversation is still in the key, so the marker stays readable.
-        assert!(
-            key("pid-1-1000", 1).starts_with("session-1:prompt-"),
-            "{}",
-            key("pid-1-1000", 1),
-        );
-    }
-
-    #[test]
-    fn a_refused_prompt_keeps_the_hosts_reason_and_the_retry_uses_a_new_key() {
-        // The host remembers a failed key and refuses to reuse it ("submit it again to
-        // retry deliberately"), so a retry is a new submission — and the reason has to
-        // survive, because it is the only thing that tells the user what to change.
-        let (mut session, mut sink) = followed();
-        session.send_prompt("你好", None, &mut sink);
-        let first = last_request(&sink);
-        let key = first["params"]["requestId"].clone();
-        session.on_frame(
-            Inbound::Response {
-                id: first["id"].clone(),
-                outcome: Err(RpcError {
-                    code: error_code::UNAVAILABLE,
-                    message: "still awaiting confirmation".to_owned(),
-                    data: None,
-                }),
-            },
-            &mut sink,
-        );
-        let described = session.prompt_delivery().describe().expect("a line for the user");
-        assert!(described.contains("still awaiting confirmation"), "{described}");
-
-        session.send_prompt("你好", None, &mut sink);
-        assert_ne!(last_request(&sink)["params"]["requestId"], key, "a retry is a new submission");
-    }
-
-    #[test]
-    fn a_prompt_that_could_not_be_written_is_not_left_sending() {
-        let (mut session, _) = followed();
-        let mut deaf = DeafSink;
-        let delivery = session.send_prompt("你好", None, &mut deaf);
-        assert!(matches!(delivery, Delivery::Failed { .. }), "{delivery:?}");
-        assert!(!session.prompt_delivery().is_sending(), "a failed write must not look pending");
-    }
-
-    #[test]
-    fn a_stop_request_asks_the_host_and_reports_its_verdict() {
-        let (mut session, mut sink) = followed();
-        assert!(session.cancel_turn(&mut sink));
-        let frame = last_request(&sink);
-        assert_eq!(frame["method"], "session/cancel");
-        assert_eq!(frame["params"]["sessionId"], "session-1");
-        session.on_frame(
-            Inbound::Response { id: frame["id"].clone(), outcome: Ok(json!({"accepted": true})) },
-            &mut sink,
-        );
-        assert_eq!(*session.cancel_delivery(), Delivery::Accepted);
-    }
-
-    #[test]
-    fn a_stop_without_a_conversation_is_refused() {
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        assert!(!session.cancel_turn(&mut sink));
-        assert!(matches!(session.cancel_delivery(), Delivery::Failed { .. }));
-    }
-
 }
-

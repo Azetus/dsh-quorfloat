@@ -1,3 +1,4 @@
+// Category 1 (cross-process protocol): the host↔sidecar wire against the real Rust binary.
 /**
  * Cross-language handshake: the real host plugin against the real Rust binary.
  *

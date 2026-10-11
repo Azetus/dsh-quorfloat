@@ -1,3 +1,4 @@
+// Category 2 (upstream tripwire): the plugin loads in the real Cordis composition and spawns/unloads a real peer.
 /**
  * Smoke test against the real Cordis framework.
  *

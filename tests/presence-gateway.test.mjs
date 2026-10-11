@@ -1,3 +1,4 @@
+// Category 1 (cross-process interface): the `quorfloat/reportPresence` endpoint and its wire fields.
 /**
  * Gateway service registration tests.
  *

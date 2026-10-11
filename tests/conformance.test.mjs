@@ -1,3 +1,4 @@
+// Category 2 (upstream tripwire): every payload the adapter sends passes the installed Harness contract.
 /**
  * Conformance against the installed DeepSeek Harness contract.
  *

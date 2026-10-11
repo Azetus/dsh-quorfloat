@@ -79,6 +79,8 @@ pub mod error_code {
 /// turn waiting on it.
 pub const CAPABILITIES: &[&str] = &["window", "hotkey", "tauri", "approval", "question"];
 
+// Protocol contract: the constants both halves must agree on — version, frame limit,
+// error codes, capabilities. Changes with the interface, never with the product.
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,3 +1,4 @@
+// Category 1 (cross-process protocol): NDJSON framing and JSON-RPC message classification.
 /**
  * Framing and message-classification tests.
  *

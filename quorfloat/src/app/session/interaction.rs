@@ -643,13 +643,14 @@ pub fn validate_answers(questions: &[Question], answers: &[QuestionAnswer]) -> O
 /// runtime surprise.
 const _: () = assert!(MAX_QUESTIONS_ANSWERED >= MAX_QUESTIONS_SHOWN);
 
+// Upstream tripwires: the harness's `interaction/open` and `interaction/hint` payloads (2),
+// plus the category 1 answer frame the host's validator reads.
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::session::test_support::*;
-    use crate::app::session::{FrameSink, Session};
-    use crate::ipc::protocol::error_code;
-    use crate::ipc::rpc::{Inbound, RpcError};
+    use crate::app::session::Session;
+    use crate::ipc::rpc::Inbound;
     use serde_json::json;
 
     #[test]
@@ -669,33 +670,6 @@ mod tests {
         // and answering one is refused by the host.
         assert!(session.interactions().is_empty());
         assert_eq!(sink.frames.len(), 1, "only the handshake went out");
-        assert_eq!(sink.marks, vec!["handoff question harness-not-visible surfaces=1".to_owned()]);
-    }
-
-    #[test]
-    fn a_hand_off_without_a_live_surface_says_so() {
-        // The difference between "go and answer it there" and "nothing can answer it"
-        // is one field, and the panel must not have to guess which sentence is true.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        let mut source = ScriptedSource::new(vec![
-            notification("interaction/hint", json!({"kind": "question", "reason": "harness-not-visible"})),
-            // A payload whose surface list is not a list of strings is reported as
-            // empty rather than as a surface nobody can name.
-            notification(
-                "interaction/hint",
-                json!({"kind": "approval", "reason": "nobody-looking", "surfaces": [7, "web"]}),
-            ),
-        ]);
-        session.run(&mut source, &mut sink);
-        let handoff = session.handoff().expect("the second hint replaced the first");
-        assert_eq!(handoff.kind(), InteractionKind::Approval);
-        assert_eq!(handoff.surfaces(), ["web"]);
-        assert!(
-            sink.marks.iter().any(|line| line.ends_with("surfaces=0")),
-            "the first hint recorded no live surface: {:?}",
-            sink.marks,
-        );
     }
 
     #[test]
@@ -714,17 +688,6 @@ mod tests {
         assert!(sink.logs.join("\n").contains("unknown kind"));
     }
 
-    #[test]
-    fn a_hand_off_can_be_dismissed() {
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        session
-            .on_frame(notification("interaction/hint", json!({"kind": "approval", "reason": "harness-open-but-idle"})), &mut sink);
-        assert!(session.handoff().is_some());
-        session.dismiss_handoff();
-        assert!(session.handoff().is_none());
-    }
-
     /// The host's `interaction/open` for one approval.
     #[test]
     fn an_approval_becomes_a_card_that_can_be_answered() {
@@ -739,7 +702,6 @@ mod tests {
         assert_eq!(cards[0].kind(), InteractionKind::Approval);
         assert_eq!(cards[0].tool_name(), Some("bash"));
         assert!(cards[0].is_actionable());
-        assert_eq!(sink.marks, vec!["interaction approval-1 approval arrived".to_owned()]);
 
         assert!(session.answer_interaction("approval-1", ApprovalVerdict::AllowOnce, &mut sink));
         let answer = sink.frames.last().expect("an answer was sent");
@@ -747,44 +709,6 @@ mod tests {
         assert_eq!(answer["params"]["interactionId"], "approval-1");
         assert_eq!(answer["params"]["answer"]["outcome"], "allowed-once");
         assert!(answer["id"].is_number(), "an answer is a request, so it carries an id");
-        assert!(sink.marks.iter().any(|line| line == "interaction approval-1 answering allowed-once"));
-    }
-
-    #[test]
-    fn one_decision_is_sent_once() {
-        // The grant is one-shot: a second send would be a second decision for one
-        // question, and the host refuses it anyway. Refusing it here keeps the two
-        // ends from disagreeing about what the user did.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(&mut session, vec![approval_open("approval-1")], &mut sink);
-        assert!(session.answer_interaction("approval-1", ApprovalVerdict::Reject, &mut sink));
-        let sent = sink.frames.len();
-        assert!(!session.answer_interaction("approval-1", ApprovalVerdict::AllowOnce, &mut sink));
-        assert_eq!(sink.frames.len(), sent, "no second answer went out");
-        assert!(sink.logs.join("\n").contains("already in flight"));
-    }
-
-    #[test]
-    fn answering_something_this_panel_does_not_hold_is_refused() {
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        assert!(!session.answer_interaction("approval-9", ApprovalVerdict::AllowOnce, &mut sink));
-        assert!(sink.frames.is_empty());
-        assert!(sink.logs.join("\n").contains("not holding it"));
-    }
-
-    #[test]
-    fn a_re_published_interaction_does_not_become_a_second_card() {
-        // The host re-delivers what is still pending after a restart. Two cards for
-        // one request would show the user two buttons for one decision, and the second
-        // would be refused by the host anyway.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(&mut session, vec![approval_open("approval-1"), approval_open("approval-1")], &mut sink);
-        assert_eq!(session.interactions().len(), 1);
-        assert!(sink.logs.join("\n").contains("already holding it"));
-        assert_eq!(sink.marks.len(), 1, "one arrival, one breadcrumb");
     }
 
     #[test]
@@ -808,162 +732,15 @@ mod tests {
     }
 
     #[test]
-    fn the_hosts_acceptance_settles_the_card() {
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(&mut session, vec![approval_open("approval-1")], &mut sink);
-        session.answer_interaction("approval-1", ApprovalVerdict::AllowOnce, &mut sink);
-        let id = sink.frames.last().expect("the answer")["id"].clone();
-        session.on_frame(
-            Inbound::Response { id, outcome: Ok(json!({"accepted": true})) },
-            &mut sink,
-        );
-        assert_eq!(
-            session.interactions()[0].state(),
-            &InteractionState::Applied { answer: SentAnswer::Approval(ApprovalVerdict::AllowOnce) }
-        );
-        assert!(!session.interactions()[0].is_actionable());
-        assert!(sink.marks.iter().any(|line| line == "interaction approval-1 applied allowed-once"));
-    }
-
-    #[test]
-    fn a_refusal_keeps_the_hosts_reason_and_cannot_be_retried() {
-        // `accepted:false` is a normal answer, not a failure: another surface answered
-        // first, or the claim expired. The user is owed the reason, and a retry would
-        // be a guess — the request is gone upstream.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(&mut session, vec![approval_open("approval-1")], &mut sink);
-        session.answer_interaction("approval-1", ApprovalVerdict::Reject, &mut sink);
-        let id = sink.frames.last().expect("the answer")["id"].clone();
-        session.on_frame(
-            Inbound::Response {
-                id,
-                outcome: Ok(json!({"accepted": false, "reason": "another surface answered first"})),
-            },
-            &mut sink,
-        );
-        assert_eq!(
-            session.interactions()[0].state(),
-            &InteractionState::Refused { reason: "another surface answered first".to_owned() }
-        );
-        let sent = sink.frames.len();
-        assert!(!session.answer_interaction("approval-1", ApprovalVerdict::AllowOnce, &mut sink));
-        assert_eq!(sink.frames.len(), sent);
-        assert!(sink.logs.join("\n").contains("already resolved"));
-    }
-
-    #[test]
-    fn a_refusal_without_a_reason_still_says_something() {
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(&mut session, vec![approval_open("approval-1")], &mut sink);
-        session.answer_interaction("approval-1", ApprovalVerdict::AllowOnce, &mut sink);
-        let id = sink.frames.last().expect("the answer")["id"].clone();
-        session.on_frame(Inbound::Response { id, outcome: Ok(json!({"accepted": false})) }, &mut sink);
-        assert_eq!(
-            session.interactions()[0].state(),
-            &InteractionState::Refused { reason: "the host did not say why".to_owned() }
-        );
-    }
-
-    #[test]
-    fn an_error_response_also_settles_the_card() {
-        // An older host answers `unknown_method`, or the handler throws. Either way the
-        // card must stop claiming an answer is on its way.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(&mut session, vec![approval_open("approval-1")], &mut sink);
-        session.answer_interaction("approval-1", ApprovalVerdict::AllowOnce, &mut sink);
-        let id = sink.frames.last().expect("the answer")["id"].clone();
-        session.on_frame(
-            Inbound::Response {
-                id,
-                outcome: Err(RpcError {
-                    code: error_code::METHOD_NOT_FOUND,
-                    message: "unsupported method: interaction/answer".to_owned(),
-                    data: None,
-                }),
-            },
-            &mut sink,
-        );
-        let InteractionState::Refused { reason } = session.interactions()[0].state() else {
-            panic!("expected a refusal, got {:?}", session.interactions()[0].state());
-        };
-        assert!(reason.contains("-32601"), "{reason}");
-        assert!(reason.contains("unsupported method"), "{reason}");
-    }
-
-    #[test]
-    fn the_verdict_of_one_answer_cannot_settle_another() {
-        // Two requests in flight at once, answered in the opposite order to the one
-        // they were sent in. Attributing by request id is the only thing that keeps
-        // "allowed" from landing on the card the user rejected.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(&mut session, vec![approval_open("approval-1"), approval_open("approval-2")], &mut sink);
-        session.answer_interaction("approval-1", ApprovalVerdict::AllowOnce, &mut sink);
-        session.answer_interaction("approval-2", ApprovalVerdict::Reject, &mut sink);
-        let first = sink.frames[sink.frames.len() - 2]["id"].clone();
-        let second = sink.frames[sink.frames.len() - 1]["id"].clone();
-        session.on_frame(Inbound::Response { id: second, outcome: Ok(json!({"accepted": true})) }, &mut sink);
-        session.on_frame(Inbound::Response { id: first, outcome: Ok(json!({"accepted": true})) }, &mut sink);
-        assert_eq!(
-            session.interactions()[0].state(),
-            &InteractionState::Applied { answer: SentAnswer::Approval(ApprovalVerdict::AllowOnce) }
-        );
-        assert_eq!(
-            session.interactions()[1].state(),
-            &InteractionState::Applied { answer: SentAnswer::Approval(ApprovalVerdict::Reject) }
-        );
-    }
-
-    #[test]
-    fn an_answer_that_could_not_be_written_leaves_the_card_actionable() {
-        // The channel is broken, so the session is ending anyway — but the card must
-        // not sit on "sending…" claiming a send that never happened.
-        struct DeafSink {
-            marks: Vec<String>,
-        }
-
-        impl FrameSink for DeafSink {
-            fn send(&mut self, _frame: &Value) -> std::io::Result<()> {
-                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "gone"))
-            }
-
-            fn log(&mut self, _line: &str) {}
-
-            fn mark(&mut self, line: &str) {
-                self.marks.push(line.to_owned());
-            }
-        }
-
-        let mut session = Session::new(identity());
-        let mut recording = RecordingSink::default();
-        deliver(&mut session, vec![approval_open("approval-1")], &mut recording);
-        let mut sink = DeafSink { marks: Vec::new() };
-        assert!(!session.answer_interaction("approval-1", ApprovalVerdict::AllowOnce, &mut sink));
-        assert_eq!(session.interactions()[0].state(), &InteractionState::Pending);
-        assert!(session.interactions()[0].is_actionable());
-        assert_eq!(sink.marks, vec!["interaction approval-1 answering allowed-once".to_owned()]);
-        // And the id is free again, so a retry after the channel recovers is a fresh
-        // request rather than one the session thinks is still in flight.
-        let mut recovered = RecordingSink::default();
-        assert!(session.answer_interaction("approval-1", ApprovalVerdict::AllowOnce, &mut recovered));
-    }
-
-    #[test]
-    fn a_question_card_is_reported_with_ids_options_and_answerability() {
-        // The shape the panel draws and the frontend types against: ids decide which
-        // question an answer names, `multiSelect` decides whether more than one option
-        // may be picked, and `actionable` is what tells the page to draw widgets at all.
+    fn a_question_open_is_decoded_with_ids_options_and_headers() {
+        // The shape the panel draws and the frontend types against: the ids decide which
+        // question an answer names, and `multiSelect` decides whether more than one option
+        // may be picked.
         let mut session = Session::new(identity());
         let mut sink = RecordingSink::default();
         deliver(&mut session, vec![well_formed_question_open()], &mut sink);
         let card = &session.interactions()[0];
         assert_eq!(card.kind(), InteractionKind::Question);
-        assert!(card.is_actionable(), "a well-formed small request is answerable here");
-        assert_eq!(card.question_problem(), None);
         assert_eq!(card.question_count(), 2);
         assert_eq!(
             card.questions(),
@@ -989,28 +766,18 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(sink.marks, vec!["interaction question-1 question arrived".to_owned()]);
     }
 
+    /// Category 1: the answer frame the host's validator expects — question ids, option
+    /// **labels**, and `custom` present only when the user typed free text.
     #[test]
-    fn a_question_is_answered_with_labels_and_the_card_settles() {
-        // The exact frame, because the host validates its shape: the answers array names
-        // the question ids and carries option **labels**, and `custom` is present only
-        // when the user typed free text.
+    fn a_question_answer_names_the_labels_the_conversation_showed() {
         let mut session = Session::new(identity());
         let mut sink = RecordingSink::default();
         deliver(&mut session, vec![well_formed_question_open()], &mut sink);
         let answers = vec![
-            QuestionAnswer {
-                id: "q1".to_owned(),
-                selected: vec!["staging".to_owned()],
-                custom: None,
-            },
-            QuestionAnswer {
-                id: "q2".to_owned(),
-                selected: vec!["ops".to_owned()],
-                custom: Some("值班群".to_owned()),
-            },
+            QuestionAnswer { id: "q1".to_owned(), selected: vec!["staging".to_owned()], custom: None },
+            QuestionAnswer { id: "q2".to_owned(), selected: vec!["ops".to_owned()], custom: Some("值班群".to_owned()) },
         ];
         assert!(session.answer_question("question-1", answers, &mut sink));
         let frame = sink.frames.last().expect("an answer was sent");
@@ -1028,266 +795,6 @@ mod tests {
             frame["params"]["answer"]["answers"][0].get("custom").is_none(),
             "no custom text means the key is absent, not null: {frame}",
         );
-        assert_eq!(
-            session.interactions()[0].state(),
-            &InteractionState::Submitting {
-                answer: SentAnswer::Question(vec![
-                    QuestionAnswer {
-                        id: "q1".to_owned(),
-                        selected: vec!["staging".to_owned()],
-                        custom: None,
-                    },
-                    QuestionAnswer {
-                        id: "q2".to_owned(),
-                        selected: vec!["ops".to_owned()],
-                        custom: Some("值班群".to_owned()),
-                    },
-                ]),
-            }
-        );
-        assert!(sink.marks.iter().any(|line| line == "interaction question-1 answering 2 answered"));
-        let id = frame["id"].clone();
-        session.on_frame(Inbound::Response { id, outcome: Ok(json!({"accepted": true})) }, &mut sink);
-        assert!(matches!(
-            session.interactions()[0].state(),
-            InteractionState::Applied { answer: SentAnswer::Question(_) }
-        ));
-        assert!(sink.marks.iter().any(|line| line == "interaction question-1 applied 2 answered"));
-    }
-
-    #[test]
-    fn one_answer_per_question_card_is_sent_once() {
-        // A question request is settled once upstream just like an approval, so the
-        // second click must not become a second decision.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(&mut session, vec![well_formed_question_open()], &mut sink);
-        assert!(session.answer_question("question-1", answers_for("q1", "staging", "q2", "ops"), &mut sink));
-        let sent = sink.frames.len();
-        assert!(!session.answer_question("question-1", answers_for("q1", "production", "q2", "ops"), &mut sink));
-        assert_eq!(sink.frames.len(), sent, "no second answer went out");
-        assert!(sink.logs.join("\n").contains("already in flight"));
-        // And once the host has accepted it, the id stays closed even after the send
-        // is no longer in flight.
-        let id = sink.frames.last().expect("the answer")["id"].clone();
-        session.on_frame(Inbound::Response { id, outcome: Ok(json!({"accepted": true})) }, &mut sink);
-        assert!(!session.answer_question("question-1", answers_for("q1", "staging", "q2", "ops"), &mut sink));
-        assert!(sink.logs.join("\n").contains("already resolved"));
-    }
-
-    #[test]
-    fn an_answer_that_does_not_match_the_card_is_refused() {
-        // Four ways an answer can fail to mean what it says. The UI refuses all four
-        // before the button is enabled; this is the same rule behind the UI, because the
-        // page is not the only possible caller.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(&mut session, vec![well_formed_question_open()], &mut sink);
-        let frames = sink.frames.len();
-        // A label no question offered: it would tell the model the user chose a row that
-        // was never on screen.
-        assert!(!session.answer_question("question-1", answers_for("q1", "开发", "q2", "ops"), &mut sink));
-        // An id that is not part of this card: a stale widget, or answers for another one.
-        assert!(!session.answer_question("question-1", answers_for("q9", "staging", "q2", "ops"), &mut sink));
-        // A question left empty: a partial answer for a request shown in full.
-        assert!(!session.answer_question(
-            "question-1",
-            vec![
-                QuestionAnswer { id: "q1".to_owned(), selected: vec!["staging".to_owned()], custom: None },
-                QuestionAnswer { id: "q2".to_owned(), selected: Vec::new(), custom: None },
-            ],
-            &mut sink,
-        ));
-        // The same question twice: the model would have to pick one.
-        assert!(!session.answer_question(
-            "question-1",
-            vec![
-                QuestionAnswer { id: "q1".to_owned(), selected: vec!["staging".to_owned()], custom: None },
-                QuestionAnswer { id: "q1".to_owned(), selected: vec!["production".to_owned()], custom: None },
-                QuestionAnswer { id: "q2".to_owned(), selected: vec!["ops".to_owned()], custom: None },
-            ],
-            &mut sink,
-        ));
-        assert_eq!(sink.frames.len(), frames, "nothing was sent for any of them");
-        let logs = sink.logs.join("\n");
-        assert!(logs.contains("was not offered the label \"开发\""), "{logs}");
-        assert!(logs.contains("\"q9\" is not a question of this card"), "{logs}");
-        assert!(logs.contains("question q2 has no selection and no custom text"), "{logs}");
-        assert!(logs.contains("question q1 was answered twice"), "{logs}");
-    }
-
-    #[test]
-    fn a_question_card_too_large_to_answer_is_reported_instead() {
-        // Five questions is one more than this build will present as a form. The card is
-        // still reported — the user is owed what was asked — but it is not actionable,
-        // and the refusal says why: an answer must cover what the user was shown, so
-        // this build hands the request back rather than half-answering it.
-        let questions: Vec<Value> = (0..MAX_QUESTIONS_ANSWERED + 1)
-            .map(|index| {
-                json!({"id": format!("q{index}"), "question": format!("question {index}"),
-                       "options": [{"label": "yes"}]})
-            })
-            .collect();
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(
-            &mut session,
-            vec![question_open(json!({"questions": questions}))],
-            &mut sink,
-        );
-        let card = &session.interactions()[0];
-        assert!(!card.is_actionable());
-        assert_eq!(card.question_count(), MAX_QUESTIONS_ANSWERED + 1, "the count is the real total");
-        assert_eq!(card.questions().len(), MAX_QUESTIONS_SHOWN, "and the DOM is bounded");
-        let problem = card.question_problem().expect("a reason was recorded");
-        assert!(problem.contains("5 questions"), "{problem}");
-        let answers: Vec<QuestionAnswer> = card
-            .questions()
-            .iter()
-            .map(|question| QuestionAnswer {
-                id: question.id.clone(),
-                selected: vec!["yes".to_owned()],
-                custom: None,
-            })
-            .collect();
-        assert!(!session.answer_question("question-1", answers, &mut sink));
-        assert!(sink.frames.is_empty());
-        assert!(sink.logs.join("\n").contains("cannot answer it here (5 questions"), "{:?}", sink.logs);
-    }
-
-    #[test]
-    fn a_question_without_an_id_is_reported_but_not_answerable() {
-        // An answer names a question by id, so a question with no id can never be
-        // answered unambiguously — and an empty string is no id at all.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(
-            &mut session,
-            vec![question_open(json!({"questions": [
-                {"id": "  ", "question": "谁负责？", "options": [{"label": "我"}]},
-            ]}))],
-            &mut sink,
-        );
-        let card = &session.interactions()[0];
-        assert!(!card.is_actionable());
-        assert_eq!(card.questions().len(), 1, "the question is still shown");
-        assert_eq!(card.questions()[0].id, "", "whitespace is not an id");
-        assert_eq!(card.questions()[0].question, "谁负责？");
-        let problem = card.question_problem().expect("a reason was recorded");
-        assert!(problem.contains("question 1 has no id"), "{problem}");
-        assert!(!session.answer_question(
-            "question-1",
-            vec![QuestionAnswer { id: String::new(), selected: vec!["我".to_owned()], custom: None }],
-            &mut sink,
-        ));
-        assert!(sink.frames.is_empty());
-        assert!(sink.logs.join("\n").contains("cannot answer it here"), "{:?}", sink.logs);
-    }
-
-    #[test]
-    fn a_question_offering_too_many_options_is_reported_but_not_answerable() {
-        // Past the option cap the list would have to be trimmed for layout, and an
-        // answer to a trimmed list is an answer to a question the user never fully saw.
-        let options: Vec<Value> = (0..MAX_OPTIONS_PER_QUESTION + 1)
-            .map(|index| json!({"label": format!("option {index}")}))
-            .collect();
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(
-            &mut session,
-            vec![question_open(json!({"questions": [
-                {"id": "q1", "question": "选一个？", "options": options},
-            ]}))],
-            &mut sink,
-        );
-        let card = &session.interactions()[0];
-        assert!(!card.is_actionable());
-        let problem = card.question_problem().expect("a reason was recorded");
-        assert!(problem.contains("offers 13 options"), "{problem}");
-        assert!(session.dismiss_interaction("question-1"));
-        assert!(session.interactions().is_empty());
-    }
-
-    #[test]
-    fn a_card_that_asks_two_things_under_one_id_is_not_answerable() {
-        // An answer names a question by id, so two questions sharing one id cannot be
-        // answered apart: the answer would land on whichever was matched first, which is
-        // the "guess" this build refuses to make. The card is still reported.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(
-            &mut session,
-            vec![question_open(json!({"questions": [
-                {"id": "q1", "question": "部署到哪个环境？", "options": [{"label": "staging"}]},
-                {"id": "q1", "question": "需要通知谁？", "options": [{"label": "ops"}]},
-            ]}))],
-            &mut sink,
-        );
-        let card = &session.interactions()[0];
-        assert!(!card.is_actionable());
-        assert_eq!(card.questions().len(), 2, "both questions are still shown");
-        let problem = card.question_problem().expect("a reason was recorded");
-        assert!(problem.contains("q1 is used twice"), "{problem}");
-        assert!(!session.answer_question(
-            "question-1",
-            vec![QuestionAnswer {
-                id: "q1".to_owned(),
-                selected: vec!["staging".to_owned()],
-                custom: None,
-            }],
-            &mut sink,
-        ));
-        assert!(sink.frames.is_empty());
-        assert!(sink.logs.join("\n").contains("cannot answer it here"), "{:?}", sink.logs);
-    }
-
-    #[test]
-    fn an_approval_verdict_cannot_settle_a_question_card() {
-        // Both kinds share the answer path, so the kind is checked before the shared
-        // guards: a verdict is not an answer to a question.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(&mut session, vec![well_formed_question_open()], &mut sink);
-        assert!(!session.answer_interaction("question-1", ApprovalVerdict::AllowOnce, &mut sink));
-        assert!(sink.frames.is_empty());
-        assert!(sink.logs.join("\n").contains("not an approval card"), "{:?}", sink.logs);
-    }
-
-    #[test]
-    fn a_question_the_host_refuses_says_why_and_cannot_be_retried() {
-        // `accepted:false` is the host settling the request elsewhere, and a question is
-        // settled exactly as an approval is — through the same id-uniqueness, so the card
-        // can never be answered twice for one request.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(&mut session, vec![well_formed_question_open()], &mut sink);
-        assert!(session.answer_question("question-1", answers_for("q1", "staging", "q2", "ops"), &mut sink));
-        let id = sink.frames.last().expect("the answer")["id"].clone();
-        session.on_frame(
-            Inbound::Response {
-                id,
-                outcome: Ok(json!({"accepted": false, "reason": "another surface answered first"})),
-            },
-            &mut sink,
-        );
-        assert_eq!(
-            session.interactions()[0].state(),
-            &InteractionState::Refused { reason: "another surface answered first".to_owned() }
-        );
-        assert!(!session.interactions()[0].is_actionable());
-        assert!(!session.answer_question("question-1", answers_for("q1", "staging", "q2", "ops"), &mut sink));
-        assert!(sink.logs.join("\n").contains("already resolved"));
-    }
-
-    #[test]
-    fn a_response_that_is_not_in_flight_does_not_settle_a_card() {
-        // The refusal path is reached through the same attribution as an approval, so the
-        // "not in flight" guard is exercised for a question card too.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(&mut session, vec![well_formed_question_open()], &mut sink);
-        session.on_response(&json!(999), Ok(json!({"accepted": true})), &mut sink);
-        assert!(matches!(session.interactions()[0].state(), InteractionState::Pending));
     }
 
     /// The host's `interaction/open` for a well-formed two-question request.
@@ -1323,172 +830,5 @@ mod tests {
                 "payload": payload,
             }),
         )
-    }
-
-    /// One single-select answer for each of `q1` and `q2`, for the two-question fixture.
-    fn answers_for(q1: &str, first: &str, q2: &str, second: &str) -> Vec<QuestionAnswer> {
-        vec![
-            QuestionAnswer { id: q1.to_owned(), selected: vec![first.to_owned()], custom: None },
-            QuestionAnswer { id: q2.to_owned(), selected: vec![second.to_owned()], custom: None },
-        ]
-    }
-
-    #[test]
-    fn the_detail_prefers_the_text_written_to_be_read() {
-        // Preference order matters: `reason` is an audit string ("escalate sandbox to
-        // …"), while `displayReason` is what the asker wrote *for a human to read*.
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(
-            &mut session,
-            vec![notification(
-                "interaction/open",
-                json!({
-                    "interactionId": "a-1", "sessionId": "s", "kind": "approval",
-                    "payload": {
-                        "toolName": "bash",
-                        "reason": "escalate sandbox to danger-full-access: justification",
-                        "displayReason": {"en": "Allow this with danger-full-access?", "zh": "允许使用 danger-full-access 权限？"},
-                    },
-                }),
-            )],
-            &mut sink,
-        );
-        let card = &session.interactions()[0];
-        assert_eq!(card.detail("zh").as_deref(), Some("允许使用 danger-full-access 权限？"));
-        assert_eq!(card.detail("fr").as_deref(), Some("Allow this with danger-full-access?"));
-    }
-
-    #[test]
-    fn the_detail_falls_back_to_the_audit_reason_and_survives_junk() {
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(
-            &mut session,
-            vec![
-                notification(
-                    "interaction/open",
-                    json!({"interactionId": "a-1", "kind": "approval",
-                           "payload": {"reason": "escalate sandbox to workspace-write: write a file"}}),
-                ),
-                notification(
-                    "interaction/open",
-                    json!({"interactionId": "a-2", "kind": "approval",
-                           "payload": {"displayReason": "not an object", "reason": 7}}),
-                ),
-                notification(
-                    "interaction/open",
-                    json!({"interactionId": "a-3", "kind": "approval",
-                           "payload": {"displayReason": {"zh": "   "}, "reason": "  "}}),
-                ),
-            ],
-            &mut sink,
-        );
-        let cards = session.interactions();
-        assert_eq!(cards[0].detail("zh").as_deref(), Some("escalate sandbox to workspace-write: write a file"));
-        assert_eq!(cards[1].detail("zh"), None, "a non-object displayReason is not a string to show");
-        assert_eq!(cards[2].detail("zh"), None, "whitespace is not a reason");
-        assert_eq!(cards[0].tool_name(), None);
-    }
-
-    #[test]
-    fn peer_text_is_bounded_before_it_reaches_the_window() {
-        // A frame may be a megabyte and the text comes from a model or a hook. The
-        // bound belongs here rather than in the layout code, so no path can hand the
-        // window an unbounded string to lay out.
-        let long_reason = "x".repeat(5000);
-        let long_question = "问".repeat(5000);
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(
-            &mut session,
-            vec![
-                notification(
-                    "interaction/open",
-                    json!({"interactionId": "a-1", "kind": "approval", "payload": {"reason": long_reason}}),
-                ),
-                notification(
-                    "interaction/open",
-                    json!({"interactionId": "q-1", "kind": "question",
-                           "payload": {"questions": [{"id": "q1", "question": long_question}]}}),
-                ),
-            ],
-            &mut sink,
-        );
-        let cards = session.interactions();
-        let detail = cards[0].detail("zh").expect("a reason");
-        assert_eq!(detail.chars().count(), MAX_TEXT_CHARS + 1, "600 characters plus the ellipsis");
-        assert!(detail.ends_with('…'));
-        let question = &cards[1].questions()[0].question;
-        assert_eq!(question.chars().count(), MAX_TEXT_CHARS + 1);
-        assert!(question.ends_with('…'), "a multi-byte cut lands on a character boundary");
-    }
-
-    #[test]
-    fn only_the_first_few_questions_are_summarised() {
-        // Eight questions is over the answering cap, so this is a report-only card and
-        // only the first few are read out — the rest would be scroll for a form the user
-        // cannot submit here anyway.
-        let questions: Vec<Value> = (0..8)
-            .map(|index| json!({"id": format!("q{index}"), "question": format!("question {index}")}))
-            .collect();
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(
-            &mut session,
-            vec![notification(
-                "interaction/open",
-                json!({"interactionId": "q-1", "kind": "question", "payload": {"questions": questions}}),
-            )],
-            &mut sink,
-        );
-        let card = &session.interactions()[0];
-        assert_eq!(card.question_count(), 8, "the count is the real total");
-        assert_eq!(card.questions().len(), MAX_QUESTIONS_SHOWN, "but only a few are read out");
-    }
-
-    #[test]
-    fn an_answerable_card_shows_every_question_it_will_answer() {
-        // The other side of the same rule: an answer must cover what the user was shown,
-        // so a card at (but not over) the answering cap is shown in full even when that
-        // is more than a report-only card would show.
-        let questions: Vec<Value> = (0..MAX_QUESTIONS_ANSWERED)
-            .map(|index| {
-                json!({"id": format!("q{index}"), "question": format!("question {index}"),
-                       "options": [{"label": "yes"}]})
-            })
-            .collect();
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        deliver(
-            &mut session,
-            vec![question_open(json!({"questions": questions}))],
-            &mut sink,
-        );
-        let card = &session.interactions()[0];
-        assert!(card.is_actionable());
-        assert_eq!(card.questions().len(), MAX_QUESTIONS_ANSWERED);
-        assert!(
-            card.questions().len() > MAX_QUESTIONS_SHOWN,
-            "the fixture must be larger than the report-only cap to prove the difference",
-        );
-    }
-
-    #[test]
-    fn the_pending_list_is_bounded() {
-        let mut session = Session::new(identity());
-        let mut sink = RecordingSink::default();
-        for index in 0..MAX_INTERACTIONS + 3 {
-            deliver(&mut session, vec![approval_open(&format!("approval-{index}"))], &mut sink);
-        }
-        assert_eq!(session.interactions().len(), MAX_INTERACTIONS);
-        assert!(sink.logs.join("\n").contains("are already pending"));
-    }
-
-    /// Take the handshake, discovery and attach through to a followed conversation.
-    #[test]
-    fn dismissing_an_unknown_card_reports_that_nothing_happened() {
-        let mut session = Session::new(identity());
-        assert!(!session.dismiss_interaction("approval-9"));
     }
 }

@@ -171,6 +171,7 @@ impl FrameSource for StdinSource {
 /// Kept here rather than in `frame.rs` because it exercises the interaction of
 /// `read` chunk boundaries with the decoder, which is where an off-by-one shows
 /// up in practice.
+// Protocol contract: a frame split across read boundaries is still one frame.
 #[cfg(test)]
 mod tests {
     use crate::ipc::frame::Decoded;

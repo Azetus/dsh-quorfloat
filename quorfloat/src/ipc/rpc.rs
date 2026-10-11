@@ -214,6 +214,8 @@ pub fn now_millis() -> i64 {
     }
 }
 
+// Protocol contract: JSON-RPC message shapes, method names and error frames (category 1),
+// with category 3 tolerance for junk that must not corrupt the router.
 #[cfg(test)]
 mod tests {
     use super::*;

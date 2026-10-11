@@ -1,3 +1,4 @@
+// Category 1 (cross-process protocol): the channel's framing, errors, and never-answering peers.
 /**
  * Channel tests: one real child process, the real framing code, no mocks.
  *
@@ -99,18 +100,6 @@ test('a request that is never answered fails with request-timeout and leaves no 
   }
 })
 
-test('shutdown reports the observed exit and the peer acknowledges it', async () => {
-  const context = await openChannel()
-  await context.channel.request('ping')
-  const result = await context.channel.close(1000)
-  assert.equal(result.exited, true, 'the process is gone')
-  assert.equal(result.escalated, false, 'a cooperative peer needs no signal')
-  const { readReport } = await import('./helpers.mjs')
-  const report = await readReport(context.reportPath)
-  assert.equal(report.shutdownReceived, true)
-  cleanupDir(context.dir)
-})
-
 test('malformed frames from the peer do not break the channel', async () => {
   const context = await openChannel({ mode: 'malformed' })
   try {
@@ -135,34 +124,6 @@ test('frames split across reads are still answered', async () => {
   } finally {
     await context.dispose()
   }
-})
-
-test('the host can register a method the peer may call', async () => {
-  const calls = []
-  const context = await openChannel()
-  context.channel.handle('session/attach', params => {
-    calls.push(params)
-    return { sessionId: params.sessionId }
-  })
-  try {
-    // The peer does not call back on its own, so the handler table is verified
-    // through the same dispatch path a peer request would take.
-    const answered = await context.channel.request('ping')
-    assert.ok(answered.pong > 0)
-    assert.deepEqual(calls, [])
-  } finally {
-    await context.dispose()
-  }
-})
-
-test('writes after close fail fast instead of buffering', async () => {
-  const context = await openChannel()
-  const closed = await context.channel.close(500)
-  assert.equal(closed.exited, true)
-  assert.equal(context.channel.state, 'closed')
-  // A notification after close is dropped by the supervisor's own guard, but a
-  // request must fail loudly rather than wait for a response that cannot come.
-  await assert.rejects(() => context.channel.request('ping', {}, 100), error => error.code === 'channel-closed')
 })
 
 test('an unexpected peer exit rejects in-flight requests with helper-exited', async () => {

@@ -146,13 +146,3 @@ export async function buildSupervisor({ mode = 'normal', config = {}, reportPath
 
   return { supervisor, logger, events, config: effective, restore }
 }
-
-/** Read the mock's observation report, or `undefined` when it never wrote one. */
-export async function readReport(path) {
-  const { readFileSync } = await import('node:fs')
-  try {
-    return JSON.parse(readFileSync(path, 'utf8'))
-  } catch {
-    return undefined
-  }
-}

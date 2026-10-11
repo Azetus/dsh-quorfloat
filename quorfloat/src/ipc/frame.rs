@@ -156,6 +156,8 @@ impl FrameReader {
     }
 }
 
+// Protocol contract: NDJSON framing, split reads, bounded buffers, junk frames.
+// Category 1 on the wire, with category 3 robustness against anything malformed.
 #[cfg(test)]
 mod tests {
     use super::*;
