@@ -38,7 +38,7 @@
  * changed files against the module URLs that were loaded — which for a staged copy
  * are inside the throwaway home. Re-staging on every build was tried and did not
  * produce a reload, so the option was removed rather than left in place looking
- * like it worked. **The loop is: `npm run build`, then restart.** Startup is a
+ * like it worked. **The loop is: `npm run build:local`, then restart.** Startup is a
  * couple of seconds.
  *
  * ## Cross-platform without a shell
@@ -608,8 +608,9 @@ function main() {
     process.exit(1)
   }
 
-  // `build:plugin` rather than the full `build`: the Rust half below is chosen by
-  // `--release`, and the full build would hard-code the debug profile here.
+  // `build:plugin` rather than `build:local`: the Rust half below is chosen by
+  // `--release`, and `build:local` would hard-code the debug profile here. The
+  // publishable `build` is not usable here either: it only makes release slices.
   if (options.build && !run('npm', ['run', 'build:plugin'])) {
     process.stderr.write('dev: the build failed; not starting\n')
     process.exit(1)

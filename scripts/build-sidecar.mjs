@@ -11,7 +11,8 @@
  * The cargo half is `scripts/lib/cargo.mjs`, shared with `scripts/release.mjs`, so a
  * debug build and a release slice cannot drift in their command line or artifact path.
  * `--release` selects the same helper's release profile; the default is debug, which
- * is what the full `build` uses.
+ * is what the local full build `build:local` uses. The publishable `build` does not
+ * come through here: it builds a release slice per target in `scripts/release.mjs`.
  *
  * This script only builds: it stages nothing. `scripts/dev.mjs` copies the result into
  * a throwaway home, and `scripts/release.mjs` assembles a bundle around it.
