@@ -39,6 +39,81 @@ struct Held {
     holder: Holder,
 }
 
+/// The OS registration, and the thread it belongs to.
+///
+/// [`GlobalHotKeyManager`] is `Send + Sync` on macOS only. Upstream asserts it there
+/// (`platform_impl/macos/mod.rs`) because the macOS manager is an event handler plus mutexes; the
+/// Windows manager is a hidden window instead — `CreateWindowExW` to make it, `RegisterHotKey(hwnd,
+/// ..)` for the grab, `DestroyWindow` to release it — and Win32 binds a window to the thread that
+/// created it, both for the message carrying the key press and for the destruction. `!Send` on
+/// Windows is therefore honest, and this type is where the invariant the platform is really asking
+/// for gets written down: **the grab lives on the main thread**.
+///
+/// That is not a new rule, it is the one this module has documented all along — macOS requires
+/// registration from the main thread too — and the call sites have always obeyed it.
+/// [`Hotkey::register`] runs in `main()` before the event loop; the only later change comes from
+/// `set_preferences`, a synchronous Tauri command, which Tauri runs on the main thread; and the
+/// watcher thread ([`watch_hotkey`]) never touches the manager, only the global event channel.
+///
+/// **If a thread other than the main one ever has to change the accelerator, do not widen this
+/// assertion.** Send the work to the main thread instead — `AppHandle::run_on_main_thread` plus a
+/// channel the caller blocks on, which is how `tauri-plugin-global-shortcut` answers the same
+/// question — and let [`Grab::assert_owner`] keep catching the mistake.
+struct Grab {
+    /// The registration itself. Dropping it releases the accelerator.
+    manager: GlobalHotKeyManager,
+    /// The thread that made `manager`, so a use or a drop from another thread is caught loudly
+    /// instead of being handed to a Win32 call that cannot work from there.
+    owner: std::thread::ThreadId,
+}
+
+// SAFETY: the value is created, used and dropped on the thread named by `owner`, which the call
+// sites pin to the main thread (see the type's documentation above). Nothing shares it across
+// threads: it lives in the `Mutex<Option<Hotkey>>` in `ShellRuntime` only because Tauri's managed
+// state has to be `Send`, and `Send` is all that `Mutex` asks of it — the `Sync` half of upstream's
+// macOS assertion is deliberately not claimed here, because no `&Grab` ever crosses a thread. Every
+// use goes through `Deref` and every drop through `Drop`, and both re-check `owner` in debug builds.
+unsafe impl Send for Grab {}
+
+impl Grab {
+    /// Take a manager that has just made a registration, recording the thread that owns it.
+    ///
+    /// @param manager - the registration to keep alive.
+    /// @returns the grab, owned by the calling thread.
+    fn owning(manager: GlobalHotKeyManager) -> Self {
+        Self { manager, owner: std::thread::current().id() }
+    }
+
+    /// Check that this thread is the one the grab belongs to.
+    ///
+    /// A `debug_assert` rather than an `assert`: the invariant is a property of the call sites, and
+    /// a release build should not re-check it on every use. What it buys is that a mistake becomes a
+    /// named panic while developing, instead of a Win32 call that silently does nothing or a window
+    /// destroyed from a thread that does not own it.
+    fn assert_owner(&self) {
+        debug_assert_eq!(
+            self.owner,
+            std::thread::current().id(),
+            "the global hotkey manager was touched by a thread other than the one that owns it",
+        );
+    }
+}
+
+impl std::ops::Deref for Grab {
+    type Target = GlobalHotKeyManager;
+
+    fn deref(&self) -> &Self::Target {
+        self.assert_owner();
+        &self.manager
+    }
+}
+
+impl Drop for Grab {
+    fn drop(&mut self) {
+        self.assert_owner();
+    }
+}
+
 /// What is holding the grab.
 ///
 /// The distinction exists for tests: [`Holder::Claimed`] is a registration this process really made,
@@ -47,7 +122,7 @@ struct Held {
 /// See [`Hotkey::active_for_test`] for the second one.
 enum Holder {
     /// A real registration. Dropping it releases the accelerator.
-    Claimed(Box<GlobalHotKeyManager>),
+    Claimed(Box<Grab>),
     /// A registration a test claims, with no manager behind it.
     ForTest,
 }
@@ -154,7 +229,7 @@ impl Hotkey {
                 Ok(()) => {
                     self.held = Some(Held {
                         spec: spec.to_owned(),
-                        holder: Holder::Claimed(Box::new(manager)),
+                        holder: Holder::Claimed(Box::new(Grab::owning(manager))),
                     });
                 }
                 Err(error) => {
