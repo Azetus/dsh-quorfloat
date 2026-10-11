@@ -42,7 +42,9 @@ function stubHost() {
 
 /** Parameters that get past each method's validation, so the dispatch itself is what is tested. */
 const PARAMS = {
-  hello: { protocol: 'quorfloat/1', quorfloatVersion: '0.0.1', platform: 'darwin', arch: 'arm64' },
+  // `quorfloatVersion` is an opaque mock value on purpose: this suite tests dispatch, not
+  // what the real binary reports, so the number here is never asserted against anything.
+  hello: { protocol: 'quorfloat/1', quorfloatVersion: '0.1.0', platform: 'darwin', arch: 'arm64' },
   'window/visibility': { visible: true },
   'session/create': { workspaceId: 'ws-1' },
   'session/attach': { sessionId: 'session-1' },

@@ -9,6 +9,11 @@
  * executable, the executable itself, the font and its licence, and a
  * `build-info.json` recording exactly what was built.
  *
+ * The version in that directory name is also the version the executable reports, and
+ * `scripts/version.mjs` is what makes the two the same: it runs before the first
+ * build, so a checkout whose `package.json` has already moved on from its
+ * `quorfloat/Cargo.toml` fails here rather than after the cross-target compile.
+ *
  * Why the bundle's own patch can name its own binary: `src/host/binary.ts` resolves a
  * relative `quorfloatPath` against the package root, so `./bin/dsh-quorfloat` inside
  * the bundle resolves to the executable shipped next to it. Nothing in the resolver
@@ -46,6 +51,7 @@ import { fileURLToPath } from 'node:url'
 
 import { SIDECAR_NAME, stageSidecar } from './assemble.mjs'
 import { buildSidecar, hostTriple } from './cargo.mjs'
+import { assertVersionsAgree } from './version.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -356,12 +362,15 @@ function assemble({ bundle, executable, targets, platform }) {
 }
 
 function main() {
+  // Before the arguments, because nothing this script can be asked to do is useful
+  // on a checkout whose two halves would disagree about which version they are.
+  const version = assertVersionsAgree(ROOT)
   const options = parseArgs(process.argv.slice(2))
   if (options.help) {
     usage()
     return
   }
-
+  process.stdout.write(`release: version ${version}\n`)
   const host = hostTriple()
   const targets = options.targets.length > 0 ? [...new Set(options.targets)] : defaultTargets(host)
   const platforms = new Set(targets.map(platformOf))

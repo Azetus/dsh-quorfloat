@@ -17,7 +17,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { join } from 'node:path'
 
@@ -40,6 +40,33 @@ const binary = rustBinary()
 const skip = binary === undefined
   ? 'the Rust binary is not built; run `cargo build` in quorfloat/'
   : false
+
+/**
+ * The version the Rust binary embeds, read from the crate manifest it was built from.
+ *
+ * `quorfloat/src/lib.rs` reports `env!("CARGO_PKG_VERSION")`, and cargo fills that from
+ * `[package] version` here — so this is the value the handshake has to carry. Reading it
+ * rather than retyping it is what keeps the assertion below a statement about the wire
+ * instead of a number to bump at every release; `scripts/version.mjs` refuses a release
+ * when this file and the root `package.json` disagree, so the two halves cannot drift
+ * apart behind it. Do not "simplify" this back into a literal.
+ */
+function crateVersion() {
+  let inPackageTable = false
+  for (const line of readFileSync(join(repoRoot, 'quorfloat/Cargo.toml'), 'utf8').split('\n')) {
+    const table = /^\s*\[([^\]]+)\]\s*$/u.exec(line)
+    if (table !== null) {
+      inPackageTable = table[1] === 'package'
+      continue
+    }
+    // Only this table holds the crate's own version: the `[dependencies]` entries
+    // below spell `version = ...` too, and one of those is the Tauri shell's.
+    if (!inPackageTable) continue
+    const found = /^version\s*=\s*"([^"]+)"\s*$/u.exec(line)?.[1]
+    if (found !== undefined) return found
+  }
+  throw new Error('quorfloat/Cargo.toml declares no [package] version')
+}
 
 /** Start the real supervisor against the real Rust binary. */
 async function start(config = {}) {
@@ -131,7 +158,7 @@ test('the real supervisor completes a handshake with the Rust binary', { skip },
     const recorded = diagnostics.handshake
     assert.ok(recorded !== null && recorded !== undefined, 'the host recorded a handshake')
     assert.equal(recorded.protocol, 'quorfloat/1')
-    assert.equal(recorded.quorfloatVersion, '0.0.1')
+    assert.equal(recorded.quorfloatVersion, crateVersion())
     // The wire carries the *host's* vocabulary, so these are compared against
     // Node's own constants rather than Rust's: `macos`/`aarch64` would be valid
     // facts spelled uselessly, and nothing on the host branches on them.

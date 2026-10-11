@@ -1,6 +1,10 @@
 [package]
 name = "dsh-quorfloat"
-version = "0.0.1"
+# The product version, and the only place it is declared outright: `tauri.conf.json`
+# deliberately carries no `version`, so `tauri-utils` falls back to this one and the
+# shell cannot report anything other than the version compiled into the sidecar.
+# `scripts/version.mjs` checks the JS half (`package.json`) against this.
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "System-level floating conversation window for DeepSeek Harness"
