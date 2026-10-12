@@ -6,6 +6,15 @@ A floating desktop chat plugin for DeepSeek Harness. Bring up the panel with a g
 
 The panel uses Harness's workspaces, sessions, models, and permission settings. Harness manages conversation execution and history. Offline releases include both the host plugin and the panel application; when installing via npm, the package manager automatically downloads the panel application for your platform. Neither installation method requires compiling anything yourself.
 
+## Interface Preview
+
+<table>
+  <tr>
+    <td><img src="assets/quorfloat-new-session-en.png" alt="New-session page"></td>
+    <td><img src="assets/quorfloat-new-session-dark-en.png" alt="New-session page"></td>
+  </tr>
+</table>
+
 ## Features
 
 - **Open anytime**: Show or hide the floating window with a global shortcut. Drag it to reposition it, have its position remembered, and optionally keep it open when it loses focus.

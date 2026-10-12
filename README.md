@@ -6,6 +6,15 @@ DeepSeek Harness 的桌面悬浮会话插件。通过全局快捷键呼出面板
 
 面板使用 Harness 的工作区、会话、模型和权限设置，对话执行与历史记录仍由 Harness 管理。离线发布包自带宿主插件和面板程序；通过 npm 安装时，包管理器会自动获取当前平台的面板程序。两种方式均无需自行编译。
 
+## 界面预览
+
+<table>
+  <tr>
+    <td><img src="assets/quorfloat-new-session.png" alt="新会话页面"></td>
+    <td><img src="assets/quorfloat-new-session-dark.png" alt="新会话页面"></td>
+  </tr>
+</table>
+
 ## 功能
 
 - **随时呼出**：全局快捷键显示或收起悬浮窗；支持拖动并记住窗口位置，可设置失焦后保持展开。
