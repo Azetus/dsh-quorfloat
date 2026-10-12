@@ -417,6 +417,7 @@ fn run() -> Result<SessionExit, String> {
             answer_question,
             select_session,
             start_new,
+            load_earlier,
             pin,
             pin_workspace,
             request_workspaces,
@@ -604,6 +605,15 @@ fn answer_question(
 #[tauri::command]
 fn select_session(state: tauri::State<'_, ShellRuntime>, session_id: String) -> Value {
     with_session(&state, |session, sink| bridge::select_session(session, sink, &session_id))
+}
+
+/// `load_earlier` — ask the host for one older page of the conversation on screen.
+///
+/// The page itself does not come back here: it arrives as the next snapshot, so the panel
+/// keeps rendering what the host said rather than merging a page of its own.
+#[tauri::command]
+fn load_earlier(state: tauri::State<'_, ShellRuntime>) -> Value {
+    with_session(&state, |session, sink| bridge::load_earlier(session, sink))
 }
 
 /// `start_new` — go back to "new conversation" mode.

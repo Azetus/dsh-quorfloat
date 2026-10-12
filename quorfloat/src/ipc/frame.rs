@@ -27,7 +27,16 @@ pub enum Decoded {
     /// The line was not legal JSON, or was empty.
     Garbage,
     /// The line exceeded [`MAX_FRAME_BYTES`] and was dropped.
-    Oversized,
+    ///
+    /// The measured length travels with it because the refusal has to be explicable:
+    /// "the panel received nothing" and "the panel received a 1.3 MB frame it could
+    /// not take" look identical on screen, and only the second one tells the reader
+    /// which side has to change. Kept as `bytes` rather than a bool so the log line
+    /// can name the number the reader actually saw.
+    Oversized {
+        /// Bytes in the refused line, terminator excluded.
+        bytes: usize,
+    },
 }
 
 /// Counters a caller can log or report, matching the host's decoder counters.
@@ -51,6 +60,13 @@ pub struct FrameReader {
     pending: Vec<u8>,
     /// Set while discarding the tail of an oversized line.
     discarding: bool,
+    /// Bytes of the line being read, including any already discarded.
+    ///
+    /// Kept beside `pending` rather than derived from it because `pending` is
+    /// deliberately emptied the moment a line crosses the limit: the length of an
+    /// oversized line is exactly the fact the refusal has to report, and it cannot
+    /// be recovered after the buffer it was measured from is gone.
+    line_bytes: usize,
     stats: FrameStats,
 }
 
@@ -64,7 +80,7 @@ impl FrameReader {
     /// Create an empty reader.
     #[must_use]
     pub fn new() -> Self {
-        Self { pending: Vec::new(), discarding: false, stats: FrameStats::default() }
+        Self { pending: Vec::new(), discarding: false, line_bytes: 0, stats: FrameStats::default() }
     }
 
     /// Counters accumulated so far.
@@ -81,6 +97,9 @@ impl FrameReader {
         let mut out = Vec::new();
         for &byte in chunk {
             if byte != b'\n' {
+                // Counted before the discard check, because a line that never ends
+                // still has a length and that length is what the report needs.
+                self.line_bytes += 1;
                 // Already discarding an oversized line: hold nothing at all until
                 // the terminator arrives. Checking this first is what keeps the
                 // buffer bounded — accumulating and clearing once would still let
@@ -100,11 +119,12 @@ impl FrameReader {
                 }
                 continue;
             }
+            let bytes = std::mem::take(&mut self.line_bytes);
             if self.discarding {
                 self.discarding = false;
                 self.pending.clear();
                 self.stats.oversized += 1;
-                out.push(Decoded::Oversized);
+                out.push(Decoded::Oversized { bytes });
                 continue;
             }
             if self.pending.last() == Some(&b'\r') {
@@ -123,15 +143,17 @@ impl FrameReader {
     pub fn finish(&mut self, chunk: &[u8]) -> Vec<Decoded> {
         let mut out = self.push(chunk);
         if self.discarding {
-            // The oversized line never ended; the whole tail is junk.
+            // The oversized line never ended; the whole tail is junk, and its
+            // measured length is all the reader ever learns about it.
             self.discarding = false;
             self.pending.clear();
             self.stats.oversized += 1;
-            out.push(Decoded::Oversized);
+            out.push(Decoded::Oversized { bytes: self.line_bytes });
         } else if !self.pending.is_empty() {
             let line = std::mem::take(&mut self.pending);
             out.push(self.decode(&line));
         }
+        self.line_bytes = 0;
         out
     }
 
@@ -211,8 +233,30 @@ mod tests {
         let mut chunk = vec![b'x'; MAX_FRAME_BYTES + 64];
         chunk.extend_from_slice(b"\n{\"id\":9}\n");
         let out = reader.push(&chunk);
-        assert!(out.iter().any(|entry| matches!(entry, Decoded::Oversized)));
+        assert!(out.iter().any(|entry| matches!(entry, Decoded::Oversized { .. })));
         assert_eq!(values(out), vec![serde_json::json!({"id": 9})], "the frame after it still parses");
+        assert_eq!(reader.stats().oversized, 1);
+    }
+
+    #[test]
+    fn an_oversized_frame_reports_its_measured_length() {
+        // The number is what separates "a frame was refused" from "a 1.3 MB frame
+        // was refused": the reader empties its buffer the moment the limit is
+        // crossed, so the length has to be counted as the bytes arrive.
+        let mut reader = FrameReader::new();
+        let out = reader.push(&vec![b'x'; MAX_FRAME_BYTES + 64]);
+        assert!(out.is_empty(), "the line has no terminator yet");
+        let out = reader.push(b"\n");
+        assert_eq!(out, vec![Decoded::Oversized { bytes: MAX_FRAME_BYTES + 64 }]);
+    }
+
+    #[test]
+    fn an_oversized_tail_is_measured_at_end_of_stream() {
+        // The same fact for a line the peer never terminated: the read loop's
+        // `finish` is the only place this length can be reported from.
+        let mut reader = FrameReader::new();
+        assert!(reader.push(&vec![b'x'; MAX_FRAME_BYTES + 3]).is_empty());
+        assert_eq!(reader.finish(b""), vec![Decoded::Oversized { bytes: MAX_FRAME_BYTES + 3 }]);
         assert_eq!(reader.stats().oversized, 1);
     }
 

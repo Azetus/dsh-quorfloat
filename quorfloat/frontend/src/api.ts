@@ -13,6 +13,14 @@ export const api = {
   answerQuestion: (interactionId: string, answers: readonly QuestionAnswer[]) =>
     invoke('answer_question', { interactionId, answers }),
   selectSession: (sessionId: string) => invoke('select_session', { sessionId }),
+  /**
+   * Ask the shell for one older page of the conversation on screen.
+   *
+   * No arguments: the cursor is the shell's (it is the oldest line it holds, in the
+   * Harness's `beforeSeq` vocabulary) and the page does not come back here — it arrives as
+   * the next `quorfloat/state` snapshot, so the page keeps rendering what the host said.
+   */
+  loadEarlier: () => invoke('load_earlier'),
   startNew: () => invoke('start_new'),
   pin: (sessionId: string | null) => invoke('pin', { sessionId }),
   pinWorkspace: (workspaceId: string | null) => invoke('pin_workspace', { workspaceId }),

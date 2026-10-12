@@ -147,6 +147,9 @@ export const en = {
   'disclosure.working': 'Working',
   'disclosure.done': 'Done',
   'thread.backToBottom': 'Back to bottom',
+  // The Harness's own word for this control (`chat.loadOlder`), and its own busy wording.
+  'thread.loadEarlier': 'Load earlier',
+  'thread.loadingEarlier': 'Loading earlier…',
   'turn.question': 'You · {question}',
 
   // Working lines.

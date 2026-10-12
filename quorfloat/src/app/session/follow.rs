@@ -34,8 +34,10 @@ pub const POLL_INTERVAL_MS: i64 = 3000;
 ///
 /// Without this a single dropped response would stop discovery for the life of the
 /// process: the panel would sit there following nothing, looking exactly like a
-/// panel with nothing to do.
-const REQUEST_TIMEOUT_MS: i64 = 10_000;
+/// panel with nothing to do. The page request uses the same budget for the same
+/// reason — a busy "loading earlier" that never clears is a control the user cannot
+/// use again.
+pub const REQUEST_TIMEOUT_MS: i64 = 10_000;
 
 /// How many consecutive list revisions must omit the pinned conversation before it is forfeit.
 ///
@@ -71,6 +73,19 @@ pub enum Outgoing {
     Attach {
         /// Durable session identity.
         session_id: String,
+    },
+    /// Read one older page of the attached conversation's history.
+    ///
+    /// The one variant the follow layer does not decide: it exists so the page request
+    /// travels on the same single-request path as everything else this process asks
+    /// (one id, one answer, one timeout), and so the wire frame is built in one place.
+    History {
+        /// The conversation the page belongs to.
+        session_id: String,
+        /// The exclusive backwards cursor: ask for the page below this sequence. This is
+        /// the Harness's own `beforeSeq` (`SessionPageRequest.beforeSeq`), and its value is
+        /// the sequence of the oldest line the panel currently shows.
+        before_seq: i64,
     },
 }
 

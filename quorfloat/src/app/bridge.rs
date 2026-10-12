@@ -187,6 +187,12 @@ pub fn snapshot(session: &Session, shell: &ShellView) -> Value {
             "title": transcript.title(),
             "streaming": transcript.is_streaming(),
             "turnActive": transcript.is_turn_active(),
+            // Whether the host says history precedes the oldest line on screen. The panel
+            // draws the "load earlier" control on this and on nothing else: a control that
+            // is offered when there is nothing behind it is a control that lies.
+            "hasMore": transcript.has_more(),
+            // Whether a page is in flight, which is the control's busy state.
+            "loadingEarlier": session.loading_history(),
             "entries": transcript.entries().iter().map(entry_view).collect::<Vec<_>>(),
             "live": transcript.live_entry().as_ref().map(entry_view),
         },
@@ -476,6 +482,21 @@ pub fn answer_question(
 #[must_use]
 pub fn select_session(session: &mut Session, sink: &mut dyn FrameSink, session_id: &str) -> Value {
     json!({ "accepted": session.choose_conversation(session_id, sink) })
+}
+
+/// `load_earlier` — ask for one older page of the conversation on screen.
+///
+/// A thin call, like the other commands: whether there *is* anything older, where the
+/// backwards cursor points, and how many entries the page may hold all belong to the session
+/// and the host. The answer is whether a request went out; the page itself arrives as the
+/// next snapshot, so the panel never has to merge anything.
+///
+/// @param session - the session.
+/// @param sink - where the request goes.
+/// @returns whether a page request was written.
+#[must_use]
+pub fn load_earlier(session: &mut Session, sink: &mut dyn FrameSink) -> Value {
+    json!({ "accepted": session.request_history(sink) })
 }
 
 /// `start_new` — go back to "new conversation" mode, dropping the followed one.

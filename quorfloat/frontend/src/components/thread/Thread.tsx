@@ -6,10 +6,12 @@
 // height is measured rather than guessed, because an answer is as tall as its Markdown says.
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { api } from '../../api'
 import { setBottomPin } from '../../logic/bottom-pin'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import type { Snapshot } from '../../logic/state'
 import { foldTurns, type Turn as TurnModel } from '../../logic/turns'
+import { useT } from '../../hooks/useI18n'
 import { JumpToBottom } from './JumpToBottom'
 import { Turn } from './Turn'
 
@@ -28,6 +30,28 @@ type Row =
   | { readonly kind: 'loose'; readonly key: string; readonly text: string }
   | { readonly kind: 'turn'; readonly key: string; readonly turn: TurnModel; readonly sep: boolean }
 
+/**
+ * The line a page load is anchored to.
+ *
+ * Everything here is the form that survives rows arriving *above* the reader: the row's index
+ * inside its own block (loose lines and turns are two blocks — see `foldTurns`), so the new
+ * index can be computed afterwards without depending on a key that shifts; the row's offset in
+ * the items container; and the scroll position that offset was seen at.
+ */
+interface EarlierAnchor {
+  /** Which block the line belongs to. */
+  readonly block: 'loose' | 'turn'
+  /** Its index within that block. */
+  readonly local: number
+  /** Its offset in the items container, before the page arrived. */
+  readonly start: number
+  /** The scroll offset, before the page arrived. */
+  readonly scrollTop: number
+  /** The block sizes before the page arrived, so the new index can be derived. */
+  readonly loose: number
+  readonly turns: number
+}
+
 /** How many rows beyond the viewport stay mounted: enough that fast scrolling does not
  *  show a blank strip, few enough that a long conversation still costs nothing. */
 const OVERSCAN = 3
@@ -41,12 +65,15 @@ const ESTIMATE = { loose: 32, turn: 220 } as const
  * Render the thread.
  *
  * Scroll rule (the panel's own): while the reader is at the bottom, new content keeps them
- * there; once they scroll up, the panel does not yank them back.
+ * there; once they scroll up, the panel does not yank them back. The rule extends to content
+ * arriving *above* them: loading an older page compensates the scroll offset by exactly the
+ * height the page added above the retained line, so the words on screen do not move.
  *
  * @param props - snapshot and fold state.
  * @returns the scroll area.
  */
 export function Thread({ state, folds, onToggleFold }: ThreadProps) {
+  const t = useT()
   const scrollRef = useRef<HTMLDivElement>(null)
   // Whether the reader is at the bottom. Starts true: the first paint should show the end
   // of the conversation, which is what a chat panel is for.
@@ -55,6 +82,10 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
   const [following, setFollowing] = useState(true)
   /** The box height at the last pin: what a change in it has to be taken out of. */
   const lastHeight = useRef<number | null>(null)
+  /** The line a pending older page is anchored to, if one is being held. */
+  const anchor = useRef<EarlierAnchor | null>(null)
+  /** The last scroll offset this component wrote, so its own writes are not read as the reader's. */
+  const written = useRef<number | null>(null)
 
   const view = foldTurns(state.transcript.entries, state.transcript.live, state.transcript.turnActive)
   const rows: Row[] = []
@@ -108,6 +139,66 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
     scroll.scrollTop = scroll.scrollHeight
   })
 
+  /**
+   * Retain the line the reader is looking at.
+   *
+   * The first row at or below the viewport's top edge, in the form that survives rows
+   * arriving above it: its index inside its own block, its offset, and the scroll position.
+   * Called when the reader asks for an older page, and again if they scroll while one is in
+   * flight — a page that lands after the reader has moved must not undo the move.
+   */
+  const captureAnchor = () => {
+    const scroll = scrollRef.current
+    if (scroll === null) return
+    const items = virtual.getVirtualItems()
+    const item = items.find(candidate => candidate.start + candidate.size > scroll.scrollTop) ?? items[0]
+    if (item === undefined) return
+    const loose = item.index < view.loose.length
+    anchor.current = {
+      block: loose ? 'loose' : 'turn',
+      local: loose ? item.index : item.index - view.loose.length,
+      start: item.start,
+      scrollTop: scroll.scrollTop,
+      loose: view.loose.length,
+      turns: view.turns.length,
+    }
+  }
+
+  // Hold the retained line still while older content lands above it.
+  //
+  // The compensation is the row's own offset delta — the measured height of everything the page
+  // put above it — rather than the content height delta: a streaming answer at the tail grows
+  // the content at the same moment, and taking that out of the offset would move the reader by
+  // exactly the tail's growth. Runs after every commit, because the offsets it reads are the
+  // virtualizer's measurements and they settle over a few commits.
+  useLayoutEffect(() => {
+    const pending = anchor.current
+    const scroll = scrollRef.current
+    if (pending === null || scroll === null) return
+    // A window that got smaller is not the same conversation (a switch, or a reset): the
+    // retained line no longer means anything, and holding it would drag the reader somewhere
+    // arbitrary.
+    if (view.loose.length < pending.loose || view.turns.length < pending.turns) {
+      anchor.current = null
+      return
+    }
+    const index = pending.block === 'loose'
+      ? pending.local + (view.loose.length - pending.loose)
+      : view.loose.length + pending.local + (view.turns.length - pending.turns)
+    const offset = virtual.getOffsetForIndex(index)?.[0]
+    if (offset === undefined) return
+    const target = pending.scrollTop + (offset - pending.start)
+    if (Math.abs(scroll.scrollTop - target) >= 0.5) {
+      written.current = target
+      scroll.scrollTop = target
+    }
+    // The page has landed and its height is compensated, so the gesture is over: the line is
+    // released, and everything after this behaves like ordinary reading (the reader is no
+    // longer following the tail — asking for older content ends that — so nothing moves them).
+    const grew = view.loose.length > pending.loose || view.turns.length > pending.turns
+    if (grew && !loadingEarlier) anchor.current = null
+  })
+
   // Re-read the mounted rows' sizes after every commit.
   //
   // The virtualizer remembers a row's height under its key, and a row can shrink while it is not
@@ -151,6 +242,9 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
     return () => { setBottomPin(null) }
   }, [])
 
+  const earlier = state.transcript.hasMore === true
+  const loadingEarlier = state.transcript.loadingEarlier === true
+
   return (
     <div
       id="q-thread-scroll"
@@ -162,8 +256,42 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
         follow.current = atBottom
         // Only on a change: a scroll event per keystroke would otherwise re-render the thread.
         setFollowing(current => (current === atBottom ? current : atBottom))
+        // A scroll this component did not write is the reader moving. While a page is on its
+        // way that is not a reason to drop the retained line — the page will land after the
+        // move, and it would undo it — so the anchor moves with them; with nothing in flight
+        // it is released, because holding it would fight the reader.
+        const mine = written.current
+        if (anchor.current !== null && (mine === null || Math.abs(el.scrollTop - mine) > 1)) {
+          if (loadingEarlier && !atBottom) captureAnchor()
+          else anchor.current = null
+        }
       }}
     >
+      {/* The older page's control, arranged like `回到底部`: a zero-height sticky slot, so it
+          floats over the first lines without being part of the content the retained offset is
+          measured against. A control that took up height would move the reader by its own
+          height every time it appeared or left. */}
+      {earlier && (
+        <div className="q-earlier">
+          <button
+            type="button"
+            disabled={loadingEarlier}
+            aria-label={loadingEarlier ? t('thread.loadingEarlier') : t('thread.loadEarlier')}
+            onClick={() => {
+              // Asking for older content is the reader leaving the tail — the Harness's own
+              // `loadEarlier` pauses following for exactly this reason. Without it, the tail
+              // pin in the effect above would put them back at the bottom on the next commit
+              // and the page they just loaded would arrive off-screen.
+              follow.current = false
+              setFollowing(false)
+              captureAnchor()
+              void api.loadEarlier()
+            }}
+          >
+            {loadingEarlier ? t('thread.loadingEarlier') : t('thread.loadEarlier')}
+          </button>
+        </div>
+      )}
       <div id="q-thread" className="q-thread">
         {rows.length > 0 && (
           <div className="q-thread-items" style={{ height: virtual.getTotalSize() }}>

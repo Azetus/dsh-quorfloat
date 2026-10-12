@@ -134,7 +134,12 @@ impl StdinSource {
     fn accept(&mut self, entry: Decoded) {
         let inbound = match entry {
             Decoded::Value(value) => rpc::classify(value),
-            Decoded::Garbage | Decoded::Oversized => Inbound::Malformed,
+            Decoded::Garbage => Inbound::Malformed,
+            // The measured length travels to the session, which is the layer that
+            // owns the log line: refusing a frame is a fact about the wire, and
+            // reporting it here would put a diagnostic where the sink's own
+            // formatting lives.
+            Decoded::Oversized { bytes } => Inbound::Oversized { bytes },
         };
         self.ready.push_back(inbound);
     }
@@ -175,6 +180,7 @@ impl FrameSource for StdinSource {
 #[cfg(test)]
 mod tests {
     use crate::ipc::frame::Decoded;
+    use crate::ipc::rpc::Inbound;
 
     #[test]
     fn a_reader_that_returns_one_byte_at_a_time_still_frames_correctly() {
@@ -194,5 +200,16 @@ mod tests {
             .collect();
         assert_eq!(values.len(), 2);
         assert_eq!(values[1]["id"], 2);
+    }
+
+    #[test]
+    fn an_oversized_line_reaches_the_session_as_its_measured_size() {
+        // The hop that used to lose the distinction: both refusals arrived as
+        // `Malformed`, so the log line could not name the reason or the size.
+        let mut source = super::StdinSource::new();
+        source.accept(Decoded::Oversized { bytes: 1_310_812 });
+        source.accept(Decoded::Garbage);
+        assert_eq!(source.ready.pop_front(), Some(Inbound::Oversized { bytes: 1_310_812 }));
+        assert_eq!(source.ready.pop_front(), Some(Inbound::Malformed));
     }
 }

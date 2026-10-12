@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { loadModule } from './helpers.mjs'
+import { loadModule, waitFor } from './helpers.mjs'
 
 const { FrameDecoder, classify, encodeFrame, request, notification, success, failure, ErrorCode, PROTOCOL_VERSION, MAX_FRAME_BYTES } =
   await loadModule('protocol.js')
@@ -159,4 +159,180 @@ test('classify accepts a valid response with a null id', () => {
   const classified = classify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } })
   assert.ok(!('detail' in classified))
   assert.equal(classified.kind, 'failure')
+})
+
+// Protocol contract: the chunked snapshot. One frame used to carry a whole
+// conversation, and a conversation past the 1 MiB ceiling was dropped by the reader
+// before any of it could be folded — which left the panel blank for the rest of the
+// run. The sequence below is the framing that replaces it.
+test('a snapshot larger than one frame is emitted as begin, bounded parts, and end', async () => {
+  const { SessionLayer, SNAPSHOT_PART_BUDGET_BYTES } = await loadModule('harness/session-layer.js')
+  // The measured shape of the failure: a 50-message window around 1.3 MB. The text is
+  // CJK on purpose — three bytes per character — so a budget enforced on
+  // `String.length` would pass a size assertion while shipping a frame three times the
+  // ceiling, which is exactly the mistake this protocol rule exists to prevent.
+  const records = Array.from({ length: 50 }, (_, index) => ({
+    type: 'event',
+    event: {
+      type: 'assistant/message',
+      seq: index,
+      time: index,
+      data: { message: { role: 'assistant', content: [{ type: 'text', text: '中'.repeat(8_000) }] } },
+    },
+  }))
+  const snapshot = {
+    type: 'snapshot',
+    cursor: 49,
+    hasMore: false,
+    records,
+    projections: null,
+    assistantStream: null,
+  }
+  const notifications = []
+  const layer = new SessionLayer({
+    harness: {
+      follow(sessionId, onFrame) {
+        queueMicrotask(() => onFrame(snapshot))
+        return { close() {}, done: new Promise(() => {}) }
+      },
+      stats: async () => undefined,
+    },
+    notify: async (method, params) => {
+      notifications.push({ method, params })
+    },
+    defaultWorkspaceId: () => '',
+    log: { warn() {}, debug() {} },
+  })
+  await layer.attach('session-1')
+  await waitFor('the snapshot sequence to finish', async () =>
+    notifications.some(entry => entry.method === 'session/snapshot/end'))
+
+  assert.equal(notifications[0].method, 'session/snapshot/begin', 'the identity and meta come first')
+  assert.equal(notifications.at(-1).method, 'session/snapshot/end', 'and the sequence is closed')
+
+  const parts = notifications.filter(entry => entry.method === 'session/snapshot/part')
+  assert.ok(parts.length > 1, `the snapshot was chunked, not sent as one frame (${parts.length} part(s))`)
+  assert.equal(notifications[0].params.parts, parts.length, 'begin declares how many parts follow')
+  assert.equal(notifications[0].params.sessionId, 'session-1')
+
+  const whole = Buffer.byteLength(JSON.stringify(records))
+  assert.ok(whole > MAX_FRAME_BYTES, `the conversation really is past the ceiling: ${whole} bytes`)
+  for (const [index, part] of parts.entries()) {
+    assert.equal(part.params.index, index, 'parts are numbered in order')
+    assert.equal(part.params.sessionId, 'session-1', 'every part names the conversation it belongs to')
+    const bytes = Buffer.byteLength(JSON.stringify(part.params))
+    assert.ok(
+      bytes <= SNAPSHOT_PART_BUDGET_BYTES,
+      `part ${index} is ${bytes} bytes, over the ${SNAPSHOT_PART_BUDGET_BYTES}-byte budget`,
+    )
+    assert.ok(bytes < MAX_FRAME_BYTES, `part ${index} must stay under the frame ceiling`)
+  }
+
+  // Nothing may be lost or reordered by the split: the peer reassembles these in order.
+  assert.deepEqual(parts.flatMap(part => part.params.records), records)
+})
+
+// Protocol contract: the older page. It travels as one JSON-RPC response, so it is bounded by
+// the same 1 MiB frame ceiling — and the peer's reader drops an oversized frame before anything
+// can fold it, which for a page means the reader's request silently never lands.
+test('an older page is bounded to one frame, keeping the records nearest the window', async () => {
+  const { boundedHistoryPage, HISTORY_PAGE_BUDGET_BYTES } = await loadModule('harness/session-layer.js')
+  // CJK text on purpose, as in the snapshot test: a budget enforced on `String.length` would
+  // pass here while shipping frames three times the intended size.
+  const record = seq => ({
+    type: 'event',
+    event: {
+      type: 'assistant/message',
+      seq,
+      time: seq,
+      data: { message: { role: 'assistant', content: [{ type: 'text', text: '中'.repeat(4_000) }] } },
+    },
+  })
+  const records = Array.from({ length: 100 }, (_, index) => record(index))
+
+  const bounded = boundedHistoryPage({ records, hasMore: false, cursor: 0 })
+  assert.ok(bounded.records.length > 0, 'a page always carries something')
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(bounded.records)) <= HISTORY_PAGE_BUDGET_BYTES,
+    `the page fits the budget: ${Buffer.byteLength(JSON.stringify(bounded.records))} bytes`,
+  )
+  assert.ok(bounded.records.length < records.length, 'the page really was trimmed')
+  // The newest end survives: the panel extends its window upwards, so what arrives has to be
+  // contiguous with what is already on screen, or the window would have a hole in it.
+  assert.deepEqual(bounded.records.at(-1), records.at(-1))
+  assert.equal(bounded.hasMore, true, 'the records left behind are still reachable')
+  assert.equal(
+    bounded.cursor,
+    bounded.records[0].event.seq,
+    'and paging continues below the oldest record that travelled',
+  )
+
+  // A page that fits is handed back untouched, cursor and all — the trim is not a rewrite.
+  const small = { records: records.slice(0, 2), hasMore: false, cursor: 1 }
+  assert.equal(boundedHistoryPage(small), small)
+  assert.equal(boundedHistoryPage({ records: [], hasMore: false, cursor: null }).cursor, null)
+})
+
+// Protocol contract: the per-record clamp. The page budget above is not, on its own, a bound on
+// a *record*: one record larger than the page budget would travel as an oversized frame, and the
+// peer's reader drops that frame before anything can fold it — for a page, the reader's request
+// then simply times out. This is the same failure that made long snapshots blank, one level down.
+test('a record larger than the per-record budget is clamped, not sent oversized', async () => {
+  const { boundedHistoryPage, HISTORY_PAGE_BUDGET_BYTES, HISTORY_RECORD_BUDGET_BYTES } =
+    await loadModule('harness/session-layer.js')
+  const huge = {
+    type: 'event',
+    event: {
+      type: 'assistant/message',
+      seq: 7,
+      time: 7,
+      data: { message: { role: 'assistant', content: [{ type: 'text', text: '中'.repeat(400_000) }] } },
+    },
+  }
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(huge)) > HISTORY_PAGE_BUDGET_BYTES,
+    'the fixture really is one record past the whole page budget',
+  )
+
+  const bounded = boundedHistoryPage({ records: [huge], hasMore: false, cursor: 7 })
+  const record = bounded.records[0]
+  const bytes = Buffer.byteLength(JSON.stringify(record))
+  assert.ok(
+    bytes <= HISTORY_RECORD_BUDGET_BYTES,
+    `the record must fit its own budget: ${bytes} > ${HISTORY_RECORD_BUDGET_BYTES}`,
+  )
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(bounded.records)) <= HISTORY_PAGE_BUDGET_BYTES,
+    'and so the page fits one frame',
+  )
+  // The envelope is what every consumer of a page places a record by: the backwards cursor
+  // (`event.seq`), the fold (`event.type`), and the forward watermark.
+  assert.equal(record.type, 'event', 'the record envelope survives')
+  assert.equal(record.event.type, 'assistant/message', 'the event kind survives, so the transcript can fold it')
+  assert.equal(record.event.seq, 7, 'the sequence survives, so paging continues below it')
+  assert.equal(bounded.cursor, 7)
+  // The cut is stated in the text, exactly as the transcript's own per-entry clip states it: a
+  // clipped answer that looks complete is worse than a long one.
+  assert.match(record.event.data.message.content[0].text, /已截断 \d+ 字节/)
+})
+
+test('a record that cannot be clipped into the budget travels as its envelope, never oversized', async () => {
+  const { boundedHistoryPage, HISTORY_RECORD_BUDGET_BYTES } = await loadModule('harness/session-layer.js')
+  // The structural case: thousands of short fields whose *shape* is over budget and whose every
+  // string is too short to be worth clipping (they are identity-sized, and clipping one would
+  // turn a record this build folds into one it counts as unrecognised).
+  const data = {}
+  for (let index = 0; index < 4_000; index += 1) data[`field-${index}`] = 'x'.repeat(8)
+  const record = { type: 'event', event: { type: 'assistant/message', seq: 9, time: 9, data } }
+
+  const bounded = boundedHistoryPage({ records: [record], hasMore: false, cursor: 9 })
+  const sent = bounded.records[0]
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(sent)) <= HISTORY_RECORD_BUDGET_BYTES,
+    'the record still fits its budget, however it had to get there',
+  )
+  assert.equal(sent.event.type, 'assistant/message')
+  assert.equal(sent.event.seq, 9, 'the envelope is kept: it is the half every consumer needs')
+  assert.equal(sent.event.data.truncated, true, 'and the payload says what happened to it')
+  assert.equal(bounded.cursor, 9)
 })

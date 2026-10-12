@@ -216,13 +216,21 @@ test('the page request the adapter sends passes Harness validation', { skip }, a
   const throughSeq = await harness.cursor('session-1')
   await harness.pageHistory('session-1', throughSeq, 42)
   const call = calls.find(entry => entry.method === 'session/page')
+  // The shape is the Harness's own (`HISTORY_PAGE_OPTIONS`, in
+  // `packages/api/session-controller/src/client/sessions/session.ts`): a page extends by at
+  // least 50 messages **and two turn starts**, so it does not cut a turn in half. The cap is
+  // ours — a page here is one frame, trimmed to `HISTORY_PAGE_BUDGET_BYTES` before it is sent,
+  // so the Harness's 500 would read several frames' worth and throw the surplus away. Changed
+  // together with the adapter on purpose: this is a tripwire on the upstream *shape*, not a ban
+  // on choosing a transportable cap.
   assert.deepEqual(call.request, {
     address: { kind: 'session', sessionId: 'session-1' },
     // A real sequence, at or below the session cursor. Harness rejects anything
     // past the cursor, which is what an invented maximum bound would be.
     throughSeq: 1,
     beforeSeq: 42,
-    maxMessages: 50,
+    maxMessages: 200,
+    turnWindow: { minMessages: 50, minTurns: 2 },
   })
   const checked = checkParameter('session/page', call.request)
   assert.ok(checked.ok, `Harness rejected the page request: ${JSON.stringify(checked.issues)}`)

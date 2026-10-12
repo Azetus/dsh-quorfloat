@@ -22,6 +22,16 @@ pub enum Inbound {
     Response { id: Value, outcome: Result<Value, RpcError> },
     /// Legal JSON that is not a JSON-RPC message at all.
     Malformed,
+    /// A line the transport refused because it exceeded the frame ceiling.
+    ///
+    /// Deliberately not folded into [`Inbound::Malformed`]: "the peer sent junk" and
+    /// "the peer sent 1.3 MB in one frame" have different causes and different fixes,
+    /// and a log line that cannot tell them apart is what left a blank panel
+    /// unexplained. `bytes` is the refused line's measured length.
+    Oversized {
+        /// Bytes in the refused line, terminator excluded.
+        bytes: usize,
+    },
 }
 
 /// A JSON-RPC error object.

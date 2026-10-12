@@ -139,6 +139,9 @@ export const zh: Record<MessageKey, string> = {
   'disclosure.working': '正在工作',
   'disclosure.done': '已完成',
   'thread.backToBottom': '回到底部',
+  // 与 Harness 自己的用词一致（`chat.loadOlder` / 加载中的说法）。
+  'thread.loadEarlier': '加载更早',
+  'thread.loadingEarlier': '正在加载更早…',
   'turn.question': '你 · {question}',
 
   // Working lines.

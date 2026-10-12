@@ -24,15 +24,28 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+pub mod assembly;
 mod records;
 mod stream;
 
 use self::records::{content_blocks, find_call_id, message_text};
 use self::stream::Live;
 
-/// How many entries are kept. A floating panel is not an archive: past this, the oldest
-/// are dropped and the fact that they were is part of the transcript.
-const MAX_ENTRIES: usize = 400;
+/// How much text the whole window keeps, measured in the bytes of the lines themselves.
+///
+/// **Bytes, not entries, and deliberately so.** This used to be a count (`400`), and a count
+/// is the wrong unit for a window the user can *extend upwards*: fifty loaded messages of
+/// ordinary prose and fifty of build output are the same number of entries and three orders
+/// of magnitude apart in memory — and a count cap reaps the oldest entries first, which are
+/// exactly the older pages the reader just asked for. The budget below is generous enough
+/// that paging several pages of ordinary text never reaches it, and what it does reap is
+/// reported (`Skipped::dropped`), never silent.
+///
+/// The bound that actually matters is the Harness's own: a loaded page does not outlive the
+/// conversation it belongs to. When the panel is attached to another conversation the window
+/// is replaced wholesale ([`Transcript::clear`], via `apply_snapshot`), and nothing here
+/// caches a page across that.
+const MAX_WINDOW_BYTES: usize = 4 * 1024 * 1024;
 
 /// How much text one entry keeps. A tool result can be megabytes, and a panel that
 /// allocates them all is a panel that dies on the one conversation that mattered.
@@ -92,6 +105,30 @@ pub struct Transcript {
     generation: Option<i64>,
     /// Highest `seq` folded in. Records at or below it are duplicates.
     cursor: i64,
+    /// Lowest `seq` the window can still show.
+    ///
+    /// The backwards cursor: this is what a page request asks below (`beforeSeq` in the
+    /// Harness's own vocabulary), and it moves down as older pages are folded in above the
+    /// current oldest line. `None` means the window holds no records at all.
+    oldest: Option<i64>,
+    /// Whether the host says history still precedes the oldest line on screen.
+    ///
+    /// Carried on every snapshot and on every page answer, and the only thing that decides
+    /// whether the panel offers to load more: a control that is drawn when there is nothing
+    /// behind it is a control that lies.
+    has_more: bool,
+    /// Bytes of entry text currently held, against [`MAX_WINDOW_BYTES`].
+    ///
+    /// Measured on every fold rather than recomputed: the window is read on every frame the
+    /// panel paints, and summing a conversation's text on each read would be the one thing
+    /// in this module that is linear in the conversation.
+    bytes: usize,
+    /// Whether an older page is being folded in right now.
+    ///
+    /// While this is set the byte budget does not reap: a page the reader asked for is not
+    /// thrown away by the act of receiving it, however large it is. The budget resumes on the
+    /// next live line, which is the growth it exists to bound.
+    holding: bool,
     /// Whether a snapshot has been folded in; before that, events cannot be placed.
     seeded: bool,
     /// The lines, shared rather than copied.
@@ -186,13 +223,18 @@ impl Transcript {
     ///
     /// For a conversation that no longer exists at the host. There is nothing worth keeping:
     /// those lines describe a conversation the panel is not following any more, and leaving
-    /// them on screen would be showing the user something they cannot reply to.
+    /// them on screen would be showing the user something they cannot reply to. The loaded
+    /// pages go with them, which is the memory policy the Harness uses too: there is no page
+    /// cache, so switching conversations re-reads the tail and nothing older.
     pub fn reset(&mut self) {
         self.session_id = None;
         self.entries = std::sync::Arc::new(Vec::new());
         self.live = None;
         self.title = None;
         self.turn_active = false;
+        self.oldest = None;
+        self.has_more = false;
+        self.bytes = 0;
     }
 
     /// The subscription generation the current entries belong to.
@@ -205,6 +247,28 @@ impl Transcript {
     #[must_use]
     pub fn cursor(&self) -> i64 {
         self.cursor
+    }
+
+    /// The lowest sequence the window can still show, if any.
+    ///
+    /// The backwards cursor a page request is placed below. `None` when the window holds no
+    /// records: there is nothing to ask below, and a request would be asking about a
+    /// conversation this transcript has not been shown.
+    #[must_use]
+    pub fn oldest_seq(&self) -> Option<i64> {
+        self.oldest
+    }
+
+    /// Whether the host says older history exists.
+    #[must_use]
+    pub fn has_more(&self) -> bool {
+        self.has_more
+    }
+
+    /// Bytes of entry text currently held; for the log line and for tests.
+    #[must_use]
+    pub fn held_bytes(&self) -> usize {
+        self.bytes
     }
 
     /// What was set aside rather than rendered, for the log line.
@@ -240,6 +304,9 @@ impl Transcript {
         self.calls.clear();
         self.title = None;
         self.cursor = -1;
+        self.oldest = None;
+        self.has_more = false;
+        self.bytes = 0;
         self.seeded = false;
         self.dropped = 0;
         self.turn_active = false;
@@ -261,12 +328,22 @@ impl Transcript {
         self.generation = params.get("generation").and_then(Value::as_i64);
         self.cursor = -1;
         self.seeded = true;
+        // Whether more history precedes this window is the host's fact, and it travels with
+        // the snapshot (single frame or chunked `begin`). A snapshot that does not carry it
+        // is read as "nothing older", which is the safe half: no control is drawn that would
+        // ask for a page nobody said existed.
+        self.has_more = params.get("hasMore").and_then(Value::as_bool).unwrap_or(false);
         // A snapshot that arrives while a stream is in flight replaces the stream too:
         // the stream described a subscription that no longer exists.
         self.live = None;
         for record in params.get("records").and_then(Value::as_array).into_iter().flatten() {
             self.fold_record(record);
         }
+        // The backwards cursor is the oldest record the window now shows — the same field the
+        // Harness's own client derives after a page (`records[0].event.seq`). Kept if the
+        // window already had one: a repeated snapshot for the same conversation adds *newer*
+        // records, and the oldest line on screen does not move.
+        self.oldest = self.oldest.or_else(|| first_seq(params.get("records")));
         // The cursor comes from the snapshot, not from the last record: an empty
         // snapshot still has a position, and treating it as "no records" would make the
         // next event look like a gap.
@@ -307,6 +384,10 @@ impl Transcript {
         });
         self.fold_record(&record);
         self.cursor = seq;
+        // A live event folded into a window that held nothing is the oldest line there is.
+        // It does not move a window that already had lines: live events are newer than
+        // everything already on screen.
+        self.oldest = self.oldest.or(Some(seq));
         true
     }
 
@@ -324,6 +405,78 @@ impl Transcript {
         let live = self.live.get_or_insert_with(Live::default);
         self.unknown += live.fold(frame);
         true
+    }
+
+    /// Fold one older page in **above** the current oldest line.
+    ///
+    /// This is the receiving half of `session/history`: the payload is the host's answer
+    /// verbatim, `{ records, hasMore, cursor }`, where `cursor` is the backwards cursor for
+    /// the page *below* this one (the Harness derives the same value from the page's oldest
+    /// record). Three rules:
+    ///
+    /// - **Above, not after.** The page is older than everything on screen, so its entries go
+    ///   in front of the existing ones; appending them would reorder the conversation.
+    /// - **The forward watermark does not move.** The page's sequences are all below
+    ///   `cursor`, and folding them through the ordinary path would count them as duplicates.
+    ///   They are folded without touching the watermark, so a live event that has already been
+    ///   applied stays applied.
+    /// - **Only history is placed.** The scalars a page can lie about — the title, the turn
+    ///   state, the live stream — are restored afterwards: an old page's `session/title` is
+    ///   not today's title, and an old `turn/start` does not mean a turn is running now.
+    ///
+    /// @param page - the `session/history` result.
+    /// @returns what folding the page did, for the record.
+    pub fn prepend_page(&mut self, page: &Value) -> PrependOutcome {
+        let records = page.get("records").and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
+        let has_more = page.get("hasMore").and_then(Value::as_bool).unwrap_or(false);
+        let first = first_seq(page.get("records"));
+        let last = last_seq(page.get("records"));
+        // A page that is not strictly older than the oldest line on screen is a repeat (a
+        // double click, a retried answer) or an answer to a superseded request. Folding it
+        // would show the reader the same turns twice — the failure the dedup watermark exists
+        // to prevent — so it is refused and counted, and the page's `hasMore` is still
+        // believed: it describes the history, not this window.
+        if let (Some(oldest), Some(last)) = (self.oldest, last) {
+            if last >= oldest {
+                self.duplicates += 1;
+                self.has_more = has_more;
+                return PrependOutcome { entries: 0, oldest: self.oldest, has_more, refused: true };
+            }
+        }
+        if records.is_empty() {
+            self.has_more = has_more;
+            return PrependOutcome { entries: 0, oldest: self.oldest, has_more, refused: false };
+        }
+        // Side effects a historical page must not have: they describe the *present*.
+        let title = self.title.take();
+        let turn_active = self.turn_active;
+        let live = self.live.take();
+        let before = self.entries.len();
+        self.holding = true;
+        for record in records {
+            self.fold_older_record(record);
+        }
+        self.holding = false;
+        self.title = title;
+        self.turn_active = turn_active;
+        self.live = live;
+        // Move what this page added from the end to the front, in one step: the fold path
+        // appends because live records arrive after everything else, and the page is the one
+        // case where the new lines go above.
+        let held = std::mem::take(&mut self.entries);
+        let mut entries = match Arc::try_unwrap(held) {
+            Ok(entries) => entries,
+            // A reader is holding the window (the shell shares it per frame): copy once
+            // rather than mutate a buffer somebody else can see.
+            Err(shared) => (*shared).clone(),
+        };
+        let mut older = entries.split_off(before);
+        let added = older.len();
+        older.append(&mut entries);
+        self.entries = Arc::new(older);
+        self.oldest = page.get("cursor").and_then(Value::as_i64).or(first);
+        self.has_more = has_more;
+        PrependOutcome { entries: added, oldest: self.oldest, has_more, refused: false }
     }
 
     /// Fold in a `session/resync`: the host lost the thread.
@@ -370,11 +523,9 @@ impl Transcript {
         true
     }
 
-    /// Fold one record envelope.
+    /// Fold one record envelope, enforcing the watermark.
     fn fold_record(&mut self, record: &Value) {
         let Some(event) = record.get("event") else { return };
-        let kind = event.get("type").and_then(Value::as_str).unwrap_or_default();
-        let data = event.get("data").cloned().unwrap_or(Value::Null);
         if let Some(seq) = event.get("seq").and_then(Value::as_i64) {
             if seq <= self.cursor {
                 self.duplicates += 1;
@@ -382,6 +533,23 @@ impl Transcript {
             }
             self.cursor = seq;
         }
+        self.fold_event_data(event);
+    }
+
+    /// Fold one *older* record envelope, without touching the watermark.
+    ///
+    /// The history path needs this: every record on an older page is below the cursor by
+    /// construction, so [`Self::fold_record`]'s duplicate rule would set the whole page
+    /// aside and the reader's request would arrive as nothing at all.
+    fn fold_older_record(&mut self, record: &Value) {
+        let Some(event) = record.get("event") else { return };
+        self.fold_event_data(event);
+    }
+
+    /// Turn one event envelope into entries, or decide it is not something to draw.
+    fn fold_event_data(&mut self, event: &Value) {
+        let kind = event.get("type").and_then(Value::as_str).unwrap_or_default();
+        let data = event.get("data").cloned().unwrap_or(Value::Null);
         self.fold_event(kind, &data);
     }
 
@@ -533,7 +701,9 @@ impl Transcript {
     }
 
     fn push(&mut self, entry: Entry) {
-        Arc::make_mut(&mut self.entries).push(bounded(entry));
+        let entry = bounded(entry);
+        self.bytes += entry_bytes(&entry);
+        Arc::make_mut(&mut self.entries).push(entry);
         self.cap();
     }
 
@@ -543,13 +713,27 @@ impl Transcript {
         }
     }
 
-    /// Enforce the buffer limit, keeping the newest.
+    /// Enforce the byte budget, dropping the oldest text.
+    ///
+    /// Measured in bytes rather than entries (see [`MAX_WINDOW_BYTES`]), and the newest line
+    /// is never dropped: a window that trimmed itself to nothing would show a blank panel for
+    /// a conversation that is not blank. What is dropped is counted, so the marker says so.
     fn cap(&mut self) {
-        if self.entries.len() <= MAX_ENTRIES {
+        if self.holding || self.bytes <= MAX_WINDOW_BYTES {
             return;
         }
-        let excess = self.entries.len() - MAX_ENTRIES;
-        Arc::make_mut(&mut self.entries).drain(0..excess);
+        let entries = Arc::make_mut(&mut self.entries);
+        let mut excess = 0usize;
+        let mut freed = 0usize;
+        while excess < entries.len().saturating_sub(1) && self.bytes - freed > MAX_WINDOW_BYTES {
+            freed += entry_bytes(&entries[excess]);
+            excess += 1;
+        }
+        if excess == 0 {
+            return;
+        }
+        entries.drain(0..excess);
+        self.bytes -= freed;
         self.dropped += excess;
     }
 
@@ -562,6 +746,77 @@ impl Transcript {
         }
         Some(Entry::Assistant { blocks: live.blocks().to_vec(), streaming: true })
     }
+}
+
+/// What folding one older page did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrependOutcome {
+    /// Lines added above the oldest line the window held.
+    pub entries: usize,
+    /// The oldest sequence the window can show afterwards, if any.
+    pub oldest: Option<i64>,
+    /// Whether the host says still older history remains.
+    pub has_more: bool,
+    /// Whether the page was refused because it was not older than what is on screen.
+    pub refused: bool,
+}
+
+impl PrependOutcome {
+    /// One line for the log, so a page that arrived as nothing says why.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        let oldest = self.oldest.map_or("none".to_owned(), |seq| seq.to_string());
+        if self.refused {
+            return format!("older page dropped: not older than what is shown (oldest={oldest})");
+        }
+        format!(
+            "older page: {} entries, oldest={oldest}, hasMore={}",
+            self.entries, self.has_more,
+        )
+    }
+}
+
+/// The bytes of text one entry holds, which is what the window budget measures.
+///
+/// The text *is* the entry: nothing here counts the fixed cost of an enum or a `Vec`, because
+/// what a floating panel has to bound is the megabytes a tool result can carry, and the text
+/// is the only part that is not bounded by the shape of the type.
+fn entry_bytes(entry: &Entry) -> usize {
+    match entry {
+        Entry::User { text } | Entry::System { text } => text.len(),
+        Entry::Tool { name, text, .. } => name.as_ref().map_or(0, String::len) + text.len(),
+        Entry::Assistant { blocks, .. } => blocks
+            .iter()
+            .map(|block| match block {
+                Block::Text(text) | Block::Reasoning(text) => text.len(),
+                Block::Call { name, arguments } => name.len() + arguments.len(),
+            })
+            .sum(),
+    }
+}
+
+/// The sequence of the oldest record in a wire `records` array, if it carries one.
+///
+/// Read from the first record rather than the smallest seq: pages are chronological, and this
+/// is the same derivation the Harness's own client makes (`records[0].event.seq`) when it
+/// decides what to send as the next `beforeSeq`.
+fn first_seq(records: Option<&Value>) -> Option<i64> {
+    records
+        .and_then(Value::as_array)
+        .and_then(|records| records.first())
+        .and_then(|record| record.get("event"))
+        .and_then(|event| event.get("seq"))
+        .and_then(Value::as_i64)
+}
+
+/// The sequence of the newest record in a wire `records` array, if it carries one.
+fn last_seq(records: Option<&Value>) -> Option<i64> {
+    records
+        .and_then(Value::as_array)
+        .and_then(|records| records.last())
+        .and_then(|record| record.get("event"))
+        .and_then(|event| event.get("seq"))
+        .and_then(Value::as_i64)
 }
 
 /// Keep one entry's text within the per-entry budget.
@@ -641,7 +896,8 @@ pub struct Skipped {
     pub unknown: usize,
     /// Those kinds by name, so the line says *what* arrived rather than only how much.
     pub unknown_kinds: Vec<String>,
-    /// Entries dropped to stay within the buffer limit.
+    /// Lines dropped to stay within the window's byte budget. Never silent: a reader whose
+    /// older page was reaped has to be able to find out why.
     pub dropped: usize,
 }
 
@@ -766,5 +1022,126 @@ mod tests {
         let Some(Entry::Assistant { blocks, streaming }) = transcript.live_entry() else { panic!("assistant") };
         assert!(streaming);
         assert_eq!(blocks, vec![Block::Text("这是一句话".to_owned())]);
+    }
+
+    /// One `session/history` answer, as the host plugin sends it.
+    fn page(records: Vec<Value>, has_more: bool, cursor: Option<i64>) -> Value {
+        json!({"records": records, "hasMore": has_more, "cursor": cursor})
+    }
+
+    /// One user line, for building pages and snapshots readably.
+    fn user(seq: i64, text: &str) -> Value {
+        record(seq, "user/message", json!({"role": "user", "content": [{"type": "text", "text": text}]}))
+    }
+
+    #[test]
+    fn an_older_page_is_folded_above_the_window_and_moves_the_backwards_cursor() {
+        // The window the panel already has: the tail page, 50..51, with history below it.
+        let mut transcript = Transcript::new();
+        transcript.apply_snapshot(&json!({
+            "sessionId": "session-1", "generation": 1, "cursor": 51, "hasMore": true,
+            "records": [user(50, "新问题"), user(51, "新回答")],
+            "assistantStream": {"revision": 0},
+        }));
+        assert_eq!(transcript.oldest_seq(), Some(50));
+        assert!(transcript.has_more());
+
+        // `session/history { beforeSeq: 50 }`: the page below it.
+        let outcome = transcript.prepend_page(&page(vec![user(48, "旧问题"), user(49, "旧回答")], true, Some(48)));
+        assert!(!outcome.refused);
+        assert_eq!(outcome.entries, 2);
+        assert_eq!(outcome.oldest, Some(48));
+        assert!(outcome.has_more);
+
+        // Above, not after: the older lines are first, and the forward watermark has not moved
+        // (a live event that has already been applied stays applied).
+        assert_eq!(
+            transcript.entries(),
+            &[
+                Entry::User { text: "旧问题".to_owned() },
+                Entry::User { text: "旧回答".to_owned() },
+                Entry::User { text: "新问题".to_owned() },
+                Entry::User { text: "新回答".to_owned() },
+            ],
+        );
+        assert_eq!(transcript.cursor(), 51);
+        assert_eq!(transcript.oldest_seq(), Some(48), "the next request asks below 48");
+        assert!(transcript.has_more());
+
+        // The last page: `hasMore: false` retires the affordance.
+        let outcome = transcript.prepend_page(&page(vec![user(46, "最早")], false, Some(46)));
+        assert_eq!(outcome.entries, 1);
+        assert_eq!(transcript.oldest_seq(), Some(46));
+        assert!(!transcript.has_more());
+    }
+
+    #[test]
+    fn a_page_that_is_not_older_is_refused_rather_than_shown_twice() {
+        // The failure a repeated answer or a second click would produce: the same turns drawn
+        // twice. The dedup watermark does not cover this path — older records are below it by
+        // definition — so the page itself is refused.
+        let mut transcript = Transcript::new();
+        transcript.apply_snapshot(&snapshot(vec![user(50, "新问题"), user(51, "新回答")], 51, 1));
+        let answer = page(vec![user(48, "旧问题"), user(49, "旧回答")], true, Some(48));
+        assert_eq!(transcript.prepend_page(&answer).entries, 2);
+        let before = transcript.entries().to_vec();
+
+        // The same page a second time, and a page that overlaps the window.
+        let repeat = transcript.prepend_page(&answer);
+        assert!(repeat.refused);
+        assert_eq!(repeat.entries, 0);
+        assert!(transcript.prepend_page(&page(vec![user(49, "旧回答"), user(50, "新问题")], true, Some(49))).refused);
+        assert_eq!(transcript.entries(), before.as_slice(), "nothing was folded twice");
+        assert_eq!(transcript.oldest_seq(), Some(48), "and the cursor did not move");
+    }
+
+    #[test]
+    fn one_entry_larger_than_the_per_entry_budget_is_clipped_and_says_so() {
+        // The receiving half of the host's per-record page clamp: whatever arrives, one line
+        // keeps at most `MAX_ENTRY_BYTES` of text. The mirror lives on the host side
+        // (`HISTORY_RECORD_BUDGET_BYTES` in `src/harness/session-layer.ts`, the same 32 KiB), so a
+        // record clamped before it was sent costs this side nothing. The text is CJK on purpose:
+        // a cut at a byte offset would panic on a character boundary, which is why the clip walks
+        // back to one.
+        let mut transcript = Transcript::new();
+        let text = "中".repeat(MAX_ENTRY_BYTES / 3 + 1);
+        transcript.apply_snapshot(&snapshot(vec![user(0, &text)], 0, 1));
+
+        let Entry::User { text: kept } = &transcript.entries()[0] else {
+            panic!("expected the user entry: {:?}", transcript.entries()[0]);
+        };
+        assert!(kept.starts_with('中'), "the kept text is the beginning of what was sent");
+        let cut = kept.find('\n').expect("the marker starts its own line");
+        assert!(cut <= MAX_ENTRY_BYTES, "the kept prefix is within the per-entry budget: {cut}");
+        assert!(kept[cut..].contains("已截断"), "and it states what was dropped rather than looking complete");
+        assert_eq!(transcript.held_bytes(), kept.len(), "the window budget measures what was kept");
+    }
+
+    #[test]
+    fn the_window_is_bounded_by_bytes_and_reports_what_it_dropped() {
+        // The retention policy, in one assertion: a count cap would have reaped the oldest
+        // lines (the pages the reader just loaded) after a fixed number of entries, whatever
+        // they weighed. The budget is bytes, and what it drops is on the record.
+        let mut transcript = Transcript::new();
+        transcript.apply_snapshot(&snapshot(vec![user(0, "起点")], 0, 1));
+        let line = "中".repeat(MAX_ENTRY_BYTES / 3);
+        // Live growth, well past the window budget: `bounded` clips each line at the per-entry
+        // budget, so this is what paging one enormous conversation actually looks like. Twice
+        // as many lines as fit, plus the crossing one.
+        let lines = 2 * MAX_WINDOW_BYTES / MAX_ENTRY_BYTES + 8;
+        for index in 0..lines {
+            let seq = index as i64 + 1;
+            transcript.apply_event(&json!({"sessionId": "session-1", "generation": 1, "seq": seq,
+                "type": "assistant/message", "time": 1,
+                "data": {"message": {"role": "assistant", "content": [{"type": "text", "text": line}]}}}));
+        }
+        assert!(transcript.skipped().dropped > 0, "the budget reaped, and says so");
+        assert!(
+            transcript.held_bytes() <= MAX_WINDOW_BYTES + MAX_ENTRY_BYTES,
+            "within the budget plus the line that crossed it: {}",
+            transcript.held_bytes(),
+        );
+        // The newest line survives whatever the budget did.
+        assert_eq!(transcript.cursor(), lines as i64);
     }
 }

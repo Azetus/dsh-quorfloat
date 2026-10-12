@@ -27,7 +27,8 @@ function stubHost() {
     listSessions: async () => ({ items: [] }),
     createSession: async () => ({ sessionId: 'session-1' }),
     attachSession: async () => ({ sessionId: 'session-1' }),
-    readHistory: async () => ({ records: [], hasMore: false }),
+    requestSnapshot: async sessionId => ({ sessionId, accepted: true }),
+    readHistory: async () => ({ records: [], hasMore: false, cursor: null }),
     readOptions: async () => ({ groups: [], permissions: [] }),
     selectModel: async () => undefined,
     setPermission: async () => undefined,
@@ -48,6 +49,7 @@ const PARAMS = {
   'window/visibility': { visible: true },
   'session/create': { workspaceId: 'ws-1' },
   'session/attach': { sessionId: 'session-1' },
+  'session/snapshot/request': { sessionId: 'session-1' },
   'session/history': { sessionId: 'session-1' },
   'session/prompt': { sessionId: 'session-1', requestId: 'r-1', text: 'hi' },
   'session/cancel': { sessionId: 'session-1' },
@@ -102,6 +104,57 @@ test('the new session methods are in the table', () => {
   for (const method of ['session/options', 'session/select', 'session/permission']) {
     assert.ok(METHODS.includes(method), `${method} must be answerable`)
   }
+})
+
+test('session/history asks below the peer cursor and answers with where paging continues', async () => {
+  // The one older-page request, in both directions. `beforeSeq` is the Harness's own exclusive
+  // backwards cursor (`SessionPageRequest.beforeSeq`), so its value is the oldest sequence the
+  // peer currently shows; the answer carries the page, whether older history remains, and the
+  // backwards cursor for the page below it. A router that renamed the field or dropped `cursor`
+  // would leave the sidecar guessing where to page next — and guessing is what duplicates turns.
+  const seen = []
+  const page = {
+    records: [{ type: 'event', event: { type: 'user/message', seq: 48, time: 1, data: {} } }],
+    hasMore: true,
+    cursor: 48,
+  }
+  const host = stubHost()
+  host.readHistory = async (sessionId, beforeSeq) => {
+    seen.push({ sessionId, beforeSeq })
+    return beforeSeq === undefined ? { records: [], hasMore: true, cursor: null } : page
+  }
+  const router = new HostRouter(host)
+
+  assert.deepEqual(await router.handle('session/history', { sessionId: 'session-1', beforeSeq: 50 }), page)
+  // The tail read: no cursor at all, which is how the peer asks for the newest page.
+  assert.deepEqual(await router.handle('session/history', { sessionId: 'session-1' }), {
+    records: [],
+    hasMore: true,
+    cursor: null,
+  })
+  assert.deepEqual(seen, [
+    { sessionId: 'session-1', beforeSeq: 50 },
+    { sessionId: 'session-1', beforeSeq: undefined },
+  ])
+
+  // A cursor that is present but not an integer is refused at the boundary: a fraction would
+  // reach the Harness as an invalid page bound, and the failure would surface as an empty page.
+  await assert.rejects(
+    () => router.handle('session/history', { sessionId: 'session-1', beforeSeq: 1.5 }),
+    error => {
+      assert.equal(error.code, 'unavailable')
+      assert.match(error.message, /session\/history: beforeSeq must be an integer/)
+      return true
+    },
+  )
+  await assert.rejects(
+    () => router.handle('session/history', {}),
+    error => {
+      assert.match(error.message, /session\/history: sessionId/)
+      return true
+    },
+  )
+  assert.ok(METHODS.includes('session/history'), 'and it is part of the table the supervisor registers')
 })
 
 test('workspace/default answers the same { items } shape as workspaces/list', async () => {

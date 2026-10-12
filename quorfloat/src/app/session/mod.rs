@@ -17,14 +17,15 @@
 //!   happily talking, so `ping` is answered before anything else is considered.
 
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::app::session::follow::{Follow, Outgoing, PanelLifecycle};
+use crate::app::session::follow::{Follow, Outgoing, PanelLifecycle, REQUEST_TIMEOUT_MS};
 use crate::app::session::interaction::{
     ApprovalVerdict, Handoff, Interaction, InteractionKind, InteractionState, MAX_INTERACTIONS,
     QuestionAnswer, SentAnswer, validate_answers,
 };
 use crate::app::session::transcript::Transcript;
+use crate::app::session::transcript::assembly::{ASSEMBLY_TIMEOUT_MS, Assembly, Part};
 
 /// Every prompt key this process has issued, counted once.
 ///
@@ -32,6 +33,20 @@ use crate::app::session::transcript::Transcript;
 /// not moved and the process id is the same — see [`Session::prompt_key`] for what goes wrong when a key
 /// repeats.
 static PROMPT_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How many times one attachment may ask for its snapshot to be re-sent.
+///
+/// A small bound on purpose: the request re-opens the subscription upstream, so a
+/// panel that asked on every failed attempt would turn one lost part into a loop.
+const MAX_SNAPSHOT_RESENDS: u32 = 2;
+
+/// How many snapshots may be assembled at once.
+///
+/// The panel follows one conversation, but parts are matched by the identity they
+/// carry rather than by arrival order, so an abandoned assembly can overlap the one
+/// that replaced it. Four is generous for that and still bounds what a buggy host can
+/// make this process hold in memory.
+const MAX_OPEN_SNAPSHOTS: usize = 4;
 
 /// Which outbound request a response settles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +94,7 @@ impl Delivery {
         }
     }
 }
-use crate::ipc::protocol::{CAPABILITIES, PROTOCOL_VERSION, error_code};
+use crate::ipc::protocol::{CAPABILITIES, MAX_FRAME_BYTES, PROTOCOL_VERSION, error_code};
 use crate::ipc::rpc::{self, Inbound, Outcome, RpcError, Router};
 
 pub mod follow;
@@ -297,6 +312,13 @@ pub struct Session {
     pending_prompt: Option<String>,
     /// The id and send time of the outstanding follow request, if any.
     follow_request: Option<(i64, i64)>,
+    /// The page request in flight, if any.
+    ///
+    /// Its own slot rather than the `follow_request` one: a page is asked for by the reader,
+    /// mid-poll or not, and the two answers carry different payloads. One at a time is still
+    /// the discipline — the panel disables the control while this is set, and a second answer
+    /// for the same slot is ignored — so the busy state the page sees is this field.
+    history_request: Option<PendingHistory>,
     /// Requests the *user* caused, by their id: options, model changes, permission changes.
     ///
     /// Deliberately not the `follow_request` slot: that one belongs to the polling loop, where one
@@ -312,6 +334,26 @@ pub struct Session {
     /// Which conversation those statistics describe. `stats` outlives a detach (nothing else
     /// needs to forget it), so the pair is what makes [`Session::stats`] answerable.
     stats_session: Option<String>,
+    /// Snapshots being rebuilt from their parts (see `session/snapshot/begin|part|end`).
+    ///
+    /// A list rather than one slot because parts are matched by the conversation they
+    /// name, not by arrival order: two subscriptions being opened at once must not be
+    /// able to interleave into one another's records. Bounded — see
+    /// [`MAX_OPEN_SNAPSHOTS`].
+    snapshots: Vec<Assembly>,
+    /// Request ids of the `session/snapshot/request` frames awaiting an answer.
+    ///
+    /// The response carries nothing this side acts on, but an unanswered id would be
+    /// reported as "a response to an unknown request id", which reads like a bug in a
+    /// log that is trying to explain a blank panel.
+    snapshot_requests: BTreeSet<i64>,
+    /// How many resends the current attachment has already asked for.
+    ///
+    /// Reset by an attach, so the bound is per subscription rather than per process.
+    snapshot_resends: u32,
+    /// Frames the reader refused for exceeding the ceiling, counted here so the
+    /// number appears beside the refusal and not only in a counter nobody reads.
+    oversized_frames: u64,
     next_request_id: i64,
     handshake_sent: bool,
     handshake_done: bool,
@@ -330,6 +372,21 @@ enum SettingRequest {
     SelectModel,
     /// `session/permission`: the permission preset.
     SetPermission(String),
+}
+
+/// One page request waiting for its answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingHistory {
+    /// The JSON-RPC id the answer must carry.
+    id: i64,
+    /// The conversation the page belongs to.
+    ///
+    /// Kept so an answer that arrives after the panel moved to another conversation is
+    /// dropped rather than folded into the wrong one: the ids cannot collide, but the
+    /// window can have been replaced while the answer was in flight.
+    session_id: String,
+    /// When the request was sent, so a lost answer does not leave the control busy forever.
+    sent_at: i64,
 }
 
 /// One model the host offers.
@@ -433,11 +490,16 @@ impl Session {
             sends_in_flight: BTreeMap::new(),
             pending_prompt: None,
             follow_request: None,
+            history_request: None,
             setting_requests: BTreeMap::new(),
             options: None,
             setting_failure: None,
             stats: None,
             stats_session: None,
+            snapshots: Vec::new(),
+            snapshot_requests: BTreeSet::new(),
+            snapshot_resends: 0,
+            oversized_frames: 0,
             next_request_id: 1,
             handshake_sent: false,
             handshake_done: false,
@@ -545,6 +607,20 @@ impl Session {
                 sink.log("ignoring a frame that is not a JSON-RPC message");
                 None
             }
+            Inbound::Oversized { bytes } => {
+                // The whole point of P0: this refusal used to print the same text as
+                // malformed JSON, with no size, so a dropped 1.3 MB snapshot looked
+                // exactly like a peer sending garbage — and the panel stayed blank with
+                // nothing on the record to explain it. The running count is here because
+                // one line in a long session is easy to miss.
+                self.oversized_frames += 1;
+                sink.log(&format!(
+                    "ignoring an oversized frame: {bytes} bytes > {MAX_FRAME_BYTES}-byte limit \
+                     ({} so far)",
+                    self.oversized_frames,
+                ));
+                None
+            }
         }
     }
 
@@ -612,25 +688,24 @@ impl Session {
             // to understand would hide the kinds it does not.
             "session/snapshot" => {
                 if let Some(params) = params.as_ref() {
-                    self.transcript.apply_snapshot(params);
-                }
-                self.follow.record(method, params.as_ref(), sink);
-                // What the panel now holds, on the record. "The conversation is empty"
-                // and "the conversation never arrived" look identical on screen, and
-                // this is the line that tells them apart.
-                let title = self
-                    .transcript
-                    .title()
-                    .map_or_else(String::new, |title| format!(" title={title:?}"));
-                sink.mark(&format!(
-                    "transcript {} entries cursor={}{title}",
-                    self.transcript.entries().len(),
-                    self.transcript.cursor(),
-                ));
-                if let Some(skipped) = self.transcript.skipped().describe() {
-                    sink.mark(&skipped);
+                    self.fold_snapshot(params, sink);
                 }
             }
+            // The chunked form of the same notification. A snapshot larger than the
+            // frame ceiling arrives as begin + parts + end, and is folded only once
+            // every part is in: see `transcript::assembly`.
+            "session/snapshot/begin" => match params.as_ref() {
+                Some(params) => self.begin_snapshot(params, sink),
+                None => sink.log("session/snapshot/begin carried no params"),
+            },
+            "session/snapshot/part" => match params.as_ref() {
+                Some(params) => self.take_snapshot_part(params, sink),
+                None => sink.log("session/snapshot/part carried no params"),
+            },
+            "session/snapshot/end" => match params.as_ref() {
+                Some(params) => self.end_snapshot(params, sink),
+                None => sink.log("session/snapshot/end carried no params"),
+            },
             "session/event" => {
                 if let Some(params) = params.as_ref() {
                     self.transcript.apply_event(params);
@@ -661,6 +736,192 @@ impl Session {
         }
     }
 
+    /// Fold one complete snapshot into the transcript, and put what it produced on
+    /// the record.
+    ///
+    /// **The only path that ever makes a transcript seeded**, whether the payload came
+    /// as one frame or was rebuilt from parts: keeping one fold path is what guarantees
+    /// the two forms cannot drift into two different conversations.
+    ///
+    /// @param params - a single-frame `session/snapshot` payload.
+    /// @param sink - where the record lines go.
+    fn fold_snapshot(&mut self, params: &Value, sink: &mut dyn FrameSink) {
+        self.transcript.apply_snapshot(params);
+        self.follow.record("session/snapshot", Some(params), sink);
+        // What the panel now holds, on the record. "The conversation is empty"
+        // and "the conversation never arrived" look identical on screen, and
+        // this is the line that tells them apart.
+        let title = self
+            .transcript
+            .title()
+            .map_or_else(String::new, |title| format!(" title={title:?}"));
+        sink.mark(&format!(
+            "transcript {} entries cursor={}{title}",
+            self.transcript.entries().len(),
+            self.transcript.cursor(),
+        ));
+        if let Some(skipped) = self.transcript.skipped().describe() {
+            sink.mark(&skipped);
+        }
+    }
+
+    /// Start assembling a chunked snapshot.
+    ///
+    /// A `begin` for a conversation that already has an assembly open replaces it:
+    /// the newer begin is the subscription that exists, and folding the older one's
+    /// parts later would put records on screen that the host has already replaced.
+    ///
+    /// @param params - the begin payload.
+    /// @param sink - where the record lines go.
+    fn begin_snapshot(&mut self, params: &Value, sink: &mut dyn FrameSink) {
+        let Some(assembly) = Assembly::begin(params, rpc::now_millis()) else {
+            sink.log("ignoring a snapshot begin that names no conversation");
+            return;
+        };
+        if let Some(position) = self.snapshots.iter().position(|open| open.session_id() == assembly.session_id()) {
+            let previous = self.snapshots.remove(position);
+            sink.mark(&format!("snapshot dropped: superseded by a new begin ({})", previous.describe()));
+        }
+        // Bounded: the oldest open snapshot is the one least likely to be completed,
+        // because a newer subscription has already replaced it upstream.
+        while self.snapshots.len() >= MAX_OPEN_SNAPSHOTS {
+            let oldest = self.snapshots.remove(0);
+            sink.mark(&format!("snapshot dropped: too many snapshots open ({})", oldest.describe()));
+        }
+        self.snapshots.push(assembly);
+    }
+
+    /// Store one part of a chunked snapshot.
+    ///
+    /// @param params - the part payload.
+    /// @param sink - where the record line goes when the part belongs nowhere.
+    fn take_snapshot_part(&mut self, params: &Value, sink: &mut dyn FrameSink) {
+        let session_id = params.get("sessionId").and_then(Value::as_str).unwrap_or("unknown");
+        // Looked up by conversation only, so `Assembly::part` can report a part from a
+        // replaced generation as foreign rather than silently placing it.
+        let Some(open) = self
+            .snapshots
+            .iter_mut()
+            .find(|open| open.session_id() == session_id)
+        else {
+            // Dropped, not folded into whatever else is open: a part whose begin was
+            // never seen cannot be placed, and placing it by arrival order is how two
+            // conversations get mixed into one.
+            sink.log(&format!("ignoring a snapshot part for a snapshot that is not open: {session_id}"));
+            return;
+        };
+        match open.part(params) {
+            Part::Stored => {}
+            Part::Unknown => sink.log(&format!("ignoring a snapshot part from a replaced subscription: {session_id}")),
+            Part::Refused => {
+                sink.log(&format!("ignoring a repeated or malformed snapshot part: {session_id}"));
+            }
+        }
+    }
+
+    /// Finish a chunked snapshot: fold it when every part arrived, and ask for a
+    /// resend when one did not.
+    ///
+    /// @param params - the end payload.
+    /// @param sink - where the record lines go.
+    fn end_snapshot(&mut self, params: &Value, sink: &mut dyn FrameSink) {
+        let session_id = params.get("sessionId").and_then(Value::as_str).unwrap_or("unknown").to_owned();
+        let Some(position) = self.snapshots.iter().position(|open| open.accepts(params)) else {
+            sink.log(&format!("ignoring a snapshot end for a snapshot that is not open: {session_id}"));
+            return;
+        };
+        let assembly = self.snapshots.remove(position);
+        let Some(folded) = assembly.fold_params() else {
+            // A conversation folded from a partial history is one nobody can tell
+            // from a complete one, so nothing is folded at all.
+            let missing = assembly.missing().unwrap_or(0);
+            sink.mark(&format!(
+                "snapshot dropped: part {missing} never arrived ({})",
+                assembly.describe(),
+            ));
+            self.resend_snapshot(&session_id, sink);
+            return;
+        };
+        sink.mark(&format!("snapshot parts: {} ({} bytes max)", assembly.received(), assembly.bytes_max()));
+        self.fold_snapshot(&folded, sink);
+    }
+
+    /// Ask the host to send one conversation's opening snapshot again.
+    ///
+    /// Bounded per attachment: the request re-opens the subscription upstream, and a
+    /// panel that asked on every failed attempt would turn one lost part into a loop.
+    /// The bound is reached with a marker rather than silently, because "the panel is
+    /// still blank" then has a written reason.
+    ///
+    /// @param session_id - the conversation whose snapshot is wanted.
+    /// @param sink - where the request and the record lines go.
+    fn resend_snapshot(&mut self, session_id: &str, sink: &mut dyn FrameSink) {
+        if self.snapshot_resends >= MAX_SNAPSHOT_RESENDS {
+            sink.mark(&format!(
+                "snapshot dropped: resend limit reached after {MAX_SNAPSHOT_RESENDS} attempts",
+            ));
+            return;
+        }
+        self.snapshot_resends += 1;
+        sink.mark("snapshot part missing; requesting resend");
+        let id = self.take_request_id();
+        self.snapshot_requests.insert(id);
+        let frame = rpc::request(id, "session/snapshot/request", json!({ "sessionId": session_id }));
+        if let Err(error) = sink.send(&frame) {
+            self.snapshot_requests.remove(&id);
+            sink.log(&format!("could not ask for a snapshot to be re-sent: {error}"));
+        }
+    }
+
+    /// Drop snapshots that will never complete.
+    ///
+    /// Two ways that happens, and they are handled differently on purpose:
+    ///
+    /// - the panel moved to another conversation, so the parts describe a subscription
+    ///   nobody is following. There is nothing to resend *for* — the host is already
+    ///   sending the new conversation's snapshot — so it is recorded and dropped;
+    /// - nothing arrived for [`ASSEMBLY_TIMEOUT_MS`], which is a stuck sequence rather
+    ///   than a replaced one, so the host is asked again.
+    ///
+    /// @param now - caller-local time in milliseconds.
+    /// @param sink - where the record lines go.
+    fn expire_snapshots(&mut self, now: i64, sink: &mut dyn FrameSink) {
+        if self.snapshots.is_empty() {
+            return;
+        }
+        let followed = self.follow.session_id().map(str::to_owned);
+        let mut timed_out: Vec<String> = Vec::new();
+        let mut kept = Vec::with_capacity(self.snapshots.len());
+        for assembly in std::mem::take(&mut self.snapshots) {
+            // `None` is not "moved away": the attach answer can trail the first frames
+            // of the subscription it started, and dropping the assembly then would
+            // discard a snapshot that is arriving correctly.
+            if let Some(followed) = followed.as_deref() {
+                if assembly.session_id() != followed {
+                    sink.mark(&format!(
+                        "snapshot dropped: the panel moved to {followed} ({})",
+                        assembly.describe(),
+                    ));
+                    continue;
+                }
+            }
+            if now.saturating_sub(assembly.started_at()) > ASSEMBLY_TIMEOUT_MS {
+                sink.mark(&format!(
+                    "snapshot dropped: no ending frame after {}ms ({})",
+                    now.saturating_sub(assembly.started_at()),
+                    assembly.describe(),
+                ));
+                timed_out.push(assembly.session_id().to_owned());
+                continue;
+            }
+            kept.push(assembly);
+        }
+        self.snapshots = kept;
+        for session_id in timed_out {
+            self.resend_snapshot(&session_id, sink);
+        }
+    }
+
     /// Record what the handshake produced, or the host's verdict on an answer.
     fn on_response(&mut self, id: &Value, outcome: Result<Value, RpcError>, sink: &mut dyn FrameSink) {
         // Prompts and stops first, for the same reason the answers below are: a response
@@ -679,6 +940,30 @@ impl Session {
             return;
         }
         let request_id = id.as_i64();
+        // A snapshot resend is a request this side made for its own repair. The answer
+        // carries nothing to act on — the subscription it re-opened answers with
+        // notifications — but an unclaimed id would be reported as unknown, which reads
+        // like a bug in a log that is trying to explain a blank panel.
+        if let Some(value) = request_id {
+            if self.snapshot_requests.remove(&value) {
+                if let Err(error) = outcome {
+                    sink.log(&format!(
+                        "snapshot resend refused: [{code}] {message}",
+                        code = error.code,
+                        message = error.message,
+                    ));
+                }
+                return;
+            }
+        }
+        // A history page, before the settings and the polling loop: it is the one request the
+        // *reader* is waiting on, and its answer carries a payload none of the others do.
+        if self.history_request.as_ref().is_some_and(|pending| Some(pending.id) == request_id) {
+            if let Some(pending) = self.history_request.take() {
+                self.resolve_history(pending, outcome, sink);
+            }
+            return;
+        }
         // The user's own requests, before the polling loop's: they are answered once and a person is
         // waiting on them, while the loop simply asks again.
         if let Some(request) = request_id.and_then(|value| self.setting_requests.remove(&value)) {
@@ -824,6 +1109,19 @@ impl Session {
     /// @param now - caller-local time in milliseconds.
     /// @param sink - where the request and any complaint go.
     pub fn pump_follow_at(&mut self, now: i64, sink: &mut dyn FrameSink) {
+        // Before the early returns below: an unfinished snapshot has to time out even
+        // while another request is in flight, or a sequence that lost a part would sit
+        // there until the process ended.
+        self.expire_snapshots(now, sink);
+        // The same for a page: the reader is looking at a disabled control until this clears,
+        // so an answer that never came has to be noticed rather than waited on.
+        if let Some(pending) = &self.history_request {
+            let elapsed = now - pending.sent_at;
+            if elapsed >= REQUEST_TIMEOUT_MS {
+                self.history_request = None;
+                sink.mark(&format!("older page gave up: no answer after {elapsed}ms"));
+            }
+        }
         if !self.follow.is_started() {
             return;
         }
@@ -971,6 +1269,15 @@ impl Session {
         // for, and that is exactly what is being given up here.
         let leaving = self.follow.session_id().map(str::to_owned);
         self.follow.start_new();
+        if !self.snapshots.is_empty() {
+            // The parts describe a conversation the panel has just walked away from.
+            self.snapshots.clear();
+            sink.mark("snapshot dropped: a new conversation was started");
+        }
+        self.snapshot_resends = 0;
+        // The page in flight belongs to the conversation being left; the control must not stay
+        // busy for it.
+        self.history_request = None;
         if let Some(session_id) = leaving {
             self.notify_detached(&session_id, sink);
             self.transcript.reset();
@@ -1035,6 +1342,22 @@ impl Session {
     /// @param now - caller-local time, recorded so a lost answer can be noticed.
     /// @param sink - where the frame goes.
     fn send_follow(&mut self, outgoing: Outgoing, now: i64, sink: &mut dyn FrameSink) {
+        if let Outgoing::Attach { .. } = &outgoing {
+            // A new subscription means a new snapshot: anything half-assembled
+            // belongs to the subscription this replaces, and its parts will never be
+            // completed. The resend budget is per attachment for the same reason —
+            // a fresh attach is a fresh chance, not a continuation of the old one.
+            if !self.snapshots.is_empty() {
+                self.snapshots.clear();
+                sink.mark("snapshot dropped: the subscription was replaced");
+            }
+            self.snapshot_resends = 0;
+            // A page in flight belongs to the conversation being left as much as a part
+            // does. Its answer is dropped on arrival either way (the session check in
+            // `resolve_history`); clearing the slot here is what puts the control back to
+            // idle instead of leaving it busy for a conversation that is gone.
+            self.history_request = None;
+        }
         if let Outgoing::CreateSession { workspace_id } = &outgoing {
             if workspace_id.as_deref().is_none_or(|id| id.trim().is_empty()) {
                 // Caught here rather than at the wire: the caller asked for a conversation
@@ -1074,12 +1397,79 @@ impl Session {
             Outgoing::Attach { session_id } => {
                 rpc::request(id, "session/attach", json!({ "sessionId": session_id }))
             }
+            Outgoing::History { session_id, before_seq } => {
+                // The wire shape the host's router reads: `session/history` with the
+                // Harness's own backwards-cursor name (`beforeSeq`), whose value is the
+                // oldest sequence the panel currently shows.
+                rpc::request(id, "session/history", json!({ "sessionId": session_id, "beforeSeq": before_seq }))
+            }
         };
-        self.follow_request = Some((id, now));
+        match &outgoing {
+            // The page request has its own ledger: its answer is a page, not a follow
+            // decision, and `Follow::resolve` would read it as a broken list answer.
+            Outgoing::History { session_id, .. } => {
+                self.history_request = Some(PendingHistory {
+                    id,
+                    session_id: session_id.clone(),
+                    sent_at: now,
+                });
+            }
+            _ => self.follow_request = Some((id, now)),
+        }
         if let Err(error) = sink.send(&frame) {
             self.follow_request = None;
+            self.history_request = None;
             self.follow.abandon(now);
             sink.log(&format!("could not ask about conversations: {error}"));
+        }
+    }
+
+    /// Ask the host for one older page of the attached conversation.
+    ///
+    /// Refused rather than sent when there is nothing to ask: no attachment, no line to
+    /// place the cursor under, nothing older per the host's own last word, or a page already
+    /// in flight. Every one of those is a control that must not appear to do something.
+    ///
+    /// @param sink - where the request goes.
+    /// @returns whether a request was written.
+    pub fn request_history(&mut self, sink: &mut dyn FrameSink) -> bool {
+        if self.history_request.is_some() || !self.transcript.has_more() {
+            return false;
+        }
+        let Some(session_id) = self.follow.session_id().map(str::to_owned) else { return false };
+        // The Harness's own derivation, read the same way: the cursor is the first line on
+        // screen, and a window with no lines asks below zero (which the host answers with an
+        // empty page rather than an error).
+        let before_seq = self.transcript.oldest_seq().unwrap_or(0);
+        let now = rpc::now_millis();
+        self.send_request(Some(Outgoing::History { session_id, before_seq }), now, sink)
+    }
+
+    /// Whether a page request is in flight, which is the panel's busy state.
+    #[must_use]
+    pub fn loading_history(&self) -> bool {
+        self.history_request.is_some()
+    }
+
+    /// Fold the answer to a page request, or report why it was not folded.
+    ///
+    /// @param pending - the request the answer belongs to, taken by the caller.
+    /// @param outcome - the host's answer.
+    /// @param sink - for the record.
+    fn resolve_history(&mut self, pending: PendingHistory, outcome: Result<Value, RpcError>, sink: &mut dyn FrameSink) {
+        // The conversation can have been replaced while the answer was in flight; folding the
+        // page then would put one conversation's history into another's window.
+        if self.follow.session_id() != Some(pending.session_id.as_str()) {
+            sink.mark("older page dropped: the conversation was replaced while it was in flight");
+            return;
+        }
+        match outcome {
+            Ok(page) => sink.mark(&self.transcript.prepend_page(&page).describe()),
+            Err(error) => sink.mark(&format!(
+                "older page refused: [{code}] {message}",
+                code = error.code,
+                message = error.message,
+            )),
         }
     }
 
@@ -1670,6 +2060,7 @@ impl Session {
         };
         sink.log(&format!("forgetting {session_id}: it is no longer being followed"));
         self.notify_detached(&session_id, sink);
+        self.history_request = None;
         self.transcript.reset();
     }
 
@@ -2192,6 +2583,201 @@ mod tests {
     }
 
     #[test]
+    fn an_oversized_frame_names_its_size_and_the_limit() {
+        // The measured bug, in one line: a 1.3 MB snapshot was dropped with the same
+        // wording as garbage JSON and no size, so nothing on the record explained the
+        // blank panel. Size and limit are both named now, and the running count makes
+        // a single refusal in a long session findable.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        let mut source = ScriptedSource::new(vec![
+            Inbound::Oversized { bytes: 1_310_812 },
+            Inbound::Oversized { bytes: 1_048_577 },
+            request(5, "ping"),
+        ]);
+        session.run(&mut source, &mut sink);
+        let lines = sink.logs.join("\n");
+        assert!(lines.contains("oversized"), "the reason is named: {lines}");
+        assert!(lines.contains("1310812 bytes"), "the measured size is named: {lines}");
+        assert!(lines.contains("1048576-byte limit"), "the limit is named: {lines}");
+        assert!(lines.contains("2 so far"), "the count is observable: {lines}");
+        assert!(
+            !lines.contains("ignoring a frame that is not a JSON-RPC message"),
+            "an oversize is not reported as malformed JSON: {lines}",
+        );
+        assert!(sink.frames.iter().any(|frame| frame["id"] == 5), "the ping after them was served");
+    }
+
+    /// One event record envelope, as the host sends it inside a snapshot.
+    fn record(seq: i64, kind: &str, data: Value) -> Value {
+        json!({"type": "event", "event": {"type": kind, "seq": seq, "time": 1, "data": data}})
+    }
+
+    /// The `session/snapshot/begin` a chunked snapshot opens with.
+    fn snapshot_begin(parts: u64) -> Inbound {
+        notification(
+            "session/snapshot/begin",
+            json!({"sessionId": "session-1", "generation": 3, "cursor": 1, "hasMore": false,
+                   "parts": parts, "assistantStream": {"revision": 0}}),
+        )
+    }
+
+    /// One `session/snapshot/part`.
+    fn snapshot_part(index: u64, records: Value) -> Inbound {
+        notification(
+            "session/snapshot/part",
+            json!({"sessionId": "session-1", "generation": 3, "index": index, "records": records}),
+        )
+    }
+
+    /// The `session/snapshot/end` that closes a chunked snapshot.
+    fn snapshot_end(parts: u64) -> Inbound {
+        notification("session/snapshot/end", json!({"sessionId": "session-1", "generation": 3, "parts": parts}))
+    }
+
+    #[test]
+    fn snapshot_parts_assemble_into_a_fold_and_later_events_land() {
+        // The whole point of chunking: the parts become the same seeded transcript the
+        // single frame used to make, so the events that follow are placed rather than
+        // counted stale — which is what left the panel permanently blank.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        follow_a_conversation(&mut session, &mut sink);
+        deliver(
+            &mut session,
+            vec![
+                snapshot_begin(2),
+                snapshot_part(
+                    0,
+                    json!([record(0, "user/message", json!({"role": "user",
+                        "content": [{"type": "text", "text": "第一段"}]}))]),
+                ),
+                snapshot_part(
+                    1,
+                    json!([record(1, "assistant/message", json!({"message": {"role": "assistant",
+                        "content": [{"type": "text", "text": "第二段"}]}}))]),
+                ),
+                snapshot_end(2),
+            ],
+            &mut sink,
+        );
+
+        assert_eq!(session.transcript().entries().len(), 2, "both parts were folded");
+        assert_eq!(session.transcript().cursor(), 1);
+        assert!(
+            sink.marks.iter().any(|line| line.contains("snapshot parts: 2")),
+            "the assembly is on the record: {:?}",
+            sink.marks,
+        );
+        assert!(
+            sink.marks.iter().any(|line| line.contains("transcript 2 entries cursor=1")),
+            "the fold ran: {:?}",
+            sink.marks,
+        );
+
+        // A later event, after the assembled snapshot: rendered, not counted stale.
+        deliver(
+            &mut session,
+            vec![
+                notification(
+                    "session/event",
+                    json!({"sessionId": "session-1", "generation": 3, "seq": 2, "type": "user/message",
+                           "time": 2, "data": {"role": "user", "content": [{"type": "text", "text": "第三段"}]}}),
+                ),
+            ],
+            &mut sink,
+        );
+        assert_eq!(session.transcript().entries().len(), 3, "the event after the snapshot rendered");
+        assert_eq!(session.transcript().cursor(), 2);
+        assert_eq!(session.transcript().skipped().stale, 0, "nothing was counted stale");
+    }
+
+    #[test]
+    fn a_snapshot_with_a_missing_part_is_not_folded_and_is_asked_for_again() {
+        // All-or-nothing: a conversation folded from half a history cannot be told
+        // from a complete one, so nothing is folded and the host is asked to resend.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        follow_a_conversation(&mut session, &mut sink);
+        deliver(
+            &mut session,
+            vec![
+                snapshot_begin(2),
+                snapshot_part(0, json!([record(0, "user/message", json!({"role": "user", "content": []}))])),
+                snapshot_end(2),
+            ],
+            &mut sink,
+        );
+
+        assert!(session.transcript().entries().is_empty(), "nothing was folded");
+        assert!(
+            sink.marks.iter().any(|line| line.contains("snapshot part missing; requesting resend")),
+            "the recovery is on the record: {:?}",
+            sink.marks,
+        );
+        assert!(
+            sink.marks.iter().any(|line| line.contains("snapshot dropped: part 1 never arrived")),
+            "so is the reason: {:?}",
+            sink.marks,
+        );
+        let resend = sink
+            .frames
+            .iter()
+            .find(|frame| frame["method"] == "session/snapshot/request")
+            .expect("the host was asked for the snapshot again");
+        assert_eq!(resend["params"]["sessionId"], "session-1");
+    }
+
+    #[test]
+    fn the_resend_request_is_bounded_per_attachment() {
+        // One lost part must not become a loop: the request re-opens the subscription
+        // upstream, so the panel asks at most a small number of times and then says so.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        follow_a_conversation(&mut session, &mut sink);
+        for _ in 0..(MAX_SNAPSHOT_RESENDS + 2) {
+            deliver(
+                &mut session,
+                vec![
+                    snapshot_begin(2),
+                    snapshot_part(0, json!([record(0, "user/message", json!({"role": "user", "content": []}))])),
+                    snapshot_end(2),
+                ],
+                &mut sink,
+            );
+        }
+        let asked = sink.frames.iter().filter(|frame| frame["method"] == "session/snapshot/request").count();
+        assert_eq!(asked, MAX_SNAPSHOT_RESENDS as usize, "the bound is what the constant says");
+        assert!(
+            sink.marks.iter().any(|line| line.contains("snapshot dropped: resend limit reached")),
+            "the give-up is on the record: {:?}",
+            sink.marks,
+        );
+    }
+
+    #[test]
+    fn an_unfinished_snapshot_times_out_and_is_asked_for_again() {
+        // A part that never arrives is not the same as a sequence that ended: the
+        // clock is what catches a host that stopped mid-snapshot.
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        follow_a_conversation(&mut session, &mut sink);
+        deliver(&mut session, vec![snapshot_begin(2), snapshot_part(0, json!([]))], &mut sink);
+        assert!(session.transcript().entries().is_empty());
+
+        session.pump_follow_at(rpc::now_millis() + ASSEMBLY_TIMEOUT_MS + 1, &mut sink);
+        assert!(
+            sink.marks.iter().any(|line| line.contains("snapshot dropped: no ending frame")),
+            "the timeout is on the record: {:?}",
+            sink.marks,
+        );
+        assert!(
+            sink.frames.iter().any(|frame| frame["method"] == "session/snapshot/request"),
+            "the host was asked again",
+        );
+    }
+
+    #[test]
     fn a_response_to_an_unknown_request_id_is_ignored_not_crashed_on() {
         let mut session = Session::new(identity());
         let mut sink = RecordingSink::default();
@@ -2431,5 +3017,99 @@ mod tests {
         let mut sink = RecordingSink::default();
         follow_a_conversation(&mut session, &mut sink);
         (session, sink)
+    }
+
+    /// The `session/history` frame the sidecar writes, for the request-shape assertions.
+    fn history_request(frames: &[Value]) -> Value {
+        frames
+            .iter()
+            .find(|frame| frame["method"] == "session/history")
+            .cloned()
+            .unwrap_or_else(|| panic!("no session/history frame was written: {frames:?}"))
+    }
+
+    #[test]
+    fn one_older_page_is_asked_for_below_the_oldest_line_and_folded_above_it() {
+        // The whole path, in one test: the wire request the host's router parses, and what the
+        // answer does to the window. `beforeSeq` is the Harness's own backwards cursor, and its
+        // value has to be the oldest sequence on screen — an off-by-one here asks for the page
+        // that contains the line the reader is already looking at, or skips one.
+        let (mut session, mut sink) = followed();
+        session.on_frame(
+            notification(
+                "session/snapshot",
+                json!({"sessionId": "session-1", "generation": 3, "cursor": 51, "hasMore": true,
+                       "records": [
+                           record(50, "user/message", json!({"role": "user", "content": [{"type": "text", "text": "新问题"}]})),
+                           record(51, "user/message", json!({"role": "user", "content": [{"type": "text", "text": "新回答"}]})),
+                       ],
+                       "assistantStream": {"revision": 0}}),
+            ),
+            &mut sink,
+        );
+        assert!(session.transcript().has_more(), "the host says history precedes this window");
+        assert_eq!(session.transcript().oldest_seq(), Some(50));
+
+        sink.frames.clear();
+        assert!(session.request_history(&mut sink), "there is something older to ask for");
+        let asked = history_request(&sink.frames);
+        assert_eq!(asked["params"]["sessionId"], "session-1");
+        assert_eq!(asked["params"]["beforeSeq"], 50, "below the oldest line on screen");
+        assert!(session.loading_history(), "the control is busy until the answer lands");
+
+        session.on_frame(
+            Inbound::Response {
+                id: asked["id"].clone(),
+                outcome: Ok(json!({
+                    "records": [
+                        record(48, "user/message", json!({"role": "user", "content": [{"type": "text", "text": "旧问题"}]})),
+                        record(49, "user/message", json!({"role": "user", "content": [{"type": "text", "text": "旧回答"}]})),
+                    ],
+                    "hasMore": true,
+                    "cursor": 48,
+                })),
+            },
+            &mut sink,
+        );
+
+        assert!(!session.loading_history(), "the answer clears the busy state");
+        let texts: Vec<String> = session
+            .transcript()
+            .entries()
+            .iter()
+            .map(|entry| match entry {
+                crate::app::session::transcript::Entry::User { text } => text.clone(),
+                other => panic!("expected user lines, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(texts, ["旧问题", "旧回答", "新问题", "新回答"], "the page went in above, not after");
+        assert_eq!(session.transcript().cursor(), 51, "the forward watermark did not move");
+        assert_eq!(session.transcript().oldest_seq(), Some(48), "the next request asks below 48");
+        assert!(
+            sink.marks.iter().any(|line| line.contains("older page: 2 entries")),
+            "the page is on the record: {:?}",
+            sink.marks,
+        );
+
+        // The last page retires the affordance, and nothing further is asked for.
+        sink.frames.clear();
+        assert!(session.request_history(&mut sink));
+        let asked = history_request(&sink.frames);
+        assert_eq!(asked["params"]["beforeSeq"], 48);
+        session.on_frame(
+            Inbound::Response {
+                id: asked["id"].clone(),
+                outcome: Ok(json!({
+                    "records": [record(46, "user/message", json!({"role": "user", "content": [{"type": "text", "text": "最早"}]}))],
+                    "hasMore": false,
+                    "cursor": 46,
+                })),
+            },
+            &mut sink,
+        );
+        assert!(!session.transcript().has_more());
+        sink.frames.clear();
+        assert!(!session.request_history(&mut sink), "nothing older is left to ask for");
+        assert!(sink.frames.is_empty(), "and no request was written: {:?}", sink.frames);
     }
 }

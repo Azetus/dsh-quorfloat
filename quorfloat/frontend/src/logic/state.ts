@@ -93,6 +93,16 @@ export interface Snapshot {
     title: string | null
     streaming: boolean
     turnActive: boolean
+    /**
+     * Whether the host says history precedes the oldest line on screen.
+     *
+     * The only thing that decides whether the thread offers "load earlier": a control drawn
+     * when there is nothing behind it is a control that lies. Absent on a shell older than
+     * this build, which reads as `false` — no control, rather than a request nobody can serve.
+     */
+    hasMore?: boolean
+    /** Whether an older page is in flight, which is the control's busy state. */
+    loadingEarlier?: boolean
     entries: Entry[]
     live: Entry | null
   }

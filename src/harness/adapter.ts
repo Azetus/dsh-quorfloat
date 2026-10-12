@@ -112,6 +112,25 @@ export function foldSessionTitle(events: readonly unknown[]): string | undefined
   return typeof title === 'string' && title !== '' ? title : undefined
 }
 
+/**
+ * The oldest sequence a page of wire records can place, which is the next `beforeSeq`.
+ *
+ * The Harness's own derivation, copied rather than invented: its history client sends
+ * `beforeSeq: baseSeq` and sets `baseSeq` from the first record of the page it just read
+ * (`packages/api/session-controller/src/client/sessions/session.ts:745`, and the same fold in
+ * `packages/client/ui-plan/src/client/plan-resource.ts:66`). Records are chronological, so the
+ * first one is the oldest; a record without a numeric `event.seq` cannot place the cursor, and
+ * `null` is the honest answer rather than a zero that would ask for the whole log again.
+ *
+ * @param records - one page's records, in the order the Harness returned them.
+ * @returns the oldest sequence, or `null` when the page carried none.
+ */
+export function oldestSeq(records: readonly unknown[]): number | null {
+  const first = records[0] as { event?: { seq?: unknown } } | undefined
+  const seq = first?.event?.seq
+  return typeof seq === 'number' && Number.isSafeInteger(seq) ? seq : null
+}
+
 /** One row of the Harness session list, already projected away from upstream internals. */
 export interface SessionSummaryView {
   readonly sessionId: string
@@ -131,10 +150,50 @@ export interface SessionSummaryView {
   readonly blank: boolean
 }
 
+/**
+ * How many messages one `session/history` page may read at most.
+ *
+ * The Harness's own page cap is `500` (`HISTORY_PAGE_OPTIONS`, in
+ * `packages/api/session-controller/src/client/sessions/session.ts`), but a page here is one
+ * JSON-RPC response frame and the peer drops any frame past `MAX_FRAME_BYTES` (1 MiB, see
+ * `src/protocol.ts`). A page is trimmed to `HISTORY_PAGE_BUDGET_BYTES` before it is sent
+ * (`src/harness/session-layer.ts`), so asking for 500 messages would routinely read several
+ * times what one frame can carry and throw the surplus away. Two hundred messages is roughly
+ * 400 KiB of ordinary prose — inside that budget — while leaving the turn window below room to
+ * extend past its own 50-message floor without reaching the cap immediately.
+ */
+const PAGE_MAX_MESSAGES = 200
+
+/**
+ * The turn-aligned minimum one page must cover, copied from the Harness's own page options.
+ *
+ * The intent is the Harness's, verbatim: *extend by at least 50 messages and two turn starts,
+ * stop at the cap or exhaustion* (`HISTORY_PAGE_OPTIONS` on the client, and the same rule
+ * enforced by `paginate` in `packages/api/session-controller/src/index.ts`). A page cut in the
+ * middle of a turn reaches the panel as half an answer, and it hands the scroll anchor a
+ * boundary that is not a turn — so the two minimums travel with every request rather than being
+ * left to the upstream default.
+ *
+ * `minMessages` is required to be no greater than `maxMessages`; the pair below is checked by
+ * the Harness's own `validateHistoryWindow`, and by the conformance test that pins this payload.
+ */
+const PAGE_TURN_WINDOW = { minMessages: 50, minTurns: 2 } as const
+
 /** One durable history page: raw wire records, in the shape the protocol carries. */
 export interface HistoryPageView {
   readonly records: readonly unknown[]
   readonly hasMore: boolean
+  /**
+   * The backwards cursor for the page *below* this one — the sequence to send next as
+   * `beforeSeq` — or `null` when the page carried no records to place it by.
+   *
+   * Derived here rather than left to the peer because this is where the Harness's record
+   * shape lives: the upstream client derives exactly the same value from the page's oldest
+   * record (`records[0].event.seq`, see `plan-resource.ts` and the session controller's
+   * `baseSeq`), and a second derivation on the other side of the pipe is a second chance to
+   * disagree about where paging continues.
+   */
+  readonly cursor: number | null
 }
 
 /** One frame from the follow subscription, already reduced to a wire-safe shape. */
@@ -200,6 +259,10 @@ export interface QuorfloatHarness {
   cursor(sessionId: string): Promise<number | undefined>
   /**
    * Read one message-aligned history page.
+   *
+   * The request carries the Harness's own turn window minimums and a cap this side of the wire
+   * can transport — see `PAGE_MAX_MESSAGES` / `PAGE_TURN_WINDOW` — so a page is a coherent unit
+   * (it does not end inside a turn) as well as a frame that fits.
    *
    * @param sessionId - durable session identity.
    * @param throughSeq - inclusive upper bound; must be a real sequence at or
@@ -823,14 +886,13 @@ class CordisHarness implements QuorfloatHarness {
     const request: Record<string, unknown> = {
       address: { kind: 'session', sessionId },
       throughSeq,
-      maxMessages: 50,
+      maxMessages: PAGE_MAX_MESSAGES,
+      turnWindow: { ...PAGE_TURN_WINDOW },
     }
     if (beforeSeq !== undefined) request['beforeSeq'] = beforeSeq
     const page = await this.#controller.page(request, signal)
-    return {
-      records: Array.isArray(page?.records) ? page.records : [],
-      hasMore: page?.hasMore === true,
-    }
+    const records = Array.isArray(page?.records) ? page.records : []
+    return { records, hasMore: page?.hasMore === true, cursor: oldestSeq(records) }
   }
 
   /** {@inheritDoc QuorfloatHarness.prompt} */

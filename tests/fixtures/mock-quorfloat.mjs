@@ -48,6 +48,15 @@ const observed = {
   // notification is the protocol, so a test asserts the exact frame shape the real sidecar's
   // `workspaces/changed` handler parses.
   workspaceChanges: [],
+  // The host's opening snapshot, as the frames it arrived in. Recorded as one entry per
+  // frame with its shape (never the whole payload, which can be megabytes): the real
+  // sidecar's assembly path reads exactly these fields, so a host that stopped sending
+  // `parts`, `index` or `records` would be visible here rather than only as a blank panel.
+  snapshotFrames: [],
+  // Older-page requests, reduced to the two fields the host's router parses. Recorded because
+  // the request is the half of paging a test can check from this side: `beforeSeq` is the
+  // Harness's exclusive backwards cursor, and an off-by-one is invisible in the answer.
+  historyRequests: [],
   // The panel's language, as this process would have read it at startup and as the
   // effective configuration carried it. Both are recorded because the two reach the
   // sidecar by different routes (spawn environment, and the `ready` payload) and a
@@ -252,6 +261,27 @@ function handle(message) {
       // test harness with no workspace controller can honestly say.
       reply(message.id, { items: [] })
       return
+    case 'session/snapshot/request':
+      // The real sidecar asks for a chunked snapshot to be sent again when a part was
+      // lost. The mock stands in for that sidecar, so it has to be able to ask, and the
+      // host's answer is the acknowledgement the real peer reads.
+      reply(message.id, {
+        sessionId: message.params?.sessionId ?? null,
+        generation: 1,
+        accepted: true,
+      })
+      return
+    case 'session/history':
+      // One older page. Answered with an empty page because a fixture cannot invent history,
+      // but recorded with both fields the host's router parses — `sessionId` and the
+      // Harness's exclusive backwards cursor `beforeSeq` — so the request the real sidecar
+      // writes is assertable from here and not only its answer.
+      observed.historyRequests.push({
+        sessionId: message.params?.sessionId ?? null,
+        beforeSeq: message.params?.beforeSeq ?? null,
+      })
+      reply(message.id, { records: [], hasMore: false, cursor: null })
+      return
     default:
       replyError(message.id, -32601, `mock does not implement ${message.method}`)
   }
@@ -275,6 +305,26 @@ function handleNotification(message) {
       observed.workspaceChanges.push(message.params)
       note('workspaces/changed', JSON.stringify(message.params))
       return
+    case 'session/snapshot':
+    case 'session/snapshot/begin':
+    case 'session/snapshot/part':
+    case 'session/snapshot/end': {
+      // The opening snapshot, in either form: the legacy single frame, or the sequence
+      // that replaced it because one frame cannot carry a conversation past the 1 MiB
+      // cap. Reduced to the fields the real sidecar's assembly reads, so the summary
+      // stays small however large the parts are.
+      const params = message.params ?? {}
+      observed.snapshotFrames.push({
+        method: message.method,
+        sessionId: params.sessionId ?? null,
+        generation: params.generation ?? null,
+        parts: params.parts ?? null,
+        index: params.index ?? null,
+        cursor: params.cursor ?? null,
+        records: Array.isArray(params.records) ? params.records.length : null,
+      })
+      return
+    }
     default:
       return
   }

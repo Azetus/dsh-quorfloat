@@ -63,10 +63,18 @@ export interface SessionProjectionsView {
   readonly values: { readonly title?: string | null } & Record<string, unknown>
 }
 
-/** A page of durable history records, in the shape the wire can carry. */
+/**
+ * A page of durable history records, in the shape the wire can carry.
+ *
+ * `cursor` is the page's own backwards position — the value to send as the next
+ * `beforeSeq` — and `null` when the page carried no records to place it by. It is the
+ * Harness's own derivation from the page's oldest record, made explicit on the wire so the
+ * peer and the host cannot each arrive at a different answer about where paging continues.
+ */
 export interface HistoryPageView {
   readonly records: readonly unknown[]
   readonly hasMore: boolean
+  readonly cursor: number | null
 }
 
 /** Answer accepted for one pending approval or user question. */
@@ -102,7 +110,24 @@ export interface RouterHost {
   createSession(workspaceId: string): Promise<{ sessionId: string }>
   /** Start (or restart) the follow subscription for one session. */
   attachSession(sessionId: string, fromSeq?: number): Promise<{ sessionId: string }>
-  /** Read one page of durable history. */
+  /**
+   * Re-send one session's opening snapshot.
+   *
+   * The panel asks for this when a chunked snapshot did not complete: re-attaching is
+   * the recovery that exists, and the alternative is a panel that stays blank for the
+   * rest of the run. The panel bounds how often it asks, so this is not a retry loop.
+   */
+  requestSnapshot(sessionId: string): Promise<{ sessionId: string; accepted: boolean }>
+  /**
+   * Read one page of durable history.
+   *
+   * The peer's backwards paging request, in the Harness's own vocabulary: `beforeSeq` is the
+   * exclusive backwards cursor (`SessionPageRequest.beforeSeq` upstream, inside
+   * `packages/api/session-controller/src/types.ts`), and the answer carries the page's
+   * records, whether older history remains (`hasMore`), and the backwards cursor for the page
+   * below it (`cursor`). Without a `beforeSeq` the newest page is returned, which is the tail
+   * read.
+   */
   readHistory(sessionId: string, beforeSeq?: number): Promise<HistoryPageView>
   /** Read the model and permission choices for a session. */
   readOptions(sessionId?: string): Promise<unknown>
@@ -153,6 +178,12 @@ export const METHODS = [
   'sessions/list',
   'session/create',
   'session/attach',
+  // The one method the *panel* asks of the host about the conversation stream itself:
+  // a chunked snapshot that lost a part is repaired by asking for the sequence again.
+  'session/snapshot/request',
+  // The panel's one older page. `beforeSeq` is the exclusive backwards cursor, the same
+  // field name the Harness uses on `SessionPageRequest`; the answer adds `cursor` (where
+  // paging continues) beside the page's `records` and `hasMore`.
   'session/history',
   'session/prompt',
   'session/cancel',
@@ -267,6 +298,11 @@ export class HostRouter {
           requireString(params, 'sessionId', 'session/attach'),
           optionalInt(params, 'fromSeq', 'session/attach'),
         )
+      case 'session/snapshot/request':
+        // The peer's recovery for a chunked snapshot that could not be completed. Named
+        // as a request rather than inferred from an `attach` repeat, because the answer
+        // is what tells the peer its ask was heard.
+        return await this.#host.requestSnapshot(requireString(params, 'sessionId', 'session/snapshot/request'))
       case 'session/history':
         return await this.#host.readHistory(
           requireString(params, 'sessionId', 'session/history'),

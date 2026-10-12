@@ -10,10 +10,13 @@
 // The rules are the project's own: nothing here aligns with the harness's own
 // display logic.
 //
-// The fold key is the question **plus its position** in the entry list: the same
-// question asked twice is two turns, and when the transcript trims the oldest
-// lines the positions shift and the open/closed memory is *forgotten*, never
-// reassigned to another turn.
+// The fold key is the question **plus how many turns ask that same question newer than it**. The
+// same question asked twice is still two turns, and — unlike the position this key used to be
+// built from — the key does not move when an older page is prepended above the thread, so the
+// open/closed memory survives a page load and the virtualizer's measurement cache is not
+// invalidated. The one case that does move a key is a turn appended at the *newest* end asking
+// a question an earlier turn already asked: that renumbers the older duplicates, and it moves
+// only among turns no reader can tell apart by their question.
 
 import type { Block, Entry } from './state'
 
@@ -36,7 +39,7 @@ export interface Turn {
   answer: { blocks: Block[]; streaming: boolean } | null
   /** Whether the turn is still being worked on (for the fold's label). */
   inProgress: boolean
-  /** The fold's identity: question + position, per the module rules. */
+  /** The fold's identity: the question plus its ordinal among the turns that ask it, counted from the newest. */
   id: string
 }
 
@@ -70,13 +73,22 @@ export function foldTurns(entries: Entry[], live: Entry | null, turnActive: bool
   // after the message's own reasoning, which is where it sat chronologically.
   let answerTextAt = 0
 
-  const ensureTurn = (question: string, position: number): Turn => {
+  // The fold key's ordinal is counted **from the newest turn that asks the same question**, so
+  // a prepend — an older page arriving above everything on screen — cannot move any key. The
+  // totals are read first because the oldest turn cannot be numbered until they are known.
+  const asked = questionCounts(entries)
+  const numbered = new Map<string, number>()
+
+  const ensureTurn = (question: string): Turn => {
+    const total = asked.get(question) ?? 1
+    const seen = numbered.get(question) ?? 0
+    numbered.set(question, seen + 1)
     const turn: Turn = {
       question,
       working: [],
       answer: null,
       inProgress: false,
-      id: `${position}\u0000${question}`,
+      id: `${total - 1 - seen}\u0000${question}`,
     }
     turns.push(turn)
     answerTextAt = 0
@@ -102,11 +114,11 @@ export function foldTurns(entries: Entry[], live: Entry | null, turnActive: bool
       }
     })
 
-  entries.forEach((entry, index) => {
+  entries.forEach(entry => {
     switch (entry.kind) {
       case 'user':
         // A user message starts the next turn, closing the one before it.
-        current = ensureTurn(entry.text, index)
+        current = ensureTurn(entry.text)
         break
       case 'assistant': {
         const text = entry.blocks.filter(block => block.kind === 'text')
@@ -187,6 +199,25 @@ export function foldTurns(entries: Entry[], live: Entry | null, turnActive: bool
   }
 
   return { turns, loose }
+}
+
+/**
+ * How many turns each question starts, keyed by the question verbatim.
+ *
+ * A turn exists exactly from its question onwards (see {@link foldTurns}), so counting the `user`
+ * lines is counting the turns. The totals are what let the fold key number a question's turns
+ * from the newest one, which is the direction a prepended page cannot disturb.
+ *
+ * @param entries - the settled transcript lines, oldest first.
+ * @returns one count per question that appears at least once.
+ */
+function questionCounts(entries: Entry[]): Map<string, number> {
+  const counts = new Map<string, number>()
+  for (const entry of entries) {
+    if (entry.kind !== 'user') continue
+    counts.set(entry.text, (counts.get(entry.text) ?? 0) + 1)
+  }
+  return counts
 }
 
 /** A settled answer demoted to working narration, verbatim. */

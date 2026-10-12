@@ -14,6 +14,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use crate::app::session::{FrameSink, Session, SessionExit};
+use crate::ipc::frame::FrameStats;
 use crate::ipc::transport::StdinSource;
 
 /// Something that needs the shell's attention.
@@ -156,6 +157,7 @@ impl Reader {
         let mut source = StdinSource::new();
         loop {
             let Some(frame) = source.next_frame() else {
+                self.report_frame_stats(source.stats());
                 self.finish(SessionExit::PeerClosed);
                 return;
             };
@@ -168,10 +170,33 @@ impl Reader {
             };
             self.notify(Wake::Frames);
             if let Some(exit) = exit {
+                self.report_frame_stats(source.stats());
                 self.finish(exit);
                 return;
             }
         }
+    }
+
+    /// Put the frame reader's own counters on the two records that outlive this process.
+    ///
+    /// `FrameStats.oversized` used to be incremented and never read: a refused frame
+    /// left no trace anywhere, so "the panel is blank" had no explanation at all. The
+    /// per-frame log line names each refusal; this is the total, written where a
+    /// developer or a test can read it after the process is gone. Deliberately not a
+    /// status field: the panel is a conversation window, and this is a diagnostic.
+    ///
+    /// @param stats - the reader's counters, as of the end of the stream.
+    fn report_frame_stats(&self, stats: FrameStats) {
+        if stats.oversized > 0 || stats.garbage > 0 {
+            self.sink.log(&format!(
+                "frames refused before exit: decoded={} garbage={} oversized={}",
+                stats.decoded, stats.garbage, stats.oversized,
+            ));
+        }
+        self.sink.mark(&format!(
+            "frames decoded={} garbage={} oversized={}",
+            stats.decoded, stats.garbage, stats.oversized,
+        ));
     }
 
     /// Record the ending and tell the main thread to stop.

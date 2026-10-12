@@ -317,6 +317,7 @@ export function createPlugin(overrides: PluginOverrides = {}) {
             listSessions: async () => ({ items: await sessionLayer.listSessions() }),
             createSession: async workspaceId => await sessionLayer.createSession(workspaceId),
             attachSession: async sessionId => await sessionLayer.attach(sessionId),
+            requestSnapshot: async sessionId => await sessionLayer.requestSnapshot(sessionId),
             readHistory: async (sessionId, beforeSeq) => await sessionLayer.readHistory(sessionId, beforeSeq),
             readOptions: async sessionId => await sessionLayer.readOptions(sessionId),
             selectModel: async (sessionId, selection) =>
