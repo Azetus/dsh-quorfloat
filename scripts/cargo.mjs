@@ -28,9 +28,6 @@ import { join, relative } from 'node:path'
 
 import { SIDECAR_NAME } from './assemble.mjs'
 
-/** Whether `cargo` and `rustup` need a shell to be resolved (they do on Windows). */
-const NEEDS_SHELL = process.platform === 'win32'
-
 /** `rustc -vV` is asked at most once per process; every caller wants the same answer. */
 let host
 
@@ -42,7 +39,8 @@ let host
  * @returns the captured stdout, or undefined.
  */
 function capture(command, args) {
-  const result = spawnSync(command, args, { encoding: 'utf8', shell: NEEDS_SHELL })
+  // Rust toolchain commands are native executables on Windows too.
+  const result = spawnSync(command, args, { encoding: 'utf8', shell: false })
   if (result.error !== undefined || result.status !== 0 || typeof result.stdout !== 'string') return undefined
   return result.stdout
 }
@@ -110,7 +108,7 @@ export function buildSidecar({ root, target, release = false, label = 'build' })
   if (crossCompiling) args.push('--target', triple)
 
   process.stdout.write(`${label}: cargo ${args.join(' ')}\n`)
-  const result = spawnSync('cargo', args, { cwd: root, stdio: 'inherit', shell: NEEDS_SHELL })
+  const result = spawnSync('cargo', args, { cwd: root, stdio: 'inherit', shell: false })
   if (result.error !== undefined) {
     throw new Error(`cannot run cargo: ${result.error.message}`)
   }

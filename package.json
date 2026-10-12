@@ -16,6 +16,7 @@
     "toolchain": "npm install --prefix .tooling --cache .tooling/.npm-cache --no-audit --no-fund typescript@5.9.3 @types/node@22",
     "frontend:install": "npm --prefix quorfloat/frontend install --no-audit --no-fund",
     "build": "node scripts/release.mjs",
+    "build:npm": "node scripts/release-npm.mjs",
     "build:local": "npm run build:plugin && npm run build:sidecar",
     "build:plugin": "npm run toolchain --silent && node scripts/tsc.mjs -p tsconfig.json && node scripts/build-client.mjs",
     "build:frontend": "npm --prefix quorfloat/frontend run build",

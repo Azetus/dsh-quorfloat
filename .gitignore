@@ -23,6 +23,9 @@ Desktop.ini
 # scripts/release.mjs 的产物：各平台的发布包目录
 /bundles/
 
+# scripts/release-npm.mjs 的产物：npm 发布包，按版本分目录
+/bundles/npm/
+
 # npm run toolchain
 .tooling/
 
