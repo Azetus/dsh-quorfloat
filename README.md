@@ -1,8 +1,10 @@
 # dsh-quorfloat
 
+简体中文 | [English](README_EN.md) | [npm](https://www.npmjs.com/package/dsh-quorfloat)
+
 DeepSeek Harness 的桌面悬浮会话插件。通过全局快捷键呼出面板，在使用其他应用时也能向 Harness 提问、继续已有会话、查看回答和处理审批。
 
-面板使用 Harness 的工作区、会话、模型和权限设置，对话执行与历史记录仍由 Harness 管理。发布包同时包含宿主插件和面板程序，无需自行编译。
+面板使用 Harness 的工作区、会话、模型和权限设置，对话执行与历史记录仍由 Harness 管理。离线发布包自带宿主插件和面板程序；通过 npm 安装时，包管理器会自动获取当前平台的面板程序。两种方式均无需自行编译。
 
 ## 功能
 
@@ -18,33 +20,68 @@ DeepSeek Harness 的桌面悬浮会话插件。通过全局快捷键呼出面板
 
 ### 准备
 
-1. 安装 DeepSeek Harness，并至少启动一次，让桌面配置初始化完成。
-2. 确保终端可以运行 `dsh` 命令。
-3. 获取与你的操作系统对应的 dsh-quorfloat 发布包。
+安装 DeepSeek Harness。使用浏览器 WebUI 时，还需确保终端可以运行 `dsh` 命令。
 
-macOS 的 `dsh-quorfloat-0.1.2-darwin.tgz` 同时包含 Apple Silicon 与 Intel 架构。其他平台使用对应平台的发布包。
+npm 主包名为 **`dsh-quorfloat`**，只需安装这个主包，平台依赖会自动安装。
+
+离线安装请下载当前版本对应操作系统的自包含 tgz，例如：
+
+- **macOS**：`dsh-quorfloat-0.1.3-darwin.tgz`，同时支持 Apple Silicon 和 Intel。
+- **Windows**：`dsh-quorfloat-0.1.3-win32.tgz`，选择适用于当前机器架构的发布包。
+
+下方示例使用 0.1.3；安装其他版本时替换文件名或版本号即可。
 
 ### 浏览器 WebUI
 
-**先完全退出 Harness，再进行安装。**
+先停止正在运行的 `dsh web` 服务。以下命令安装到 `web` profile；若使用自定义 profile，将 `web` 替换为自己的 profile 名称，并用相同 profile 启动 Harness。
 
-请确保已全局安装 DSH
+#### 离线安装（tgz）
+
+使用本地 tgz 的**绝对路径**安装，无需解压。macOS 示例：
 
 ```bash
-dsh plugin --profile web add "发布包的绝对路径"
+dsh plugin --profile web add "/绝对路径/dsh-quorfloat-0.1.3-darwin.tgz"
 dsh web
 ```
 
+Windows 示例：
+
+```powershell
+dsh plugin --profile web add "C:/Downloads/dsh-quorfloat-0.1.3-win32.tgz"
+dsh web
+```
+
+路径包含空格时保留外层引号。
+
+#### npm 安装
+
+联网安装最新版本：
+
+```bash
+dsh plugin --profile web add dsh-quorfloat
+dsh web
+```
+
+如需固定版本，使用 `dsh-quorfloat@0.1.3` 替换包名。
 
 ### Harness 官方桌面版
 
-推荐直接在 Harness 内安装：
+先启动桌面应用，在左侧栏打开“插件”，点击“添加插件”。
 
-1. 打开 DeepSeek Harness 官方桌面应用
-2. 点击左侧栏 “插件” -> "添加插件"
-3. 在添加插件弹窗内输入发布包的绝对路径，点击安装
+#### 离线安装（tgz）
 
+1. 下载当前操作系统对应的自包含 tgz，无需解压。
+2. 在添加插件弹窗输入 tgz 的**绝对路径**，例如 macOS 的 `/绝对路径/dsh-quorfloat-0.1.3-darwin.tgz`，或 Windows 的 `C:/Downloads/dsh-quorfloat-0.1.3-win32.tgz`。
+3. 点击安装；若出现启用提示，按提示启用插件。
+4. 完全退出并重新启动 Harness 桌面应用。
 
+#### npm 安装
+
+1. 点击左侧栏 “插件” -> "添加插件"，在添加插件弹窗输入 **`dsh-quorfloat`**，或指定版本 **`dsh-quorfloat@0.1.3`**。
+2. 点击安装；若出现启用提示，按提示启用插件。包管理器会自动安装当前平台的面板程序。
+3. 完全退出并重新启动 Harness 桌面应用。
+
+**安装或更新后需要重启 Harness 本体。** 仅关闭悬浮窗、关闭桌面窗口或刷新 WebUI 页面不足以重新加载宿主插件。
 
 ## 开始使用
 
@@ -61,3 +98,59 @@ dsh web
 - **浏览未分组**：选择“未分组”查看没有工作区归属的已有会话。该入口不能固定，且不提供“新会话”选项。
 
 点击齿轮进入设置，可调整主题、界面语言、快捷键和“失焦时保持展开”。默认快捷键若与其他应用冲突，可从菜单栏或系统托盘打开面板后更换。
+
+## 从源码构建
+
+### 构建环境
+
+- **Node.js 与 npm**：建议使用 Node.js 22 或更新版本，并确保 `node`、`npm` 在 PATH 中。
+- **Rust**：使用 rustup 安装 Rust 1.88 或更新版本，并确保 `cargo`、`rustc` 在 PATH 中。
+- **macOS**：安装 Xcode Command Line Tools，提供 SDK、链接器和 `lipo`。默认发布构建包含 Apple Silicon 与 Intel 两种架构。
+- **Windows**：安装 Visual Studio Build Tools，勾选“使用 C++ 的桌面开发”，包含 MSVC 和 Windows SDK；使用 MSVC Rust 工具链，并安装 WebView2 Runtime。当前 npm 平台包面向 Windows x64。
+
+平台依赖的安装步骤可参考 [Tauri 环境准备文档](https://v2.tauri.app/start/prerequisites/)。当前发布脚本支持 macOS 和 Windows；请在对应系统上构建对应平台的产物。
+
+### 准备源码与依赖
+
+下载并解压项目源码，在终端进入项目根目录。首次构建先安装前端依赖：
+
+```bash
+npm run frontend:install
+```
+
+宿主插件的 TypeScript 工具链会在构建时自动安装到 `.tooling/`，Rust 依赖由 Cargo 自动获取，因此首次构建需要联网。
+
+macOS 默认构建通用二进制，需提前安装两个 Rust target：
+
+```bash
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+```
+
+### 构建离线安装包
+
+在项目根目录执行：
+
+```bash
+npm run build
+```
+
+该命令依次编译宿主插件、面板前端与 release 悬浮窗，然后组装 bundle 并自动执行 npm 打包，无需再手动运行 `npm pack`。
+
+产物位于 `bundles/`，例如当前版本：
+
+| 平台 | bundle 目录 | 离线安装包 |
+|---|---|---|
+| macOS | `bundles/dsh-quorfloat-0.1.3-darwin/` | `bundles/dsh-quorfloat-0.1.3-darwin.tgz` |
+| Windows | `bundles/dsh-quorfloat-0.1.3-win32/` | `bundles/dsh-quorfloat-0.1.3-win32.tgz` |
+
+macOS 产物通过 `lipo` 合并为双架构二进制；Windows 离线包默认采用当前 Rust 工具链的宿主架构。使用新生成的 tgz，按上方安装方式安装后重启 Harness。
+
+### 本地开发构建
+
+```bash
+npm run build:local
+```
+
+该命令构建宿主插件、面板前端和当前机器的 debug 悬浮窗，不生成发布 tgz。宿主产物位于 `lib/`，前端产物位于 `quorfloat/frontend/dist/`，悬浮窗位于 `quorfloat/target/debug/dsh-quorfloat`（Windows 为 `dsh-quorfloat.exe`）。也可分别使用 `build:plugin`、`build:frontend`、`build:sidecar`；其中 `build:sidecar` 会先构建前端，再编译悬浮窗。
+
+发布版本取自根目录 `package.json` 与 `quorfloat/Cargo.toml`，两处版本号必须一致，否则发布构建会在编译前拒绝继续。
