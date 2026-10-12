@@ -167,7 +167,7 @@ function main() {
   const { targets, platform } = selectTargets(options.targets)
 
   const out = resolve(ROOT, options.out)
-  // Keep offline filenames stable while the installed package identity is scoped.
+  // Scope separators cannot be part of a flat offline filename.
   const offlineName = MANIFEST.name.slice(MANIFEST.name.lastIndexOf('/') + 1)
   const bundleName = `${offlineName}-${MANIFEST.version}-${platform}`
   const bundle = join(out, bundleName)

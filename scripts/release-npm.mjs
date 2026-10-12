@@ -133,7 +133,7 @@ function main() {
   const nativeArchive = join(out, `${packageStem(native.name)}-${version}.tgz`)
   mkdirSync(out, { recursive: true })
   // Retire only the old main/current-platform staging outputs of this version.
-  const legacyNames = ['dsh-quorfloat', `dsh-quorfloat-${platform === 'darwin' ? 'darwin' : 'win32-x64'}`]
+  const legacyNames = ['dsh-quorfloat', 'azetus-dsh-quorfloat', `dsh-quorfloat-${platform === 'darwin' ? 'darwin' : 'win32-x64'}`]
   for (const legacy of legacyNames) {
     if (legacy === packageStem(MANIFEST.name) || legacy === packageStem(native.name)) continue
     rmSync(join(out, legacy), { recursive: true, force: true })

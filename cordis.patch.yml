@@ -11,7 +11,7 @@
 
 - insert:
     - id: quorfloat
-      name: "@azetus/dsh-quorfloat"
+      name: dsh-quorfloat
       config:
         enabled: true
         hotkey: Alt+Space

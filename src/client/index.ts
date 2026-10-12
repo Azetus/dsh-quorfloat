@@ -309,7 +309,7 @@ const DETAIL_ORDER = 20
  * as `pkg.name`, the row as `row.moduleName`, because the bundle's patch
  * (`cordis.patch.yml`) names the row after the package.
  */
-const BUNDLE_NAME = '@azetus/dsh-quorfloat'
+const BUNDLE_NAME = 'dsh-quorfloat'
 
 /**
  * Whether the open detail page is this plugin's.
@@ -318,7 +318,7 @@ const BUNDLE_NAME = '@azetus/dsh-quorfloat'
  * `plugins.detail.actions` on every plugin's page, so the entry has to answer
  * this before it draws anything. Two subjects can be ours:
  *
- * - a bundle page whose package is this package (`@azetus/dsh-quorfloat`), which is the
+ * - a bundle page whose package is this package (`dsh-quorfloat`), which is the
  *   page an installed bundle's card opens;
  * - a row page whose row runs this package's module, which is the page the
  *   bundle's 包含的组件 row opens.

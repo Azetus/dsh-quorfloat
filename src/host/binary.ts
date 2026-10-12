@@ -174,12 +174,12 @@ export function resolveQuorfloatBinary(lookup: BinaryLookup): ResolvedBinary {
 function findPackageRoot(): string {
   try {
     const require = createRequire(import.meta.url)
-    let dir = dirname(require.resolve('@azetus/dsh-quorfloat/package.json'))
+    let dir = dirname(require.resolve('dsh-quorfloat/package.json'))
     for (let depth = 0; depth < 5; depth += 1) {
       const manifest = join(dir, 'package.json')
       try {
         const parsed = JSON.parse(readFileSync(manifest, 'utf8')) as { name?: unknown }
-        if (parsed.name === '@azetus/dsh-quorfloat') return dir
+        if (parsed.name === 'dsh-quorfloat') return dir
       } catch {
         // Keep walking up.
       }
@@ -188,7 +188,7 @@ function findPackageRoot(): string {
       dir = parent
     }
   } catch {
-    // The scoped package self-reference is not resolvable here; fall back below.
+    // The package self-reference is not resolvable here; fall back below.
   }
   // Sources live in `<root>/src/host`; the compiled output in `<root>/lib/host`.
   return dirname(dirname(dirname(fileURLToPath(import.meta.url))))
