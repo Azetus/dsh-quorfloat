@@ -67,7 +67,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { FONT_LICENCE, FONT_NAME, SIDECAR_NAME, stageSidecar } from './assemble.mjs'
+import { SIDECAR_NAME, stageSidecar } from './assemble.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -326,7 +326,7 @@ export function sidecarSource(root, profile) {
 }
 
 /**
- * Stage the chosen build into the throwaway home, beside the font it needs.
+ * Stage the chosen build into the throwaway home.
  *
  * The copying itself is `scripts/assemble.mjs`, shared with the release script:
  * the development home and a release bundle must stage the same tree, or one of
@@ -335,25 +335,11 @@ export function sidecarSource(root, profile) {
 function stageDevSidecar(profile) {
   const directory = join(DEV_HOME, 'sidecar')
   return stageSidecar({
-    root: ROOT,
     source: sidecarSource(ROOT, profile),
     binaryDirectory: directory,
-    assetDirectory: directory,
     label: 'dev',
   }).path
 }
-
-/** One line describing what the staged sidecar will find. */
-function panelFonts(sidecar) {
-  if (sidecar === undefined) return '(no panel)'
-  const directory = join(dirname(sidecar), 'fonts')
-  const font = join(directory, FONT_NAME)
-  if (!existsSync(font)) return '(missing: run `npm run fonts`)'
-  const megabytes = (statSync(font).size / 1_048_576).toFixed(1)
-  const licence = existsSync(join(directory, FONT_LICENCE)) ? `+ ${FONT_LICENCE}` : '(licence missing)'
-  return `${font} (${megabytes} MB) ${licence}`
-}
-
 
 /**
  * Write the workspace registry the generated profile starts from.
@@ -653,7 +639,6 @@ function start(options, home, sidecar, staged) {
     + `     panel log=${sidecar === undefined ? '(no panel)' : MARKER_PATH}\n`
     + `     window state=${sidecar === undefined ? '(no panel)' : WINDOW_STATE_PATH}\n`
     + `     pins=${sidecar === undefined ? '(no panel)' : PINNED_PATH}\n`
-    + `     panel font=${panelFonts(sidecar)}\n`
     + `     bundles=${profileBundles(home, options.profile).join(', ')}\n`
     + workspaceLine
     + '\n')

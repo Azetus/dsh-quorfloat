@@ -11,7 +11,7 @@ export interface KeyChipProps {
 /**
  * Render one `<kbd>`.
  *
- * The design's own markup: the ↵ is a drawn icon (the bundled font has no U+21B5), while
+ * The design's own markup: the ↵ is a drawn icon, while
  * ⇧ and `esc` are text — exactly as the design writes them.
  *
  * @param props - which chip.

@@ -1,6 +1,6 @@
 {
   "name": "dsh-quorfloat",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "description": "System-level floating conversation window for DeepSeek Harness (host plugin half)",
   "type": "module",
@@ -25,9 +25,7 @@
     "test:only": "node --test --test-timeout=30000 \"tests/*.test.mjs\"",
     "test:frontend": "npm --prefix quorfloat/frontend test",
     "contract:extract": "node tests/fixtures/extract-harness-contract.mjs",
-    "dev": "node scripts/dev.mjs",
-    "fonts": "node scripts/fetch-font.mjs",
-    "fonts:check": "node scripts/fetch-font.mjs --check"
+    "dev": "node scripts/dev.mjs"
   },
   "dsh": {
     "bundle": {

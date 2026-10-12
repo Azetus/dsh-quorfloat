@@ -15,8 +15,8 @@
 // "corner-down-left" — the ↵ return-arrow mark (U+21B5), copied verbatim from
 // Bootstrap Icons' arrow-return-left (filled style, matching this map's Phosphor
 // fill convention). Phosphor itself has no corner-arrow icon (verified against
-// @phosphor-icons/core 2.1.1 and its current main branch), and the bundled font
-// lacks the U+21B5 glyph — so the design's <kbd>↵</kbd> is this shape.
+// @phosphor-icons/core 2.1.1 and its current main branch), so this shape
+// supplies the design's <kbd>↵</kbd> mark.
 //
 // Bootstrap Icons — The MIT License (MIT)
 // Copyright (c) 2019-2024 The Bootstrap Authors

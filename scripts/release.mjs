@@ -7,7 +7,7 @@
  * The directory is assembled first and packed immediately, so the archive contains the
  * artifacts from this build. The directory contains the built
  * JS half, this repository's bundle patch with `quorfloatPath` pointed at a bundled
- * executable, the executable itself, the font and its licence, and a
+ * executable, the executable itself, and a
  * `build-info.json` recording exactly what was built.
  *
  * The version in that directory name is also the version the executable reports, and
@@ -368,14 +368,9 @@ function assemble({ bundle, executable, targets, platform }) {
   process.stdout.write(`release: assembling ${relative(ROOT, bundle)}/\n`)
 
   stageSidecar({
-    root: ROOT,
     source: executable,
     binaryDirectory: join(bundle, 'bin'),
-    // The bundle keeps `fonts/` beside `bin/` rather than inside it: that is the
-    // layout the platform package ships, and `dev.mjs` exercises the same rule.
-    assetDirectory: bundle,
     label: 'release',
-    onMissing: 'throw',
   })
   cpSync(join(ROOT, 'lib'), join(bundle, 'lib'), { recursive: true, force: true, filter: source => !isBundleJunk(source) })
   writePatch(bundle)

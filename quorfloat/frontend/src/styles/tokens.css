@@ -3,13 +3,6 @@
    approval card, the theme chips, and the markdown content styles, which the
    design leaves to us. */
 
-@font-face {
-  font-family: 'Noto Sans SC';
-  src: url('/fonts/NotoSansSC-VF.otf') format('opentype');
-  font-weight: 100 900;
-  font-display: block;
-}
-
 :root {
   /* The design's own tokens. light-dark() follows `color-scheme`, which the
      panel sets from the host's theme — one property switches both palettes. */
@@ -43,7 +36,7 @@ body {
   padding: 0;
   background: transparent;
   overflow: hidden;
-  font: 14px/1.6 'Noto Sans SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', sans-serif;
+  font: 14px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
   color: var(--q-text);
 }
 
