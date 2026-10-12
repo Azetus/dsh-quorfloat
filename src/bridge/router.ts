@@ -49,6 +49,20 @@ export interface SessionSummaryView {
   readonly blank: boolean
 }
 
+/**
+ * The projection block the Harness attaches to each session-list row.
+ *
+ * The declared upstream shape is `SessionProjectionHints` — `kind`, `asOfSeq`, and the projection
+ * map in `values` — and the map's own `title` member is `string | null`. That is where a
+ * conversation's name lives: the Harness's `SessionSummary` declares **no top-level `title`**, so
+ * reading one there reads a field that never exists.
+ */
+export interface SessionProjectionsView {
+  readonly kind: 'cached' | 'sequenced'
+  readonly asOfSeq: number
+  readonly values: { readonly title?: string | null } & Record<string, unknown>
+}
+
 /** A page of durable history records, in the shape the wire can carry. */
 export interface HistoryPageView {
   readonly records: readonly unknown[]

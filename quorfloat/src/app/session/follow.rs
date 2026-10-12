@@ -985,6 +985,91 @@ impl Follow {
         }
     }
 
+    /// Apply one pushed workspace change.
+    ///
+    /// The host follows the Harness's own workspace stream and forwards every frame, so the list
+    /// the picker draws stops being one snapshot taken on demand. The frames land in the same
+    /// `workspaces` vector a `workspaces/list` answer fills, which is what makes the snapshot the
+    /// frontend already re-renders from carry the change — no second list, and no request.
+    ///
+    /// `archived` and `pinned` are deliberately not applied: they are the Harness's *session* sets,
+    /// and the panel's conversation list is not built from them yet. The `pinned` frame in
+    /// particular is the Harness's session pin, not this panel's own workspace pin, and treating
+    /// one as the other would silently move where a new conversation is created.
+    ///
+    /// @param frame - one `workspaces/changed` payload.
+    /// @param sink - where the marker for an applied change goes.
+    pub fn apply_workspace_frame(&mut self, frame: &Value, sink: &mut dyn FrameSink) {
+        match frame.get("type").and_then(Value::as_str) {
+            Some("baseline") => {
+                let Some(value) = frame.get("value") else {
+                    sink.log("workspaces/changed baseline carried no value");
+                    return;
+                };
+                // A baseline is a complete list, so it replaces whatever was held — including a
+                // list this process never asked for. `workspaces_asked` deliberately stays as it
+                // was: it records that *this* process sent a request, and both the picker's
+                // "list pending" state and the first-use default-workspace ladder key off an
+                // answer to that request rather than off the list's arrival.
+                self.workspaces = workspaces(value);
+                self.workspaces_loaded = true;
+                sink.mark(&format!("workspaces changed: baseline {}", self.workspaces.len()));
+                // The list is the authority the workspace pin was validated against, and a
+                // baseline is the list.
+                self.reconcile_workspace_pin(sink);
+            }
+            Some("upsert") => {
+                let Some(workspace) = frame.get("workspace").and_then(read_workspace) else {
+                    sink.log("workspaces/changed upsert carried no usable workspace");
+                    return;
+                };
+                let workspace_id = workspace.workspace_id.clone();
+                // Merge by identity, in place when it is already known: the frame is the whole
+                // workspace, so replacing the row is the update, and appending a new one keeps it
+                // until an `order` frame says otherwise.
+                match self.workspaces.iter_mut().find(|known| known.workspace_id == workspace_id) {
+                    Some(known) => *known = workspace,
+                    None => self.workspaces.push(workspace),
+                }
+                sink.mark(&format!("workspaces changed: upsert {workspace_id}"));
+            }
+            Some("remove") => {
+                let Some(workspace_id) = frame.get("workspaceId").and_then(Value::as_str) else {
+                    sink.log("workspaces/changed remove carried no workspace id");
+                    return;
+                };
+                self.workspaces.retain(|workspace| workspace.workspace_id != workspace_id);
+                sink.mark(&format!("workspaces changed: removed {workspace_id}"));
+                // A removal is the list saying the pin's workspace is gone, exactly as a list
+                // answer would, so the same reconciliation applies.
+                self.reconcile_workspace_pin(sink);
+            }
+            Some("order") => {
+                let Some(ids) = frame.get("workspaceIds").and_then(Value::as_array) else {
+                    sink.log("workspaces/changed order carried no workspace ids");
+                    return;
+                };
+                let mut known = std::mem::take(&mut self.workspaces);
+                let mut reordered = Vec::with_capacity(known.len());
+                for id in ids.iter().filter_map(Value::as_str) {
+                    if let Some(index) = known.iter().position(|workspace| workspace.workspace_id == id) {
+                        reordered.push(known.remove(index));
+                    }
+                }
+                // Anything the frame did not name is kept at the end rather than dropped: an
+                // `order` frame is an ordering, not a census, and a list that lost a workspace
+                // to it would be one the user cannot explain.
+                reordered.append(&mut known);
+                self.workspaces = reordered;
+                sink.mark(&format!("workspaces changed: order {}", self.workspaces.len()));
+            }
+            Some("archived") | Some("pinned") => {}
+            other => sink.log(&format!(
+                "ignoring a workspaces/changed frame this build does not use: {other:?}",
+            )),
+        }
+    }
+
     /// Record one frame of session traffic.
     ///
     /// Everything here is counted rather than stored — but *counted*, not dropped on the
@@ -1152,34 +1237,43 @@ fn workspaces(result: &Value) -> Vec<Workspace> {
     let Some(items) = result.get("items").and_then(Value::as_array) else {
         return Vec::new();
     };
-    items
-        .iter()
-        .filter_map(|item| {
-            let workspace_id = item.get("workspaceId").and_then(Value::as_str)?;
-            if workspace_id.is_empty() {
-                return None;
-            }
-            Some(Workspace {
-                workspace_id: workspace_id.to_owned(),
-                title: item.get("title").and_then(Value::as_str).unwrap_or_default().to_owned(),
-                path: item.get("path").and_then(Value::as_str).unwrap_or_default().to_owned(),
-                session_ids: item
-                    .get("sessionIds")
-                    .and_then(Value::as_array)
-                    .map(|ids| {
-                        ids.iter()
-                            .filter_map(Value::as_str)
-                            .filter(|id| !id.is_empty())
-                            .map(str::to_owned)
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                created_at: item
-                    .get("createdAt")
-                    .and_then(Value::as_i64)
-                    .filter(|value| *value >= 0)
-                    .unwrap_or(0),
+    items.iter().filter_map(read_workspace).collect()
+}
+
+/// Read one workspace out of a single `WorkspaceView` object.
+///
+/// The same reading `workspaces` applies to a list's rows, extracted because the pushed
+/// `upsert` frame carries one workspace rather than a list: two readers of the same shape would
+/// drift, and the field that would drift first is `createdAt` — the registry's ISO string becomes
+/// epoch milliseconds on the host side, and a reader that stopped doing that conversion would
+/// quietly score every workspace as "registered at the epoch" in the new-conversation ladder.
+///
+/// @param item - one workspace object.
+/// @returns the workspace, or `None` when it has no usable identity.
+fn read_workspace(item: &Value) -> Option<Workspace> {
+    let workspace_id = item.get("workspaceId").and_then(Value::as_str)?;
+    if workspace_id.is_empty() {
+        return None;
+    }
+    Some(Workspace {
+        workspace_id: workspace_id.to_owned(),
+        title: item.get("title").and_then(Value::as_str).unwrap_or_default().to_owned(),
+        path: item.get("path").and_then(Value::as_str).unwrap_or_default().to_owned(),
+        session_ids: item
+            .get("sessionIds")
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned)
+                    .collect()
             })
-        })
-        .collect()
+            .unwrap_or_default(),
+        created_at: item
+            .get("createdAt")
+            .and_then(Value::as_i64)
+            .filter(|value| *value >= 0)
+            .unwrap_or(0),
+    })
 }

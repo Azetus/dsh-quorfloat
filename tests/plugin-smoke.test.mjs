@@ -1,4 +1,5 @@
 // Category 2 (upstream tripwire): the plugin loads in the real Cordis composition and spawns/unloads a real peer.
+// Category 1 (cross-process protocol): the workspace push, observed as a frame on the mock sidecar.
 /**
  * Smoke test against the real Cordis framework.
  *
@@ -67,12 +68,42 @@ function fakeWorkspaceRegistry() {
 }
 
 /**
+ * A fake `workspaceController` whose `follow` stream yields prepared frames.
+ *
+ * The frames are yielded in order and then the stream stays open, like the Harness's own stream,
+ * until the plugin's lifetime signal aborts. `forwarded` flips once the generator has been asked
+ * for a frame past the last one — which happens only after the frame before it was awaited by the
+ * plugin, so it is the point at which every prepared frame has been written to the peer.
+ */
+function fakeWorkspaceController(frames) {
+  const controller = {
+    forwarded: false,
+    initializeDefault: async () => undefined,
+    follow(signal) {
+      return {
+        async *[Symbol.asyncIterator]() {
+          for (const frame of frames) {
+            if (signal.aborted) return
+            yield frame
+          }
+          controller.forwarded = true
+          while (!signal.aborted) await new Promise(resolve => setTimeout(resolve, 20))
+        },
+      }
+    },
+  }
+  return controller
+}
+
+/**
  * Plant the Harness services on a fresh root context and load the plugin.
  *
  * @param options.withController - plant `sessionController`; `false` simulates a
  *   profile that does not compose the Web/API services.
+ * @param options.workspaceController - plant a `workspaceController` (the workspace
+ *   push stream); omitted simulates a profile without the workspace API.
  */
-async function activate({ withController = true, ...overrides } = {}) {
+async function activate({ withController = true, workspaceController, ...overrides } = {}) {
   const dir = scratchDir()
   const reportPath = join(dir, 'report.json')
   const pidFile = join(dir, 'pid.json')
@@ -82,6 +113,7 @@ async function activate({ withController = true, ...overrides } = {}) {
   ctx.provide('sessions', { list: () => [] })
   ctx.provide('workspaceRegistry', fakeWorkspaceRegistry())
   if (withController) ctx.provide('sessionController', fakeSessionController())
+  if (workspaceController !== undefined) ctx.provide('workspaceController', workspaceController)
   ctx.provide('approval', { request: async () => 'unavailable' })
   ctx.provide('userQuestions', { ask: async () => ({ answers: [] }) })
 
@@ -182,6 +214,67 @@ test('the plugin loads in the real framework and reports its services', async ()
   } finally {
     await app.dispose()
   }
+})
+
+test('the host forwards workspace changes to the sidecar as they happen', async () => {
+  // Category 1: the workspace push is a host→sidecar notification, so the shape asserted here is
+  // the protocol itself. The frames are the Harness's own (an ISO `createdAt` on every workspace),
+  // and what the mock records is what the real sidecar's `workspaces/changed` parser reads — the
+  // projection to epoch milliseconds happens on the host side, once.
+  const baselineAt = Date.parse('2026-01-02T03:04:05.000Z')
+  const upsertAt = Date.parse('2026-01-03T04:05:06.000Z')
+  const controller = fakeWorkspaceController([
+    {
+      type: 'baseline',
+      value: {
+        items: [
+          { workspaceId: 'w1', path: '/tmp/ws', title: 'Workspace', sessionIds: ['session-a'], createdAt: '2026-01-02T03:04:05.000Z', updatedAt: '2026-01-02T03:04:05.000Z' },
+        ],
+        archivedSessionIds: [],
+        pinnedSessionIds: ['session-a'],
+      },
+    },
+    {
+      type: 'upsert',
+      workspace: { workspaceId: 'w2', path: '/tmp/two', title: 'Two', sessionIds: [], createdAt: '2026-01-03T04:05:06.000Z' },
+    },
+    { type: 'remove', workspaceId: 'w1' },
+    { type: 'order', workspaceIds: ['w2'] },
+  ])
+
+  const app = await activate({ workspaceController: controller })
+  try {
+    await app.waitForRunning()
+    // The subscription opens on the handshake, so this waits for the frames the fake prepared to
+    // have been consumed — and each is awaited by the plugin before the next is taken.
+    await waitFor('the workspace frames to be forwarded', async () => controller.forwarded === true, { timeoutMs: 8000 })
+  } finally {
+    // Disposing stops the peer, which writes its report as it exits — and it exercises the
+    // lifetime abort: a stream that outlived the plugin would keep forwarding into nothing.
+    await app.fiber.dispose()
+  }
+
+  const report = JSON.parse(readFileSync(app.reportPath, 'utf8'))
+  assert.deepEqual(
+    report.workspaceChanges,
+    [
+      {
+        type: 'baseline',
+        value: {
+          items: [{ workspaceId: 'w1', path: '/tmp/ws', title: 'Workspace', sessionIds: ['session-a'], createdAt: baselineAt }],
+          archivedSessionIds: [],
+          pinnedSessionIds: ['session-a'],
+        },
+      },
+      {
+        type: 'upsert',
+        workspace: { workspaceId: 'w2', path: '/tmp/two', title: 'Two', sessionIds: [], createdAt: upsertAt },
+      },
+      { type: 'remove', workspaceId: 'w1' },
+      { type: 'order', workspaceIds: ['w2'] },
+    ],
+    'each frame arrives once, in order, in the shape the sidecar parses',
+  )
 })
 
 test('an invalid configuration is rejected before anything is spawned', async () => {

@@ -1,6 +1,7 @@
 // The panel's top bar: brand, the two context pickers, and the window tools.
 
 import { useT } from '../../hooks/useI18n'
+import type { Scope } from '../../logic/scope'
 import type { Snapshot } from '../../logic/state'
 import { Icon } from '../common/Icon'
 import { SessionPicker } from './SessionPicker'
@@ -12,6 +13,8 @@ export interface TopBarProps {
   readonly state: Snapshot
   /** The workspace the next conversation would use (the user's pick, or the shell's). */
   readonly targetWorkspace: string | null
+  /** The scope the conversation menu lists: the workspace field's own value. */
+  readonly scope: Scope | null
   /** Which popover is open, if any. */
   readonly openMenu: string | null
   /** Whether the settings page is up. */
@@ -38,7 +41,7 @@ export interface TopBarProps {
  * @returns the top bar.
  */
 export function TopBar({
-  state, targetWorkspace, openMenu, settingsOpen, onToggleMenu, onCloseMenu,
+  state, targetWorkspace, scope, openMenu, settingsOpen, onToggleMenu, onCloseMenu,
   onChooseWorkspace, onToggleSettings, onHide,
 }: TopBarProps) {
   const t = useT()
@@ -57,7 +60,7 @@ export function TopBar({
         <span className="q-divider" aria-hidden="true">/</span>
         <SessionPicker
           state={state}
-          targetWorkspace={targetWorkspace}
+          scope={scope}
           open={openMenu === 'q-session'}
           onToggle={() => { onToggleMenu('q-session') }}
           onClose={onCloseMenu}

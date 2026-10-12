@@ -2,8 +2,9 @@
 
 import { api } from '../../api'
 import { useT } from '../../hooks/useI18n'
+import { sessionsInScope, type Scope } from '../../logic/scope'
 import type { Snapshot } from '../../logic/state'
-import { conversationTitle, relativeTime, workspaceTitle } from '../../logic/view-text'
+import { conversationTitle, relativeTime, scopeTitle } from '../../logic/view-text'
 import { MenuHeading } from './MenuHeading'
 import { MenuHint } from './MenuHint'
 import { MenuOption } from './MenuOption'
@@ -15,8 +16,12 @@ import { PinButton } from './PinButton'
 export interface SessionMenuProps {
   /** The snapshot. */
   readonly state: Snapshot
-  /** The workspace the next conversation would use, for the heading's context. */
-  readonly targetWorkspace: string | null
+  /**
+   * The browsing scope: the workspace field's own value (`hooks/useSessionScope.ts`), sticky
+   * while the field is unresolved. `null` means the field has not resolved yet, and the menu
+   * falls back to every conversation rather than claiming a workspace nothing chose.
+   */
+  readonly scope: Scope | null
   /** Close the menu after an action that should close it. */
   readonly onClose: () => void
 }
@@ -24,20 +29,24 @@ export interface SessionMenuProps {
 /**
  * Render the conversation list.
  *
- * Blank conversations are not offered (a fresh session with no turn is not something to
- * switch *to*), and the pin is the only persistent choice: it decides which conversation
- * the next summon opens.
+ * The list is the *children of the scope the workspace field is showing*: the selected
+ * workspace's conversations, or the ungrouped ones. Blank conversations are not offered (a
+ * fresh session with no turn is not something to switch *to*), and the pin is the only
+ * persistent choice: it decides which conversation the next summon opens.
  *
- * @param props - snapshot and the close handler.
+ * @param props - snapshot, scope, and the close handler.
  * @returns the menu contents.
  */
-export function SessionMenu({ state, targetWorkspace, onClose }: SessionMenuProps) {
+export function SessionMenu({ state, scope, onClose }: SessionMenuProps) {
   const t = useT()
   const pinned = state.session.pinned
-  const conversations = state.session.conversations.filter(c => !c.blank)
+  const conversations = sessionsInScope(state, scope)
   return (
     <>
-      <MenuHeading title={t('session.heading')} detail={t(workspaceTitle(state, targetWorkspace))} />
+      <MenuHeading
+        title={t('session.heading')}
+        detail={t(scope === null ? 'session.scopeAll' : scopeTitle(state, scope))}
+      />
       <MenuOption
         label={t('session.new')}
         selected={state.session.following === null}
@@ -74,7 +83,9 @@ export function SessionMenu({ state, targetWorkspace, onClose }: SessionMenuProp
           </MenuRow>
         )
       })}
-      {conversations.length === 0 && <MenuHint text={t('session.none')} />}
+      {conversations.length === 0 && (
+        <MenuHint text={t(scope === null ? 'session.none' : 'session.scopeEmpty')} />
+      )}
       <MenuSeparator />
       <MenuHint text={pinned !== null ? t('session.pinnedHint') : t('session.unpinnedHint')} />
     </>

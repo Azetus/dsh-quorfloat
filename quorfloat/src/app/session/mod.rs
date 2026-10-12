@@ -588,6 +588,15 @@ impl Session {
                 Some(params) => self.note_stats(params, sink),
                 None => sink.log("session/stats carried no params"),
             },
+            // The host's push of the Harness's own workspace stream. A workspace added,
+            // renamed, removed or reordered in the Harness window reaches the list the picker
+            // draws here, rather than waiting for the panel to ask again — which it only ever
+            // did when the list was empty or had never arrived. See
+            // `Follow::apply_workspace_frame` for what each frame means.
+            "workspaces/changed" => match params.as_ref() {
+                Some(params) => self.follow.apply_workspace_frame(params, sink),
+                None => sink.log("workspaces/changed carried no params"),
+            },
             "interaction/open" => self.admit_interaction(params.as_ref(), sink),
             "window/visibility" => match WindowCommand::parse(params.as_ref()) {
                 Some(command) => self.commands.push(command),
@@ -2340,6 +2349,80 @@ mod tests {
         assert_eq!(stats.cache_hit_percent, Some(75.0));
         assert_eq!(stats.context_tokens, Some(4000));
         assert_eq!(stats.context_limit, Some(128000));
+    }
+
+    /// Category 1: the host's pushed workspace frames reach the list the snapshot carries.
+    ///
+    /// The host follows the Harness's workspace stream and forwards each frame as
+    /// `workspaces/changed`, which is what makes a workspace added or removed in the Harness
+    /// visible in the panel without a restart. This asserts the wire half of that: the frame
+    /// shapes the host sends are applied to `workspaces()`, and each applied change leaves one
+    /// marker behind.
+    #[test]
+    fn a_pushed_workspace_frame_updates_the_workspace_list() {
+        let ids = |session: &Session| -> Vec<String> {
+            session.workspaces().iter().map(|entry| entry.workspace_id.clone()).collect()
+        };
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+
+        session.on_frame(
+            notification(
+                "workspaces/changed",
+                json!({"type": "baseline", "value": {
+                    "items": [
+                        {"workspaceId": "w1", "title": "one", "path": "/one", "sessionIds": ["s1"], "createdAt": 5},
+                        {"workspaceId": "w2", "title": "two", "path": "/two", "sessionIds": [], "createdAt": 9},
+                    ],
+                    "archivedSessionIds": [],
+                    "pinnedSessionIds": ["s1"],
+                }}),
+            ),
+            &mut sink,
+        );
+        assert_eq!(ids(&session), ["w1", "w2"], "a baseline is the list");
+        assert!(session.workspaces_loaded(), "and it arrived without a request");
+
+        // An upsert replaces a known row in place and appends an unknown one.
+        for (id, title) in [("w2", "two renamed"), ("w3", "three")] {
+            session.on_frame(
+                notification(
+                    "workspaces/changed",
+                    json!({"type": "upsert", "workspace": {
+                        "workspaceId": id, "title": title, "path": "/" , "sessionIds": [], "createdAt": 12,
+                    }}),
+                ),
+                &mut sink,
+            );
+        }
+        assert_eq!(session.workspaces()[1].title, "two renamed");
+        assert_eq!(ids(&session), ["w1", "w2", "w3"]);
+
+        session.on_frame(
+            notification("workspaces/changed", json!({"type": "remove", "workspaceId": "w1"})),
+            &mut sink,
+        );
+        session.on_frame(
+            notification("workspaces/changed", json!({"type": "order", "workspaceIds": ["w3", "w2"]})),
+            &mut sink,
+        );
+        assert_eq!(ids(&session), ["w3", "w2"]);
+
+        // One marker per applied change: the host swallows this process's stderr, so the marker
+        // is the only place a push is visible after the fact.
+        for expected in [
+            "workspaces changed: baseline 2",
+            "workspaces changed: upsert w2",
+            "workspaces changed: upsert w3",
+            "workspaces changed: removed w1",
+            "workspaces changed: order 2",
+        ] {
+            assert!(
+                sink.marks.iter().any(|line| line == expected),
+                "missing marker {expected:?} in {:?}",
+                sink.marks,
+            );
+        }
     }
 
     /// A session following `session-1`: `session/stats` is only kept for the attached one.

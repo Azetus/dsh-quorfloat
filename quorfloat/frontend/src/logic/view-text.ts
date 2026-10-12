@@ -7,7 +7,7 @@
 
 import { msg, raw, type Text } from './i18n'
 import { workspaceLabel } from './labels'
-import { isUngrouped, workspaceOfSession } from './scope'
+import { fieldScope, type Scope } from './scope'
 import type { Conversation, Snapshot } from './state'
 
 /**
@@ -40,24 +40,42 @@ export function targetWorkspace(state: Snapshot, chosen: string | null): string 
  *   visit, or the shell's ladder, and when neither can answer, the host's refusal to provide a
  *   default is what sends the user to the Harness.
  *
+ * The two cases are the same derivation the conversation list's scope is read from
+ * (`fieldScope`), so the field and the list can never disagree about which workspace is meant.
+ *
  * @param state - the snapshot.
  * @param target - the resolved workspace id for a new conversation (the user's pick, or the shell's).
  * @returns the workspace title or path tail as host data, or a fallback key.
  */
 export function workspaceTitle(state: Snapshot, target: string | null): Text {
+  const scope = fieldScope(state, target)
+  if (scope !== null) return scopeTitle(state, scope)
+  // The field has no scope to name. A conversation visible in neither list yet is still the one
+  // on screen, and its own directory name is the honest thing to show until the account arrives.
   const following = state.session.following
-  if (following !== null) {
-    const scope = workspaceOfSession(state, following.sessionId)
-    if (scope !== null) return raw(workspaceLabel(scope.title, scope.path))
-    if (isUngrouped(state, following.sessionId)) return msg('workspace.ungrouped')
-    // Visible in neither list yet: a conversation that was just created. Its own directory
-    // name is the honest thing to show until the registry's account arrives.
-    return following.label !== null ? raw(following.label) : msg('workspace.heading')
-  }
-  const chosen = state.session.workspaces.find(workspace => workspace.workspaceId === target)
-  if (chosen !== undefined) return raw(workspaceLabel(chosen.title, chosen.path))
+  if (following !== null) return following.label !== null ? raw(following.label) : msg('workspace.heading')
   if (state.session.defaultWorkspace.state === 'failed') return msg('workspace.needHost')
   return msg('workspace.choose')
+}
+
+/**
+ * What the panel calls a browsing scope: the workspace's title, or the ungrouped label.
+ *
+ * This is what the conversation menu draws as the thing it is listing, so it says the same
+ * words the workspace field says — the same `workspaceLabel`, and the same
+ * `workspace.ungrouped` key — rather than a second vocabulary for the same fact.
+ *
+ * @param state - the snapshot.
+ * @param scope - the scope to name.
+ * @returns the scope's label as host data, or a dictionary key.
+ */
+export function scopeTitle(state: Snapshot, scope: Scope): Text {
+  if (scope.kind === 'ungrouped') return msg('workspace.ungrouped')
+  const workspace = state.session.workspaces.find(w => w.workspaceId === scope.workspaceId)
+  // A scope derived from this snapshot always finds its workspace; one remembered from an
+  // earlier snapshot can outlive it for a frame, and then it names nothing to show.
+  if (workspace === undefined) return msg('workspace.heading')
+  return raw(workspaceLabel(workspace.title, workspace.path))
 }
 
 /**

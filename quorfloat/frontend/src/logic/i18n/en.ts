@@ -62,7 +62,12 @@ export const en = {
   'session.new': 'New conversation',
   'session.pickerLabel': 'Choose a conversation',
   'session.menuLabel': 'Conversation selection',
+  // What the conversation list is listing when the workspace field has not resolved to a
+  // workspace yet (a frame or two at startup or summon): the whole list.
+  'session.scopeAll': 'All conversations',
   'session.none': 'No other conversation to switch to.',
+  // The list is scoped to one workspace (or to the ungrouped rows) and it holds nothing.
+  'session.scopeEmpty': 'No conversations here yet.',
   'session.pinnedHint': 'The pinned conversation opens on every summon.',
   'session.unpinnedHint': 'Pin a conversation to keep opening it on every summon.',
   'session.pinName': 'Conversation {name}',

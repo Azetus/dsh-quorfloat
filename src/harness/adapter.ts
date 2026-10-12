@@ -19,6 +19,7 @@
  */
 
 import type { ChannelErrorCode } from '../bridge/errors.js'
+import type { SessionProjectionsView } from '../bridge/router.js'
 
 /**
  * Failure raised by a Harness-facing operation.
@@ -65,15 +66,28 @@ export interface WorkspaceView {
   readonly createdAt: number
 }
 
-/** One row of the Harness session list. */
 /**
- * How many conversations one `sessions/list` call may read a title for.
+ * How many conversations one `sessions/list` call may still read a title for.
  *
- * The panel lists every few seconds; a title read is an `inspect`, and unbounded work per poll is
- * how a list of twenty conversations becomes twenty reads every three seconds. Whatever is left
- * over keeps its id for one more poll rather than forever.
+ * The list normally names a conversation itself, out of the row's projection block, so a read
+ * from here is a **repair**: the row arrived with no name at all (a composition whose list carries
+ * no projection cache) or with an explicitly `null` one. A read is an `inspect`, which loads a
+ * whole session log, so the budget is one per poll; the memo below is what keeps even that one
+ * from repeating until the conversation actually moves.
  */
-const MAX_TITLE_READS = 2
+const MAX_TITLE_READS = 1
+
+/**
+ * One raw row of the Harness session list, before this adapter projects it.
+ *
+ * The row is read through this type rather than through a bare `Record` so the one field that is
+ * easy to lose is named: the Harness `SessionSummary` declares **no top-level `title`**, and a
+ * conversation's name travels in `projections.values.title`.
+ */
+type SessionListRow = Record<string, unknown> & {
+  /** The row's projection block, absent on a composition with no projection cache. */
+  readonly projections?: SessionProjectionsView
+}
 
 /**
  * Fold the latest title out of a conversation's events.
@@ -98,10 +112,14 @@ export function foldSessionTitle(events: readonly unknown[]): string | undefined
   return typeof title === 'string' && title !== '' ? title : undefined
 }
 
+/** One row of the Harness session list, already projected away from upstream internals. */
 export interface SessionSummaryView {
   readonly sessionId: string
   /**
    * What the conversation is called, when the Harness has a name for it.
+   *
+   * Supplied from the row's `projections.values.title` — the Harness's `SessionSummary` has no
+   * top-level `title` — and repaired from history only for a row that carried no name at all.
    *
    * The panel draws the conversation list from this record, and a list of session ids is a list
    * nobody can read: the title is the only thing that tells two conversations apart.
@@ -354,7 +372,7 @@ interface SessionControllerLike {
   selectModel?(request: unknown): Promise<unknown>
   /** Read every registered projection for one session, cold. */
   projections?(request: unknown, signal: AbortSignal): Promise<unknown>
-  list(request: unknown, signal: AbortSignal): Promise<{ items?: readonly Record<string, unknown>[] }>
+  list(request: unknown, signal: AbortSignal): Promise<{ items?: readonly SessionListRow[] }>
   create(request: unknown): Promise<{ sessionId?: unknown }>
   prompt(request: unknown, signal: AbortSignal): Promise<unknown>
   cancel(request: unknown): unknown
@@ -438,24 +456,47 @@ export function readSessionIds(value: unknown): readonly string[] {
 }
 
 /**
- * Project one registry entity into this plugin's own workspace view.
+ * Project one upstream workspace into this plugin's own view.
  *
- * The two fields that are not simply passed through are the two the whole grouping rule rests
- * on: membership (`sessionIds`) and the registration time (`createdAt`, converted to epoch
- * milliseconds). Both are read defensively so an older registry — one whose entity carries
- * neither — still yields a usable workspace rather than a throw.
+ * Two spellings reach this function, and the difference is only the identity field: the
+ * registry's entity calls it `id`, while the workspace change stream's `WorkspaceView` calls it
+ * `workspaceId`. Everything else is read the same way — membership (`sessionIds`) and the
+ * registration time (`createdAt`, converted to epoch milliseconds) are exactly the two fields the
+ * whole grouping rule rests on — so the projection is shared between the two paths rather than
+ * written twice. Both are read defensively so an older build whose entity carries neither still
+ * yields a usable workspace rather than a throw.
  *
- * @param entity - the registry's workspace entity.
- * @returns the detached view.
+ * @param value - a registry entity or a stream workspace.
+ * @returns the detached view, or `undefined` when there is no usable identity.
  */
-function workspaceView(entity: WorkspaceEntityLike): WorkspaceView {
+export function projectWorkspace(value: unknown): WorkspaceView | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  const id = record['workspaceId'] ?? record['id']
+  if (typeof id !== 'string' || id === '') return undefined
   return {
-    workspaceId: entity.id,
-    path: entity.path,
-    title: entity.title,
-    sessionIds: readSessionIds(entity.sessionIds),
-    createdAt: readEpochMs(entity.createdAt),
+    workspaceId: id,
+    path: typeof record['path'] === 'string' ? record['path'] : '',
+    title: typeof record['title'] === 'string' ? record['title'] : '',
+    sessionIds: readSessionIds(record['sessionIds']),
+    createdAt: readEpochMs(record['createdAt']),
   }
+}
+
+/**
+ * Project a list of upstream workspaces, dropping any row without a usable identity.
+ *
+ * A nameless workspace can be drawn; one without an identity cannot be chosen, created in, or
+ * removed, so offering it would be offering something that cannot work.
+ *
+ * @param entities - raw registry entities or stream workspaces.
+ * @returns the views, in the order they arrived.
+ */
+export function projectWorkspaces(entities: readonly unknown[]): WorkspaceView[] {
+  return entities.flatMap(entity => {
+    const view = projectWorkspace(entity)
+    return view === undefined ? [] : [view]
+  })
 }
 
 /** Minimal logger shape the adapter needs. */
@@ -557,7 +598,10 @@ class CordisHarness implements QuorfloatHarness {
     statsCalls: 0,
     workspaceDefaultCalls: 0,
   }
-  /** Titles by session, with the `updatedAt` they were read at. */
+  /**
+   * Repair results by session, with the `updatedAt` they were read at; `title` is `undefined`
+   * for a remembered absence, which is what stops a nameless conversation being read twice.
+   */
   readonly #titles = new Map<string, { updatedAt: number; title: string | undefined }>()
 
   /**
@@ -593,7 +637,7 @@ class CordisHarness implements QuorfloatHarness {
   listWorkspaces(): readonly WorkspaceView[] {
     if (this.#registry === undefined) return []
     try {
-      return this.#registry.list().map(entity => workspaceView(entity))
+      return projectWorkspaces(this.#registry.list())
     } catch (error) {
       this.#log.warn('workspace listing failed', error)
       return []
@@ -612,7 +656,7 @@ class CordisHarness implements QuorfloatHarness {
       // "Ineligible" and "no such method" are both an empty list rather than a failure to
       // propagate: the caller's answer to either is the same — ask the user to make one in the
       // Harness — and a rejected promise would only turn that into a missing prompt.
-      return workspace === undefined ? [] : [workspaceView(workspace)]
+      return workspace === undefined ? [] : projectWorkspaces([workspace])
     } catch (error) {
       this.#log.warn('could not initialize a default workspace', error)
       return []
@@ -623,7 +667,7 @@ class CordisHarness implements QuorfloatHarness {
   workspace(workspaceId: string): WorkspaceView | undefined {
     if (this.#registry === undefined) return undefined
     const entity = this.#registry.get(workspaceId)
-    return entity === undefined ? undefined : workspaceView(entity)
+    return entity === undefined ? undefined : projectWorkspace(entity)
   }
 
   /** {@inheritDoc QuorfloatHarness.createSession} */
@@ -655,7 +699,12 @@ class CordisHarness implements QuorfloatHarness {
       .map(item => {
         const sessionId = typeof item['sessionId'] === 'string' ? item['sessionId'] : ''
         const cwd = typeof item['cwd'] === 'string' ? item['cwd'] : undefined
-        const title = typeof item['title'] === 'string' && item['title'] !== '' ? item['title'] : undefined
+        // The name is a projection, not a top-level field: the list's own row has no `title`,
+        // and `projections.values.title` is the string it was already carrying. A `null` value
+        // (registered but never named) and an absent block (no projection cache on this
+        // composition) both mean unnamed, and are left to the repair pass below.
+        const projected = item.projections?.values?.title
+        const title = typeof projected === 'string' && projected !== '' ? projected : undefined
         return {
           sessionId,
           ...(title === undefined ? {} : { title }),
@@ -670,18 +719,23 @@ class CordisHarness implements QuorfloatHarness {
   }
 
   /**
-   * Name the conversations, reading the ones whose name is not known yet.
+   * Repair the rows the list could not name.
    *
-   * The Harness's own list carries no titles. The names exist in each conversation's history as a
-   * `session/title` event, and `inspect` is documented as cold-safe — the persisted header and
-   * prefix, without resuming an agent — so reading them wakes nothing.
+   * The list names a conversation itself, from its projection block, so a row that arrives here
+   * carried no name: no projection block at all (a composition whose list has no projection
+   * cache), or a block whose `title` is `null` — registered, never named. The names that do exist
+   * are in each conversation's history as a `session/title` event, and `inspect` is documented as
+   * cold-safe — the persisted header and prefix, without resuming an agent — so a repair wakes
+   * nothing; it does, however, read a whole session log, which is why it is a last resort.
    *
-   * Cached by session and invalidated by `updatedAt`: a conversation that has moved on may have
-   * been renamed, and one that has not is asked about once.
+   * **Two gates, both required.** A row is read only when it is unnamed *and* it has moved past
+   * the memo: a row whose `updatedAt` is the one the memo recorded is answered from the memo,
+   * name or remembered absence, and only a row that has moved on — it may have been renamed since
+   * — is worth asking about again.
    *
-   * @param summaries - what the list gave, without names.
+   * @param summaries - the list's rows, unnamed ones included.
    * @param signal - abort signal, shared with the list call.
-   * @returns the same conversations, as many named as the budget allowed.
+   * @returns the same conversations, as many repaired as the budget allowed.
    */
   async #withTitles(
     summaries: readonly SessionSummaryView[],
@@ -690,15 +744,21 @@ class CordisHarness implements QuorfloatHarness {
     let budget = MAX_TITLE_READS
     const named: SessionSummaryView[] = []
     for (const summary of summaries) {
+      // Gate one: the list already named it. Nothing to repair, and no memo to consult — a
+      // renamed conversation arrives with its new name in the next poll's projection block.
       if (summary.title !== undefined) {
         named.push(summary)
         continue
       }
-      const cached = this.#titles.get(summary.sessionId)
-      if (cached !== undefined && cached.updatedAt === summary.updatedAt) {
-        named.push(cached.title === undefined ? summary : { ...summary, title: cached.title })
+      // Gate two: the memo. "Unnamed in this poll" is not the same as "unknown": a row that has
+      // not moved since it was read is answered from the memo, including a memoized absence.
+      const memo = this.#titles.get(summary.sessionId)
+      if (memo !== undefined && memo.updatedAt === summary.updatedAt) {
+        named.push(memo.title === undefined ? summary : { ...summary, title: memo.title })
         continue
       }
+      // Unnamed and moved, but only `MAX_TITLE_READS` of those per poll: whatever is left over
+      // keeps its id for one more poll rather than costing a log read every poll.
       if (budget <= 0) {
         named.push(summary)
         continue

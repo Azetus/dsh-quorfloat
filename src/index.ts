@@ -34,6 +34,7 @@ import {
   type QuorfloatHarness,
 } from './harness/adapter.js'
 import { SessionLayer } from './harness/session-layer.js'
+import { startWorkspaceStream, type WorkspaceStreamHandle } from './harness/workspace-stream.js'
 import { evaluateAuthority, PresenceTracker, type AuthorityVerdict, type PresenceSurface } from './harness/presence.js'
 import { Interactions } from './harness/interactions.js'
 import type { Disposer, EffectResult, Logger, PluginContext } from './cordis-types.js'
@@ -72,6 +73,10 @@ interface Activation {
   injection?: Disposer | undefined
   /** Reported presence of the Harness UI surfaces; read on every decision. */
   presence?: PresenceTracker | undefined
+  /** The live workspace push subscription; replaced on every channel generation. */
+  workspaceStream?: WorkspaceStreamHandle | undefined
+  /** Ends every workspace subscription when the plugin is unloaded. */
+  workspaceAbort?: AbortController | undefined
   /** Disposer for the browser-facing presence service. */
   presenceGateway?: Disposer | undefined
   /** Disposer for the browser-facing control service. */
@@ -263,6 +268,39 @@ export function createPlugin(overrides: PluginOverrides = {}) {
         window: { ...config.window, language, languageDecided: decision.decided },
       }
 
+      // The Harness's own workspace stream, forwarded to the panel as `workspaces/changed`.
+      // Without it the workspace list is a snapshot the peer takes once and caches for its
+      // lifetime, so a workspace added or removed in the Harness window stays invisible until
+      // the panel restarts. The service is optional and its method is optional: a profile
+      // without the workspace API composes none, a build without the stream has no `follow`,
+      // and both are reported and survived — `workspaces/list` remains the fallback path.
+      //
+      // Subscribed at the *handshake* rather than at activation, for two reasons. The frames
+      // can only be delivered over a started channel, so a subscription opened before the
+      // process exists would drop the `baseline` that is meant to seed the list; and every new
+      // channel generation (a restart) gets a fresh subscription, which is what gives the
+      // process that just handshook a complete list instead of whatever the previous one had
+      // applied.
+      const workspaceAbort = new AbortController()
+      activation.workspaceAbort = workspaceAbort
+      const subscribeWorkspaces = (): void => {
+        if (activation.stopped) return
+        activation.workspaceStream?.close()
+        activation.workspaceStream = startWorkspaceStream({
+          controller: ctx.get('workspaceController'),
+          signal: workspaceAbort.signal,
+          log,
+          onFrame: async frame => {
+            const supervisor = activation.supervisor
+            // Best effort, like every other notification on this channel: a dropped frame is
+            // repaired by the peer's own `workspaces/list` request, and the supervisor reports
+            // the channel loss that caused it.
+            if (supervisor === undefined) return
+            await supervisor.notify('workspaces/changed', frame)
+          },
+        })
+      }
+
       const supervisor = new QuorfloatSupervisor({
         config: () => effectiveConfig,
         resolveBinary: () =>
@@ -323,6 +361,10 @@ export function createPlugin(overrides: PluginOverrides = {}) {
         // failures are escalated so no log level can hide them.
         onEvent: event => {
           reportSupervisorEvent(event, log)
+          // A completed handshake is the one moment a started channel exists, so it is the
+          // moment the workspace stream can actually reach the peer — and a fresh subscription
+          // is what seeds each new process with the stream's opening baseline.
+          if (event.kind === 'handshake') subscribeWorkspaces()
           overrides.onStateChange?.(state())
         },
         onPeerNotification: (method, params) => {
@@ -559,6 +601,16 @@ async function deactivate(activation: Activation, log: Logger): Promise<void> {
   activation.interactions?.unregister()
   // 2. release Harness subscriptions, leaving Harness-side work untouched;
   activation.sessionLayer?.detachAll('plugin deactivating')
+  // 2b. end the workspace stream before the channel is taken down, so no frame is
+  //     forwarded into a process that is being stopped. The abort is the plugin's
+  //     lifetime signal: the subscription cannot outlive the activation that made it.
+  try {
+    activation.workspaceAbort?.abort(new Error('dsh-quorfloat: plugin deactivating'))
+  } catch {
+    // An abort is an abort; nothing here can fail in a way worth blocking teardown for.
+  }
+  activation.workspaceAbort = undefined
+  activation.workspaceStream = undefined
   // 3. stop the process and report what actually happened.
   const supervisor = activation.supervisor
   if (supervisor !== undefined) {

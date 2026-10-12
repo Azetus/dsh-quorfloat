@@ -1,6 +1,7 @@
 // The top bar's conversation picker.
 
 import { useT } from '../../hooks/useI18n'
+import type { Scope } from '../../logic/scope'
 import type { Snapshot } from '../../logic/state'
 import { sessionTitle } from '../../logic/view-text'
 import { Icon } from '../common/Icon'
@@ -11,8 +12,8 @@ import { SessionMenu } from '../menus/SessionMenu'
 export interface SessionPickerProps {
   /** The snapshot. */
   readonly state: Snapshot
-  /** The workspace the next conversation would use, for the menu's heading context. */
-  readonly targetWorkspace: string | null
+  /** The scope the menu lists: the workspace field's own value, sticky while it is unresolved. */
+  readonly scope: Scope | null
   /** Whether this popover is the open one. */
   readonly open: boolean
   /** Toggle request from the trigger. */
@@ -24,10 +25,10 @@ export interface SessionPickerProps {
 /**
  * Render the conversation entry and its menu.
  *
- * @param props - snapshot and handlers.
+ * @param props - snapshot, scope, and handlers.
  * @returns the picker.
  */
-export function SessionPicker({ state, targetWorkspace, open, onToggle, onClose }: SessionPickerProps) {
+export function SessionPicker({ state, scope, open, onToggle, onClose }: SessionPickerProps) {
   const t = useT()
   const pinned = state.session.pinned !== null
   return (
@@ -51,7 +52,7 @@ export function SessionPicker({ state, targetWorkspace, open, onToggle, onClose 
         </>
       }
     >
-      <SessionMenu state={state} targetWorkspace={targetWorkspace} onClose={onClose} />
+      <SessionMenu state={state} scope={scope} onClose={onClose} />
     </PickerPopover>
   )
 }

@@ -9,6 +9,7 @@ import { api } from '../api'
 import { useDocumentPreferences } from '../hooks/useDocumentPreferences'
 import { useFlight } from '../hooks/useFlight'
 import { useGlobalKeys } from '../hooks/useGlobalKeys'
+import { useSessionScope } from '../hooks/useSessionScope'
 import { useViewportHeight } from '../hooks/useViewportHeight'
 import { pinToBottom } from '../logic/bottom-pin'
 import { usePanelDynamics } from '../hooks/usePanelDynamics'
@@ -78,6 +79,10 @@ export function App({ state }: AppProps) {
 
   // What the top bar names: the user's pick, or where the shell would create the conversation.
   const target = targetWorkspace(state, workspaceChoice)
+  // The workspace field's own value, read as the conversation list's browsing scope: with a
+  // conversation pinned open it is that conversation's workspace (or ungrouped), without one it
+  // is `target`. Sticky while the field cannot answer, so the list never flashes "everything".
+  const scope = useSessionScope(state, target)
 
   const arrived: Painted = { page, session: state.transcript.sessionId }
   const { remeasure } = usePanelDynamics(panelRef, state, arrived, available)
@@ -188,6 +193,7 @@ export function App({ state }: AppProps) {
       <TopBar
         state={state}
         targetWorkspace={target}
+        scope={scope}
         openMenu={openMenu}
         settingsOpen={page === 'settings'}
         onToggleMenu={toggleMenu}

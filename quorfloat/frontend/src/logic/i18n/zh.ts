@@ -56,7 +56,11 @@ export const zh: Record<MessageKey, string> = {
   'session.new': '新会话',
   'session.pickerLabel': '选择会话',
   'session.menuLabel': '会话选择',
+  // 工作区字段还没解析出具体工作区时（启动或呼出的头一两帧），列表列的是全部会话。
+  'session.scopeAll': '全部会话',
   'session.none': '没有可切换的会话。',
+  // 列表已按某个工作区（或未分组）收窄，而其中没有任何会话。
+  'session.scopeEmpty': '这里还没有会话。',
   'session.pinnedHint': '呼出时继续固定会话。',
   'session.unpinnedHint': '固定会话后，每次呼出继续此会话。',
   'session.pinName': '会话 {name}',

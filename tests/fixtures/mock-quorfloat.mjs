@@ -44,6 +44,10 @@ const observed = {
   signalled: null,
   stdoutBytes: 0,
   stderr: [],
+  // The host's pushed workspace frames, in arrival order. Recorded rather than answered: the
+  // notification is the protocol, so a test asserts the exact frame shape the real sidecar's
+  // `workspaces/changed` handler parses.
+  workspaceChanges: [],
   // The panel's language, as this process would have read it at startup and as the
   // effective configuration carried it. Both are recorded because the two reach the
   // sidecar by different routes (spawn environment, and the `ready` payload) and a
@@ -263,6 +267,13 @@ function handleNotification(message) {
       observed.readyReceived = true
       observed.readyWindow = message.params?.config?.window ?? null
       note('ready received', message.params?.config?.hotkey ?? '(no hotkey)')
+      return
+    case 'workspaces/changed':
+      // The host's push of the Harness workspace stream. Recorded so a test can assert the
+      // cross-process frame shape, and noted because the frames are otherwise invisible on this
+      // side (the real sidecar writes a marker line per applied change).
+      observed.workspaceChanges.push(message.params)
+      note('workspaces/changed', JSON.stringify(message.params))
       return
     default:
       return

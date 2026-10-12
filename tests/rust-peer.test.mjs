@@ -18,10 +18,68 @@
 
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
-import { test } from 'node:test'
+import { after, before, test } from 'node:test'
 import { join } from 'node:path'
 
 import { buildSupervisor, repoRoot, sleep, waitFor } from './helpers.mjs'
+
+/**
+ * The sidecar's own state files and the variable that names where each one lives.
+ *
+ * It keeps all of them under `~/.dsh-quorfloat` unless the environment says otherwise,
+ * and reads them at startup. A developer's real files must not decide this suite's
+ * outcome: a real pin makes the panel attach to that conversation as it starts, which is
+ * a true fact about that home and a false one about the wire — the "attaches to nothing"
+ * test below then fails on code that is correct. The redirect below points every path at
+ * one scratch directory instead, so this file measures the protocol and nothing about
+ * whose machine it runs on. The user's real files are never written to; they are simply
+ * never read.
+ *
+ * The names are the state-file variables `quorfloat/src/` actually reads — `app/pinned.rs`,
+ * `app/preferences.rs`, `app/geometry.rs` and the marker sink in `runtime/diag/` — so a new
+ * state file has to be added here too or the suite stops being hermetic. A variable the sidecar
+ * does not honour cannot fail loudly; the guard is reading those four modules.
+ */
+const stateFiles = {
+  // The pinned conversation, and the workspace half beside it.
+  DSH_QUORFLOAT_PINNED: 'pinned.json',
+  // The panel's own remembered settings (hotkey, keep-open, language, theme).
+  DSH_QUORFLOAT_PREFERENCES: 'preferences.json',
+  // Where the window remembers its position.
+  DSH_QUORFLOAT_WINDOW_STATE: 'window.json',
+  // Off unless named, but a marker path inherited from the caller's shell is one more
+  // real file this run would otherwise append to. Tests that read a marker point this
+  // at their own file and delete it afterwards.
+  DSH_QUORFLOAT_RUST_MARKER: 'marker.log',
+}
+
+/** This run's scratch directory for the paths above. */
+let stateDirectory
+/** The caller's values, restored when the file is done so nothing leaks sideways. */
+const callerState = new Map()
+
+before(async () => {
+  const { mkdtemp } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  stateDirectory = await mkdtemp(join(tmpdir(), 'quorfloat-state-'))
+  for (const [variable, name] of Object.entries(stateFiles)) {
+    callerState.set(variable, process.env[variable])
+    // The supervisor forwards every `DSH_QUORFLOAT_*` variable from its own environment
+    // to the child, so setting it here is what reaches the sidecar.
+    process.env[variable] = join(stateDirectory, name)
+  }
+})
+
+after(async () => {
+  const { rm } = await import('node:fs/promises')
+  for (const [variable, value] of callerState) {
+    if (value === undefined) delete process.env[variable]
+    else process.env[variable] = value
+  }
+  // `before` is the only thing that creates it, and an `after` hook still runs when
+  // that failed; removing a directory never created must not become the failure.
+  if (stateDirectory !== undefined) await rm(stateDirectory, { recursive: true, force: true })
+})
 
 /** Where `cargo build` leaves the binary, newest profile first. */
 function rustBinary() {
