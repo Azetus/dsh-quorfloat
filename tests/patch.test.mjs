@@ -54,7 +54,8 @@ test('the shipped patch is one insert targeting this plugin by name', async () =
   assert.ok(Array.isArray(entry.insert), 'the entry is an insert list')
   assert.equal(entry.insert.length, 1)
   const row = entry.insert[0]
-  assert.equal(row.name, 'dsh-quorfloat', 'the row is addressed by package name so Node resolves it')
+  const manifest = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8'))
+  assert.equal(row.name, manifest.name, 'the row is addressed by package name so Node resolves it')
   assert.equal(row.id, 'quorfloat', 'the row id is the anchor users override')
 })
 

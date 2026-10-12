@@ -167,14 +167,16 @@ function main() {
   const { targets, platform } = selectTargets(options.targets)
 
   const out = resolve(ROOT, options.out)
-  const bundleName = `${MANIFEST.name}-${MANIFEST.version}-${platform}`
+  // Keep offline filenames stable while the installed package identity is scoped.
+  const offlineName = MANIFEST.name.slice(MANIFEST.name.lastIndexOf('/') + 1)
+  const bundleName = `${offlineName}-${MANIFEST.version}-${platform}`
   const bundle = join(out, bundleName)
   const archive = join(out, `${bundleName}.tgz`)
   mkdirSync(out, { recursive: true })
   // Delete only this platform's target and the legacy unqualified tarball of this version.
   // A failed build must not leave a stale same-version archive looking ready to install.
   rmSync(archive, { force: true })
-  rmSync(join(out, `${MANIFEST.name}-${MANIFEST.version}.tgz`), { force: true })
+  rmSync(join(out, `${offlineName}-${MANIFEST.version}.tgz`), { force: true })
 
   const executable = buildReleaseExecutable(targets)
   assemble({ bundle, targets, platform, executable })

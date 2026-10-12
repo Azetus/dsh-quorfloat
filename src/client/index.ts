@@ -309,7 +309,7 @@ const DETAIL_ORDER = 20
  * as `pkg.name`, the row as `row.moduleName`, because the bundle's patch
  * (`cordis.patch.yml`) names the row after the package.
  */
-const BUNDLE_NAME = 'dsh-quorfloat'
+const BUNDLE_NAME = '@azetus/dsh-quorfloat'
 
 /**
  * Whether the open detail page is this plugin's.
@@ -318,7 +318,7 @@ const BUNDLE_NAME = 'dsh-quorfloat'
  * `plugins.detail.actions` on every plugin's page, so the entry has to answer
  * this before it draws anything. Two subjects can be ours:
  *
- * - a bundle page whose package is this package (`dsh-quorfloat`), which is the
+ * - a bundle page whose package is this package (`@azetus/dsh-quorfloat`), which is the
  *   page an installed bundle's card opens;
  * - a row page whose row runs this package's module, which is the page the
  *   bundle's 包含的组件 row opens.
@@ -1037,7 +1037,7 @@ const en: Record<MessageKey, string> = {
   start: 'Start floating panel',
   stop: 'Stop floating panel',
   gaveUp: ' ({restarts} failures in a row)',
-  tab: 'dsh-quorfloat',
+  tab: BUNDLE_NAME,
 }
 
 /** Chinese copy, key for key with {@link en}. */
@@ -1053,5 +1053,5 @@ const zh: Record<MessageKey, string> = {
   start: '启动悬浮窗',
   stop: '停止悬浮窗',
   gaveUp: '（连续 {restarts} 次失败）',
-  tab: 'dsh-quorfloat',
+  tab: BUNDLE_NAME,
 }

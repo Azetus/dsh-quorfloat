@@ -16,6 +16,11 @@ export const MANIFEST = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf
 export const APPLE_TARGETS = ['aarch64-apple-darwin', 'x86_64-apple-darwin']
 const SCRATCH = join(ROOT, '.tooling', 'release')
 
+/** npm's flat tarball stem, also used for staged directories on every platform. */
+export function packageStem(name) {
+  return name.replace(/^@/u, '').replace(/\//gu, '-')
+}
+
 /** Parse the options this script owns. */
 export function parseArgs(argv, defaultOut) {
   const options = { targets: [], out: defaultOut, help: false }

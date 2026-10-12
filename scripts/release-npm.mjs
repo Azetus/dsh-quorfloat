@@ -7,12 +7,13 @@ import { isBundleJunk, stageSidecar } from './assemble.mjs'
 import { assertVersionsAgree } from './version.mjs'
 import {
   ROOT, MANIFEST, APPLE_TARGETS, parseArgs, selectTargets, buildReleaseExecutable,
-  lipoInfo, walk, bundlePath, hashFiles, packBundle,
+  lipoInfo, walk, bundlePath, hashFiles, packBundle, packageStem,
 } from './release-shared.mjs'
 
 const DEFAULT_OUT = 'bundles/npm'
-const DARWIN_PACKAGE = `${MANIFEST.name}-darwin`
-const WINDOWS_PACKAGE = `${MANIFEST.name}-win32-x64`
+// The host resolver reads the same metadata from its installed main manifest.
+const DARWIN_PACKAGE = MANIFEST.quorfloat.platformPackages.darwin
+const WINDOWS_PACKAGE = MANIFEST.quorfloat.platformPackages['win32-x64']
 
 function usage() {
   process.stdout.write(`Build npm packages from fresh sources. No packages are published.
@@ -126,11 +127,18 @@ function main() {
   const { targets, platform } = selectTargets(options.targets)
   const native = nativePackageFor(targets, platform)
   const out = join(resolve(ROOT, options.out), version)
-  const mainDirectory = join(out, MANIFEST.name)
-  const nativeDirectory = join(out, native.name)
-  const mainArchive = join(out, `${MANIFEST.name}-${version}.tgz`)
-  const nativeArchive = join(out, `${native.name}-${version}.tgz`)
+  const mainDirectory = join(out, packageStem(MANIFEST.name))
+  const nativeDirectory = join(out, packageStem(native.name))
+  const mainArchive = join(out, `${packageStem(MANIFEST.name)}-${version}.tgz`)
+  const nativeArchive = join(out, `${packageStem(native.name)}-${version}.tgz`)
   mkdirSync(out, { recursive: true })
+  // Retire only the old main/current-platform staging outputs of this version.
+  const legacyNames = ['dsh-quorfloat', `dsh-quorfloat-${platform === 'darwin' ? 'darwin' : 'win32-x64'}`]
+  for (const legacy of legacyNames) {
+    if (legacy === packageStem(MANIFEST.name) || legacy === packageStem(native.name)) continue
+    rmSync(join(out, legacy), { recursive: true, force: true })
+    rmSync(join(out, `${legacy}-${version}.tgz`), { force: true })
+  }
   // Remove only this run's outputs; a failure cannot expose stale same-version archives.
   for (const archive of [mainArchive, nativeArchive]) rmSync(archive, { force: true })
   for (const directory of [mainDirectory, nativeDirectory]) {

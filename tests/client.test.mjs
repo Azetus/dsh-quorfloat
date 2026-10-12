@@ -27,7 +27,7 @@ import { join } from 'node:path'
 import { repoRoot, waitFor } from './helpers.mjs'
 
 const ARTIFACT = join(repoRoot, 'lib/client.js')
-const PACKAGE_NAME = 'dsh-quorfloat'
+const PACKAGE_NAME = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')).name
 
 /** A minimal DOM/document pair with controllable visibility and focus. */
 function fakeDom({ visibility = 'visible', focused = true } = {}) {

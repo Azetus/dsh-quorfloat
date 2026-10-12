@@ -1,10 +1,16 @@
 {
-  "name": "dsh-quorfloat",
+  "name": "@azetus/dsh-quorfloat",
   "version": "0.1.3",
   "private": true,
   "description": "System-level floating conversation window for DeepSeek Harness (host plugin half)",
   "type": "module",
   "license": "MIT",
+  "quorfloat": {
+    "platformPackages": {
+      "darwin": "@azetus/dsh-quorfloat-darwin",
+      "win32-x64": "@azetus/dsh-quorfloat-win32-x64"
+    }
+  },
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "files": [

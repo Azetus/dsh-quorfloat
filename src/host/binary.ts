@@ -6,12 +6,11 @@
  *    developer can point at `quorfloat/target/release/...` without touching
  *    anything else, and so a user can work around a broken installation;
  * 2. the `DSH_QUORFLOAT_PATH` environment variable, for scripted runs and CI;
- * 3. the platform package convention, most specific first:
- *    `dsh-quorfloat-<platform>-<arch>/bin/...` and then the architecture-less
- *    `dsh-quorfloat-<platform>/bin/...`, which is what actually ships — one
- *    payload per platform, carrying a universal executable on macOS. Both are
- *    resolved through Node's module resolver from this package, which is what
- *    makes `optionalDependencies` + `os`/`cpu` work without code changes.
+ * 3. platform packages named in the main manifest's quorfloat.platformPackages,
+ *    most specific first. Windows x64 uses @azetus/dsh-quorfloat-win32-x64;
+ *    macOS uses @azetus/dsh-quorfloat-darwin with a universal executable. Unlisted keys
+ *    retain the dsh-quorfloat-<platform>[-<arch>] convention. Node resolves both
+ *    forms from this package, supporting optionalDependencies and os/cpu.
  *    On macOS the payload may also be the shipping `.app` bundle
  *    (`bin/<name>.app/Contents/MacOS/<name>`); a bare executable next to it
  *    still wins, because that is the developer's override hatch;
@@ -32,17 +31,27 @@ import { ChannelError } from '../bridge/errors.js'
 /** Executable file name per platform. */
 export const EXECUTABLE_NAME = process.platform === 'win32' ? 'dsh-quorfloat.exe' : 'dsh-quorfloat'
 
-/** npm package suffix for the current platform, mirroring `os`/`cpu` package names. */
-export const PLATFORM_PACKAGE = `dsh-quorfloat-${process.platform}-${process.arch}`
+/** Registry package names are shared with the build script through the main manifest. */
+const packageMetadata = JSON.parse(readFileSync(join(findPackageRoot(), 'package.json'), 'utf8')) as {
+  quorfloat?: { platformPackages?: Record<string, unknown> }
+}
+
+function platformPackageName(key: string, fallback: string): string {
+  const name = packageMetadata.quorfloat?.platformPackages?.[key]
+  return typeof name === 'string' && name !== '' ? name : fallback
+}
+
+/** npm package for the current platform and architecture. */
+export const PLATFORM_PACKAGE = platformPackageName(
+  `${process.platform}-${process.arch}`,
+  `dsh-quorfloat-${process.platform}-${process.arch}`,
+)
 
 /**
- * The architecture-less package name, which is the form that ships: one payload
- * per platform (`dsh-quorfloat-darwin` carries a universal executable,
- * `dsh-quorfloat-win32` an x64 one) rather than one per chip. It is tried after
- * {@link PLATFORM_PACKAGE}, so a per-architecture package still wins wherever
- * one exists.
+ * Architecture-less fallback, including the universal macOS package.
+ * It is tried after the per-architecture package above.
  */
-export const PLATFORM_PACKAGE_ARCHLESS = `dsh-quorfloat-${process.platform}`
+export const PLATFORM_PACKAGE_ARCHLESS = platformPackageName(process.platform, `dsh-quorfloat-${process.platform}`)
 
 /** One resolution attempt, kept for diagnostics. */
 export interface ResolutionAttempt {
@@ -165,12 +174,12 @@ export function resolveQuorfloatBinary(lookup: BinaryLookup): ResolvedBinary {
 function findPackageRoot(): string {
   try {
     const require = createRequire(import.meta.url)
-    let dir = dirname(require.resolve('dsh-quorfloat/package.json'))
+    let dir = dirname(require.resolve('@azetus/dsh-quorfloat/package.json'))
     for (let depth = 0; depth < 5; depth += 1) {
       const manifest = join(dir, 'package.json')
       try {
         const parsed = JSON.parse(readFileSync(manifest, 'utf8')) as { name?: unknown }
-        if (parsed.name === 'dsh-quorfloat') return dir
+        if (parsed.name === '@azetus/dsh-quorfloat') return dir
       } catch {
         // Keep walking up.
       }
@@ -179,7 +188,7 @@ function findPackageRoot(): string {
       dir = parent
     }
   } catch {
-    // `dsh-quorfloat/package.json` is not resolvable from here; fall back below.
+    // The scoped package self-reference is not resolvable here; fall back below.
   }
   // Sources live in `<root>/src/host`; the compiled output in `<root>/lib/host`.
   return dirname(dirname(dirname(fileURLToPath(import.meta.url))))
