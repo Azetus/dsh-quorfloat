@@ -405,8 +405,12 @@ function packBundle(bundle, archive) {
       'pack', '--json', '--ignore-scripts', '--pack-destination', temporary,
       '--cache', join(ROOT, '.tooling', '.npm-cache'),
     ], { cwd: bundle, stdio: ['ignore', 'pipe', 'inherit'] })
-    const packed = JSON.parse(result.stdout)
-    if (!Array.isArray(packed) || packed.length !== 1) {
+    const reported = JSON.parse(result.stdout)
+    // npm 12 keys pack results by package name; earlier versions return an array.
+    const packed = Array.isArray(reported)
+      ? reported
+      : reported !== null && typeof reported === 'object' ? Object.values(reported) : []
+    if (packed.length !== 1) {
       throw new Error('npm pack did not report exactly one tarball filename')
     }
     const filename = packed[0]?.filename
