@@ -13,7 +13,7 @@ export interface TopBarProps {
   readonly state: Snapshot
   /** The workspace the next conversation would use (the user's pick, or the shell's). */
   readonly targetWorkspace: string | null
-  /** The scope the conversation menu lists: the workspace field's own value. */
+  /** The scope shown by the workspace field and listed by the conversation menu. */
   readonly scope: Scope | null
   /** Which popover is open, if any. */
   readonly openMenu: string | null
@@ -25,6 +25,10 @@ export interface TopBarProps {
   readonly onCloseMenu: () => void
   /** Adopt a workspace as the new-conversation target. */
   readonly onChooseWorkspace: (workspaceId: string) => void
+  /** Browse conversations with no workspace account. */
+  readonly onChooseUngrouped: () => void
+  /** Open a conversation and leave any explicit browsing choice. */
+  readonly onSelectSession: (sessionId: string) => void
   /** Open or close the settings page. */
   readonly onToggleSettings: () => void
   /** Hide the panel. */
@@ -42,7 +46,7 @@ export interface TopBarProps {
  */
 export function TopBar({
   state, targetWorkspace, scope, openMenu, settingsOpen, onToggleMenu, onCloseMenu,
-  onChooseWorkspace, onToggleSettings, onHide,
+  onChooseWorkspace, onChooseUngrouped, onSelectSession, onToggleSettings, onHide,
 }: TopBarProps) {
   const t = useT()
   return (
@@ -52,15 +56,18 @@ export function TopBar({
         <WorkspacePicker
           state={state}
           targetWorkspace={targetWorkspace}
+          scope={scope}
           open={openMenu === 'q-workspace'}
           onToggle={() => { onToggleMenu('q-workspace') }}
           onClose={onCloseMenu}
           onChoose={onChooseWorkspace}
+          onChooseUngrouped={onChooseUngrouped}
         />
         <span className="q-divider" aria-hidden="true">/</span>
         <SessionPicker
           state={state}
           scope={scope}
+          onSelect={onSelectSession}
           open={openMenu === 'q-session'}
           onToggle={() => { onToggleMenu('q-session') }}
           onClose={onCloseMenu}

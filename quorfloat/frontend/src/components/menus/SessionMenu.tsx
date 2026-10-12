@@ -22,6 +22,8 @@ export interface SessionMenuProps {
    * falls back to every conversation rather than claiming a workspace nothing chose.
    */
   readonly scope: Scope | null
+  /** Open a conversation and leave any explicit browsing choice. */
+  readonly onSelect: (sessionId: string) => void
   /** Close the menu after an action that should close it. */
   readonly onClose: () => void
 }
@@ -37,7 +39,7 @@ export interface SessionMenuProps {
  * @param props - snapshot, scope, and the close handler.
  * @returns the menu contents.
  */
-export function SessionMenu({ state, scope, onClose }: SessionMenuProps) {
+export function SessionMenu({ state, scope, onSelect, onClose }: SessionMenuProps) {
   const t = useT()
   const pinned = state.session.pinned
   const conversations = sessionsInScope(state, scope)
@@ -47,16 +49,20 @@ export function SessionMenu({ state, scope, onClose }: SessionMenuProps) {
         title={t('session.heading')}
         detail={t(scope === null ? 'session.scopeAll' : scopeTitle(state, scope))}
       />
-      <MenuOption
-        label={t('session.new')}
-        selected={state.session.following === null}
-        symbol="plus"
-        onPick={() => {
-          onClose()
-          void api.startNew()
-        }}
-      />
-      <MenuSeparator />
+      {scope?.kind !== 'ungrouped' && (
+        <>
+          <MenuOption
+            label={t('session.new')}
+            selected={state.session.following === null}
+            symbol="plus"
+            onPick={() => {
+              onClose()
+              void api.startNew()
+            }}
+          />
+          <MenuSeparator />
+        </>
+      )}
       {conversations.map(conversation => {
         const title = conversationTitle(conversation)
         const isPinned = pinned === conversation.sessionId
@@ -69,7 +75,7 @@ export function SessionMenu({ state, scope, onClose }: SessionMenuProps) {
               symbol="message-square"
               onPick={() => {
                 onClose()
-                void api.selectSession(conversation.sessionId)
+                onSelect(conversation.sessionId)
               }}
             />
             <PinButton

@@ -14,6 +14,8 @@ export interface SessionPickerProps {
   readonly state: Snapshot
   /** The scope the menu lists: the workspace field's own value, sticky while it is unresolved. */
   readonly scope: Scope | null
+  /** Open a conversation and leave any explicit browsing choice. */
+  readonly onSelect: (sessionId: string) => void
   /** Whether this popover is the open one. */
   readonly open: boolean
   /** Toggle request from the trigger. */
@@ -28,7 +30,7 @@ export interface SessionPickerProps {
  * @param props - snapshot, scope, and handlers.
  * @returns the picker.
  */
-export function SessionPicker({ state, scope, open, onToggle, onClose }: SessionPickerProps) {
+export function SessionPicker({ state, scope, onSelect, open, onToggle, onClose }: SessionPickerProps) {
   const t = useT()
   const pinned = state.session.pinned !== null
   return (
@@ -52,7 +54,7 @@ export function SessionPicker({ state, scope, open, onToggle, onClose }: Session
         </>
       }
     >
-      <SessionMenu state={state} scope={scope} onClose={onClose} />
+      <SessionMenu state={state} scope={scope} onSelect={onSelect} onClose={onClose} />
     </PickerPopover>
   )
 }

@@ -1,8 +1,8 @@
 // The panel app: the shell's snapshot in, the whole tree out, and the panel's own view
 // state (which page, which popover, the draft, the folds).
 //
-// Nothing here edits the snapshot: it is the host's, and every decision the user makes
-// leaves through `api` so the host stays the authority.
+// Nothing here edits the snapshot: browsing choices stay in the view, and session actions
+// leave through `api` so the host stays the authority.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
@@ -14,6 +14,7 @@ import { useViewportHeight } from '../hooks/useViewportHeight'
 import { pinToBottom } from '../logic/bottom-pin'
 import { usePanelDynamics } from '../hooks/usePanelDynamics'
 import { SHADOW_ROOM, type Painted } from '../logic/panel'
+import type { Scope } from '../logic/scope'
 import type { Snapshot } from '../logic/state'
 import { observeSummon, type SummonMark } from '../logic/summon'
 import { isBusy, targetWorkspace } from '../logic/view-text'
@@ -53,6 +54,12 @@ export function App({ state }: AppProps) {
   // is that pin, validated), so seeding would only add a second copy that can go stale when
   // the pin moves.
   const [workspaceChoice, setWorkspaceChoice] = useState<string | null>(null)
+  // A browsing-only choice never becomes the workspace passed to a new conversation.
+  const [browseChoice, setBrowseChoice] = useState<{
+    readonly scope: Scope
+    readonly sessionId: string | null
+  } | null>(null)
+  const followingId = state.session.following?.sessionId ?? null
   // The last summon counter this panel saw, with the process lifetime it belonged to. A reload
   // or a sidecar restart changes the token, and that is *not* a summon: without the mark, the
   // counter's reset would clear a choice the user is still making (see `logic/summon.ts`).
@@ -66,8 +73,13 @@ export function App({ state }: AppProps) {
   useEffect(() => {
     const observation = observeSummon(summonMark.current, state.window.summon)
     summonMark.current = observation.mark
-    if (observation.summoned) setWorkspaceChoice(null)
+    if (observation.summoned) {
+      setWorkspaceChoice(null)
+      setBrowseChoice(null)
+    }
   }, [state.window.summon])
+
+  useEffect(() => { setBrowseChoice(null) }, [followingId])
 
   // The room the native window gives the panel: the product cap is a ceiling, not a
   // promise. It is part of the markup (below) so that everything inside the panel —
@@ -79,10 +91,10 @@ export function App({ state }: AppProps) {
 
   // What the top bar names: the user's pick, or where the shell would create the conversation.
   const target = targetWorkspace(state, workspaceChoice)
-  // The workspace field's own value, read as the conversation list's browsing scope: with a
-  // conversation pinned open it is that conversation's workspace (or ungrouped), without one it
-  // is `target`. Sticky while the field cannot answer, so the list never flashes "everything".
-  const scope = useSessionScope(state, target)
+  // The automatic scope stays sticky while unresolved. An explicit browsing choice wins
+  // only until the conversation changes; it does not enter that automatic memory or `target`.
+  const automaticScope = useSessionScope(state, target)
+  const scope = browseChoice?.sessionId === followingId ? browseChoice.scope : automaticScope
 
   const arrived: Painted = { page, session: state.transcript.sessionId }
   const { remeasure } = usePanelDynamics(panelRef, state, arrived, available)
@@ -153,10 +165,18 @@ export function App({ state }: AppProps) {
     inputRef.current?.focus()
   }, [])
   const chooseWorkspace = useCallback((workspaceId: string): void => {
+    setBrowseChoice(null)
     // Choosing a workspace while following a conversation is the new-conversation action.
     if (state.session.following !== null) void api.startNew()
     setWorkspaceChoice(workspaceId)
   }, [state.session.following])
+  const chooseUngrouped = useCallback((): void => {
+    setBrowseChoice({ scope: { kind: 'ungrouped' }, sessionId: followingId })
+  }, [followingId])
+  const selectSession = useCallback((sessionId: string): void => {
+    setBrowseChoice(null)
+    void api.selectSession(sessionId)
+  }, [])
   const toggleFold = useCallback((key: string): void => {
     setFolds(current => {
       const next = new Map(current)
@@ -199,6 +219,8 @@ export function App({ state }: AppProps) {
         onToggleMenu={toggleMenu}
         onCloseMenu={closeMenu}
         onChooseWorkspace={chooseWorkspace}
+        onChooseUngrouped={chooseUngrouped}
+        onSelectSession={selectSession}
         onToggleSettings={toggleSettings}
         onHide={flight.requestHide}
       />

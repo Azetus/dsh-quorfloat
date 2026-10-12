@@ -3,6 +3,7 @@
 import { api } from '../../api'
 import { useT } from '../../hooks/useI18n'
 import { workspaceLabel } from '../../logic/labels'
+import type { Scope } from '../../logic/scope'
 import type { Snapshot } from '../../logic/state'
 import { workspaceTitle } from '../../logic/view-text'
 import { MenuHeading } from './MenuHeading'
@@ -18,8 +19,12 @@ export interface WorkspaceMenuProps {
   readonly state: Snapshot
   /** The workspace the next conversation would use (the user's pick, or the shell's). */
   readonly targetWorkspace: string | null
+  /** The scope shown by the workspace field. */
+  readonly scope: Scope | null
   /** Adopt a workspace as the new-conversation target. */
   readonly onChoose: (workspaceId: string) => void
+  /** Choose the browsing-only ungrouped scope. */
+  readonly onChooseUngrouped: () => void
   /** Close the menu after an action that should close it. */
   readonly onClose: () => void
 }
@@ -31,18 +36,19 @@ export interface WorkspaceMenuProps {
  * it leaves the conversation with a detach and preselects this directory.
  * The pin button is what persists; it exists only in new-conversation state, because with
  * a session pin the workspace field is that session's projection, not a choice.
+ * The trailing ungrouped row only changes browsing scope and has no pin or creation target.
  *
  * @param props - snapshot, preselect, and handlers.
  * @returns the menu contents.
  */
-export function WorkspaceMenu({ state, targetWorkspace, onChoose, onClose }: WorkspaceMenuProps) {
+export function WorkspaceMenu({ state, targetWorkspace, scope, onChoose, onChooseUngrouped, onClose }: WorkspaceMenuProps) {
   const t = useT()
   return (
     <>
-      <MenuHeading title={t('workspace.heading')} detail={t(workspaceTitle(state, targetWorkspace))} />
+      <MenuHeading title={t('workspace.heading')} detail={t(workspaceTitle(state, targetWorkspace, scope))} />
       {state.session.workspaces.map(workspace => {
         const label = workspaceLabel(workspace.title, workspace.path)
-        const selected = state.session.following === null && targetWorkspace === workspace.workspaceId
+        const selected = scope?.kind !== 'ungrouped' && state.session.following === null && targetWorkspace === workspace.workspaceId
         const pinned = state.session.pinnedWorkspace === workspace.workspaceId
         return (
           <MenuRow key={workspace.workspaceId}>
@@ -69,6 +75,17 @@ export function WorkspaceMenu({ state, targetWorkspace, onChoose, onClose }: Wor
           </MenuRow>
         )
       })}
+      <MenuRow>
+        <MenuOption
+          label={t('workspace.ungrouped')}
+          selected={scope?.kind === 'ungrouped'}
+          symbol="folder"
+          onPick={() => {
+            onChooseUngrouped()
+            onClose()
+          }}
+        />
+      </MenuRow>
       <MenuSeparator />
       <MenuHint text={t(workspaceHint(state))} />
     </>

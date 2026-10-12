@@ -2,6 +2,7 @@
 
 import { api } from '../../api'
 import { useT } from '../../hooks/useI18n'
+import type { Scope } from '../../logic/scope'
 import type { Snapshot } from '../../logic/state'
 import { pinnedWorkspaceMark, workspaceTitle } from '../../logic/view-text'
 import { Icon } from '../common/Icon'
@@ -14,6 +15,8 @@ export interface WorkspacePickerProps {
   readonly state: Snapshot
   /** The workspace the next conversation would use (the user's pick, or the shell's). */
   readonly targetWorkspace: string | null
+  /** The scope shown by the field, including an explicit browsing choice. */
+  readonly scope: Scope | null
   /** Whether this popover is the open one. */
   readonly open: boolean
   /** Toggle request from the trigger. */
@@ -22,6 +25,8 @@ export interface WorkspacePickerProps {
   readonly onClose: () => void
   /** Adopt a workspace as the new-conversation target. */
   readonly onChoose: (workspaceId: string) => void
+  /** Browse the ungrouped conversations without changing the creation target. */
+  readonly onChooseUngrouped: () => void
 }
 
 /**
@@ -30,9 +35,9 @@ export interface WorkspacePickerProps {
  * @param props - snapshot, open state, and handlers.
  * @returns the picker.
  */
-export function WorkspacePicker({ state, targetWorkspace, open, onToggle, onClose, onChoose }: WorkspacePickerProps) {
+export function WorkspacePicker({ state, targetWorkspace, scope, open, onToggle, onClose, onChoose, onChooseUngrouped }: WorkspacePickerProps) {
   const t = useT()
-  const marked = state.session.following === null && pinnedWorkspaceMark(state, targetWorkspace)
+  const marked = scope?.kind !== 'ungrouped' && state.session.following === null && pinnedWorkspaceMark(state, targetWorkspace)
   return (
     <PickerPopover
       id="q-workspace"
@@ -53,7 +58,7 @@ export function WorkspacePicker({ state, targetWorkspace, open, onToggle, onClos
       trigger={
         <>
           <span id="q-workspace-icon"><Icon name="folder" /></span>
-          <span className="q-name" id="q-workspace-name">{t(workspaceTitle(state, targetWorkspace))}</span>
+          <span className="q-name" id="q-workspace-name">{t(workspaceTitle(state, targetWorkspace, scope))}</span>
           <span id="q-workspace-pinmark" className="q-pinmark" hidden={!marked}>
             {marked && <Icon name="pin" />}
           </span>
@@ -61,7 +66,7 @@ export function WorkspacePicker({ state, targetWorkspace, open, onToggle, onClos
         </>
       }
     >
-      <WorkspaceMenu state={state} targetWorkspace={targetWorkspace} onChoose={onChoose} onClose={onClose} />
+      <WorkspaceMenu state={state} targetWorkspace={targetWorkspace} scope={scope} onChoose={onChoose} onChooseUngrouped={onChooseUngrouped} onClose={onClose} />
     </PickerPopover>
   )
 }

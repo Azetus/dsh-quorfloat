@@ -41,14 +41,15 @@ export function targetWorkspace(state: Snapshot, chosen: string | null): string 
  *   default is what sends the user to the Harness.
  *
  * The two cases are the same derivation the conversation list's scope is read from
- * (`fieldScope`), so the field and the list can never disagree about which workspace is meant.
+ * (`fieldScope`). An explicit browsing scope overrides both the field and the list together.
  *
  * @param state - the snapshot.
  * @param target - the resolved workspace id for a new conversation (the user's pick, or the shell's).
+ * @param browsingScope - the effective browsing scope, when supplied by the view.
  * @returns the workspace title or path tail as host data, or a fallback key.
  */
-export function workspaceTitle(state: Snapshot, target: string | null): Text {
-  const scope = fieldScope(state, target)
+export function workspaceTitle(state: Snapshot, target: string | null, browsingScope?: Scope | null): Text {
+  const scope = browsingScope === undefined ? fieldScope(state, target) : browsingScope
   if (scope !== null) return scopeTitle(state, scope)
   // The field has no scope to name. A conversation visible in neither list yet is still the one
   // on screen, and its own directory name is the honest thing to show until the account arrives.

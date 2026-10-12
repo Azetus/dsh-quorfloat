@@ -12,9 +12,9 @@
 //   it must not create a scope here either.
 //
 // The same derivation answers a second question — *what is the conversation list listing?* —
-// and the answer is `fieldScope`: the workspace the workspace field is showing, which is the
+// and the automatic answer is `fieldScope`: the workspace the workspace field is showing, which is the
 // fact when a conversation is pinned open and the choice (the ladder's answer) when none is.
-// The list's scope is not a second selection: it is this one value, read once per render.
+// A view-only browsing choice can override this answer for both the field and the list.
 //
 // Deliberately pure and free of React: the "which workspace is this" question is asked by the
 // top bar and by the pickers, and the answer must not depend on which of them asked. The one
@@ -55,7 +55,7 @@ export function workspaceOfSession(state: Snapshot, sessionId: string): Workspac
  * The third state, beside "in a workspace" and "not visible at all": the panel draws such a row
  * under nothing, and the workspace field names that fact (Ungrouped) rather than guessing a
  * directory. It is a *label*, never a target: "Ungrouped" is not a workspace to create in, and
- * it does not appear in the picker.
+ * the picker's synthetic entry only browses this scope.
  *
  * @param state - the snapshot.
  * @param sessionId - the conversation to place.
