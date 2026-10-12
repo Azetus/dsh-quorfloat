@@ -18,7 +18,21 @@
  */
 
 import { chmodSync, cpSync, existsSync, mkdirSync, rmSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
+
+/**
+ * Whether a staged path is macOS directory metadata, rather than a distribution asset.
+ *
+ * Uses the platform's path parser: both copy callbacks and directory walkers supply native
+ * paths. Match only known metadata names, so legitimate hidden assets remain eligible.
+ *
+ * @param path - a file or directory path.
+ * @returns whether the path must be excluded from copies and distribution inventories.
+ */
+export function isBundleJunk(path) {
+  const name = basename(path)
+  return name === '.DS_Store' || name.startsWith('._') || name === '__MACOSX'
+}
 
 /** The executable name, matching what the host half resolves per platform. */
 export const SIDECAR_NAME = process.platform === 'win32' ? 'dsh-quorfloat.exe' : 'dsh-quorfloat'

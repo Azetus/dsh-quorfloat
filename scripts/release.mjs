@@ -2,9 +2,10 @@
 /**
  * Assemble a self-contained, per-platform release bundle into `bundles/`.
  *
- * The output is one directory per platform — `bundles/dsh-quorfloat-<version>-<platform>/` —
- * which is what gets zipped and attached to a GitHub Release, and what is installed
- * by hand to find out whether the OS blocks an unsigned build. It contains the built
+ * The output is a directory and a matching npm tarball per platform:
+ * `bundles/dsh-quorfloat-<version>-<platform>/` and the same name with `.tgz`.
+ * The directory is assembled first and packed immediately, so the archive contains the
+ * artifacts from this build. The directory contains the built
  * JS half, this repository's bundle patch with `quorfloatPath` pointed at a bundled
  * executable, the executable itself, the font and its licence, and a
  * `build-info.json` recording exactly what was built.
@@ -26,8 +27,8 @@
  * bundle therefore cannot be produced from this checkout on macOS, and this script
  * says so rather than writing a layout it could not have built.
  *
- * No compression, no signing, no installer: the OS-blocking experiment needs the raw
- * bundle, and signing is a separate decision.
+ * npm creates the installable tarball; the unpacked bundle remains available.
+ * Signing and installer creation are separate steps.
  *
  * Usage:
  *   node scripts/release.mjs [--target <rust-triple>]... [--out <dir>]
@@ -40,16 +41,19 @@ import {
   cpSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
+  realpathSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs'
-import { dirname, join, relative, sep } from 'node:path'
+import { basename, delimiter, dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { SIDECAR_NAME, stageSidecar } from './assemble.mjs'
+import { SIDECAR_NAME, isBundleJunk, stageSidecar } from './assemble.mjs'
 import { buildSidecar, hostTriple } from './cargo.mjs'
 import { assertVersionsAgree } from './version.mjs'
 
@@ -58,7 +62,7 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 /** The manifest, read once: the version names the bundle, and the manifest ships in it. */
 const MANIFEST = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
 
-/** Whether `npm`, `cargo` and `rustup` need a shell to be resolved (they do on Windows). */
+/** Whether non-npm command shims need a shell on Windows; npm runs through Node directly. */
 const NEEDS_SHELL = process.platform === 'win32'
 
 /**
@@ -124,8 +128,9 @@ Options:
   --out <dir>        where the bundle directory is written (default: ${DEFAULT_OUT}, relative to the checkout)
   -h, --help         this text
 
-The bundle is assembled into ${join(ROOT, DEFAULT_OUT)}/<name>-<version>-<platform>/. It
-is not compressed and not signed. A Windows bundle must be assembled on Windows.
+The bundle is assembled into ${join(ROOT, DEFAULT_OUT)}/<name>-<version>-<platform>/
+and packed into a matching .tgz beside it. Neither is signed.
+A Windows bundle must be assembled on Windows.
 `)
 }
 
@@ -153,6 +158,36 @@ function capture(command, args, cwd = ROOT) {
   return result.stdout
 }
 
+/** Locate npm's JavaScript entry so Windows `.cmd` shims never reparse path arguments. */
+function npmCli() {
+  const nodeDirectory = dirname(process.execPath)
+  const candidates = [
+    process.env.npm_execpath,
+    join(nodeDirectory, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    join(nodeDirectory, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ]
+  for (const directory of (process.env.PATH ?? '').split(delimiter).filter(Boolean)) {
+    candidates.push(join(directory, process.platform === 'win32' ? 'npm.cmd' : 'npm'))
+    candidates.push(join(directory, 'node_modules', 'npm', 'bin', 'npm-cli.js'))
+  }
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string' || !existsSync(candidate)) continue
+    const path = realpathSync(candidate)
+    if (basename(path) === 'npm-cli.js') return path
+  }
+  throw new Error('cannot locate npm-cli.js; run this release through npm run build')
+}
+
+/** Run npm without a shell, preserving spaces and shell metacharacters in each argument. */
+function runNpm(args, { cwd = ROOT, stdio = 'inherit' } = {}) {
+  const result = spawnSync(process.execPath, [npmCli(), ...args], {
+    cwd, stdio, encoding: 'utf8', shell: false,
+  })
+  if (result.error !== undefined) throw new Error(`cannot run npm: ${result.error.message}`)
+  if (result.status !== 0) throw new Error(`npm ${args[0]} failed (exit ${result.status ?? result.signal})`)
+  return result
+}
+
 /** Translate a Rust triple into the npm `os` value the bundle declares. */
 function platformOf(triple) {
   if (triple.endsWith('-apple-darwin')) return 'darwin'
@@ -170,7 +205,7 @@ function defaultTargets(host) {
 /** Build the JS half, including the client bundle the loader consumes. */
 function buildJavaScript() {
   process.stdout.write('release: npm run build:plugin (the host half and the client bundle)\n')
-  if (!run('npm', ['run', 'build:plugin'])) throw new Error('the JS build failed')
+  runNpm(['run', 'build:plugin'])
   for (const entry of ['lib/index.js', 'lib/client.js']) {
     if (!existsSync(join(ROOT, entry))) throw new Error(`the JS build produced no ${entry}`)
   }
@@ -186,9 +221,7 @@ function buildJavaScript() {
  */
 function buildFrontend() {
   process.stdout.write('release: npm run build:frontend (cargo embeds the result in the sidecar)\n')
-  if (!run('npm', ['run', 'build:frontend'])) {
-    throw new Error('the frontend build failed; run `npm run frontend:install` if its dependencies are missing')
-  }
+  runNpm(['run', 'build:frontend'])
   const dist = join(ROOT, 'quorfloat', 'frontend', 'dist', 'index.html')
   if (!existsSync(dist)) throw new Error(`the frontend build produced no ${relative(ROOT, dist)}`)
 }
@@ -269,8 +302,9 @@ function writePatch(bundle) {
  * Three deliberate changes. `os` is what makes an install refuse the bundle on the
  * wrong platform. `scripts` is dropped because the bundle has no sources and no
  * toolchain for them to run against. `files` is replaced with what the bundle
- * actually contains, so the directory describes itself rather than the checkout it
- * came from — the checkout's list names neither `bin/` nor `fonts/`.
+ * actually contains, as individual file paths rather than whole directories. Metadata
+ * created after assembly therefore cannot enter the package through a directory rule.
+ * `build-info.json` and `package.json` are listed before they are written.
  *
  * @param bundle - the bundle directory.
  * @param platform - the npm `os` value the bundle is built for.
@@ -279,7 +313,7 @@ function writeManifest(bundle, platform) {
   const manifest = {
     ...MANIFEST,
     os: [platform],
-    files: ['lib', 'bin', 'fonts', 'cordis.patch.yml', 'build-info.json', 'package.json'],
+    files: [...new Set([...walk(bundle).map(path => bundlePath(bundle, path)), 'build-info.json', 'package.json'])].sort(),
   }
   delete manifest.scripts
   writeFileSync(join(bundle, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`)
@@ -290,10 +324,16 @@ function walk(directory) {
   const files = []
   for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
     const path = join(directory, entry.name)
+    if (isBundleJunk(path)) continue
     if (entry.isDirectory()) files.push(...walk(path))
     else files.push(path)
   }
   return files
+}
+
+/** npm manifests and hash keys always use forward slashes, including on Windows. */
+function bundlePath(bundle, path) {
+  return relative(bundle, path).split(sep).join('/')
 }
 
 /**
@@ -308,7 +348,7 @@ function hashFiles(bundle) {
   const files = {}
   for (const path of walk(bundle)) {
     const bytes = readFileSync(path)
-    files[relative(bundle, path).split(sep).join('/')] = {
+    files[bundlePath(bundle, path)] = {
       bytes: bytes.byteLength,
       sha256: createHash('sha256').update(bytes).digest('hex'),
     }
@@ -337,7 +377,7 @@ function assemble({ bundle, executable, targets, platform }) {
     label: 'release',
     onMissing: 'throw',
   })
-  cpSync(join(ROOT, 'lib'), join(bundle, 'lib'), { recursive: true, force: true })
+  cpSync(join(ROOT, 'lib'), join(bundle, 'lib'), { recursive: true, force: true, filter: source => !isBundleJunk(source) })
   writePatch(bundle)
   writeManifest(bundle, platform)
 
@@ -359,6 +399,31 @@ function assemble({ bundle, executable, targets, platform }) {
   const count = Object.keys(info.files).length
   const megabytes = (treeSize(bundle) / 1_048_576).toFixed(1)
   process.stdout.write(`release: ${relative(ROOT, bundle)}/ (${count} files, ${megabytes} MB)\n`)
+}
+
+/** Pack only the freshly assembled directory; expose the final archive after npm succeeds. */
+function packBundle(bundle, archive) {
+  const temporary = mkdtempSync(join(dirname(archive), '.pack-'))
+  try {
+    process.stdout.write(`release: packing ${relative(ROOT, bundle)}/\n`)
+    const result = runNpm([
+      'pack', '--json', '--ignore-scripts', '--pack-destination', temporary,
+      '--cache', join(ROOT, '.tooling', '.npm-cache'),
+    ], { cwd: bundle, stdio: ['ignore', 'pipe', 'inherit'] })
+    const packed = JSON.parse(result.stdout)
+    if (!Array.isArray(packed) || packed.length !== 1) {
+      throw new Error('npm pack did not report exactly one tarball filename')
+    }
+    const filename = packed[0]?.filename
+    if (typeof filename !== 'string' || basename(filename) !== filename) {
+      throw new Error('npm pack reported an invalid tarball filename')
+    }
+    // Same parent filesystem: the final path never names a partially written tarball.
+    renameSync(join(temporary, filename), archive)
+    process.stdout.write(`release: packed ${relative(ROOT, archive)}\n`)
+  } finally {
+    rmSync(temporary, { recursive: true, force: true })
+  }
 }
 
 function main() {
@@ -390,8 +455,15 @@ function main() {
     throw new Error('only the macOS bundle combines more than one target')
   }
 
-  const out = join(ROOT, options.out)
-  const bundle = join(out, `${MANIFEST.name}-${MANIFEST.version}-${platform}`)
+  const out = resolve(ROOT, options.out)
+  const bundleName = `${MANIFEST.name}-${MANIFEST.version}-${platform}`
+  const bundle = join(out, bundleName)
+  const archive = join(out, `${bundleName}.tgz`)
+  mkdirSync(out, { recursive: true })
+  // Delete only this platform's target and the legacy unqualified tarball of this version.
+  // A failed build must not leave a stale same-version archive looking ready to install.
+  rmSync(archive, { force: true })
+  rmSync(join(out, `${MANIFEST.name}-${MANIFEST.version}.tgz`), { force: true })
 
   buildJavaScript()
   buildFrontend()
@@ -403,6 +475,7 @@ function main() {
   }))
   const executable = combineSlices(slices, SIDECAR_NAME)
   assemble({ bundle, targets, platform, executable })
+  packBundle(bundle, archive)
 }
 
 try {
