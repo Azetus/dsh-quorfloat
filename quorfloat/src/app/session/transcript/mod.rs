@@ -729,7 +729,16 @@ impl Transcript {
             freed += entry_bytes(&entries[excess]);
             excess += 1;
         }
-        if excess == 0 {
+        // Reap whole user/assistant rounds. A suffix beginning with assistant or tool
+        // output has no question to fold under, so the frontend would expose its working
+        // content as loose lines until a history page later restored that question.
+        while excess < entries.len() && !matches!(entries[excess], Entry::User { .. }) {
+            freed += entry_bytes(&entries[excess]);
+            excess += 1;
+        }
+        // A single round can exceed the budget: retain it whole rather than leave half
+        // a round. Its entries still have the per-entry text cap.
+        if excess == 0 || excess == entries.len() {
             return;
         }
         entries.drain(0..excess);
@@ -1125,12 +1134,18 @@ mod tests {
         let mut transcript = Transcript::new();
         transcript.apply_snapshot(&snapshot(vec![user(0, "起点")], 0, 1));
         let line = "中".repeat(MAX_ENTRY_BYTES / 3);
-        // Live growth, well past the window budget: `bounded` clips each line at the per-entry
-        // budget, so this is what paging one enormous conversation actually looks like. Twice
-        // as many lines as fit, plus the crossing one.
+        // Multiple reclaimable rounds, well past the byte budget. A single oversized
+        // round is indivisible; the budget reclaims earlier rounds, not half an answer.
         let lines = 2 * MAX_WINDOW_BYTES / MAX_ENTRY_BYTES + 8;
+        let mut seq = 0i64;
         for index in 0..lines {
-            let seq = index as i64 + 1;
+            if index % 4 == 0 {
+                seq += 1;
+                transcript.apply_event(&json!({"sessionId": "session-1", "generation": 1, "seq": seq,
+                    "type": "user/message", "time": 1,
+                    "data": {"role": "user", "content": [{"type": "text", "text": "下一轮"}]}}));
+            }
+            seq += 1;
             transcript.apply_event(&json!({"sessionId": "session-1", "generation": 1, "seq": seq,
                 "type": "assistant/message", "time": 1,
                 "data": {"message": {"role": "assistant", "content": [{"type": "text", "text": line}]}}}));
@@ -1142,6 +1157,6 @@ mod tests {
             transcript.held_bytes(),
         );
         // The newest line survives whatever the budget did.
-        assert_eq!(transcript.cursor(), lines as i64);
+        assert_eq!(transcript.cursor(), seq);
     }
 }

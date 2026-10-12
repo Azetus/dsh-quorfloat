@@ -131,6 +131,11 @@ export function oldestSeq(records: readonly unknown[]): number | null {
   return typeof seq === 'number' && Number.isSafeInteger(seq) ? seq : null
 }
 
+/** The durable event kind inside a Harness history envelope. */
+function recordEventType(record: unknown): string | undefined {
+  return (record as { event?: { type?: string } } | null)?.event?.type
+}
+
 /** One row of the Harness session list, already projected away from upstream internals. */
 export interface SessionSummaryView {
   readonly sessionId: string
@@ -150,33 +155,10 @@ export interface SessionSummaryView {
   readonly blank: boolean
 }
 
-/**
- * How many messages one `session/history` page may read at most.
- *
- * The Harness's own page cap is `500` (`HISTORY_PAGE_OPTIONS`, in
- * `packages/api/session-controller/src/client/sessions/session.ts`), but a page here is one
- * JSON-RPC response frame and the peer drops any frame past `MAX_FRAME_BYTES` (1 MiB, see
- * `src/protocol.ts`). A page is trimmed to `HISTORY_PAGE_BUDGET_BYTES` before it is sent
- * (`src/harness/session-layer.ts`), so asking for 500 messages would routinely read several
- * times what one frame can carry and throw the surplus away. Two hundred messages is roughly
- * 400 KiB of ordinary prose — inside that budget — while leaving the turn window below room to
- * extend past its own 50-message floor without reaching the cap immediately.
- */
+/** Messages per upstream read; a capped partial turn is completed by reading further back. */
 const PAGE_MAX_MESSAGES = 200
 
-/**
- * The turn-aligned minimum one page must cover, copied from the Harness's own page options.
- *
- * The intent is the Harness's, verbatim: *extend by at least 50 messages and two turn starts,
- * stop at the cap or exhaustion* (`HISTORY_PAGE_OPTIONS` on the client, and the same rule
- * enforced by `paginate` in `packages/api/session-controller/src/index.ts`). A page cut in the
- * middle of a turn reaches the panel as half an answer, and it hands the scroll anchor a
- * boundary that is not a turn — so the two minimums travel with every request rather than being
- * left to the upstream default.
- *
- * `minMessages` is required to be no greater than `maxMessages`; the pair below is checked by
- * the Harness's own `validateHistoryWindow`, and by the conformance test that pins this payload.
- */
+/** The Harness's turn window: at least 50 messages and two `turn/start` boundaries. */
 const PAGE_TURN_WINDOW = { minMessages: 50, minTurns: 2 } as const
 
 /** One durable history page: raw wire records, in the shape the protocol carries. */
@@ -892,7 +874,41 @@ class CordisHarness implements QuorfloatHarness {
     if (beforeSeq !== undefined) request['beforeSeq'] = beforeSeq
     const page = await this.#controller.page(request, signal)
     const records = Array.isArray(page?.records) ? page.records : []
-    return { records, hasMore: page?.hasMore === true, cursor: oldestSeq(records) }
+    return await this.#completeTurnPage(sessionId, throughSeq, {
+      records, hasMore: page?.hasMore === true, cursor: oldestSeq(records),
+    }, signal)
+  }
+
+  /** Extend a capped page's leading partial turn to its actual start, without skipping records. */
+  async #completeTurnPage(
+    sessionId: string,
+    throughSeq: number,
+    page: HistoryPageView,
+    signal: AbortSignal,
+  ): Promise<HistoryPageView> {
+    let records = page.records
+    let hasMore = page.hasMore
+    while (hasMore && records.length > 0 && recordEventType(records[0]) !== 'turn/start') {
+      const beforeSeq = oldestSeq(records)
+      if (beforeSeq === null) throw new HarnessError('protocol-violation', 'history page has no backwards cursor')
+      const older = await this.#controller.page({
+        address: { kind: 'session', sessionId }, throughSeq, beforeSeq,
+        maxMessages: PAGE_MAX_MESSAGES, turnWindow: { ...PAGE_TURN_WINDOW },
+      }, signal)
+      signal.throwIfAborted()
+      const prefix: readonly unknown[] = Array.isArray(older?.records) ? older.records : []
+      const first = oldestSeq(prefix)
+      if (first === null || first >= beforeSeq) {
+        throw new HarnessError('protocol-violation', 'history did not advance towards the turn start')
+      }
+      let start = -1
+      for (let index = prefix.length - 1; index >= 0; index--) {
+        if (recordEventType(prefix[index]) === 'turn/start') { start = index; break }
+      }
+      records = [...prefix.slice(Math.max(0, start)), ...records]
+      hasMore = start > 0 || older?.hasMore === true
+    }
+    return { records, hasMore, cursor: oldestSeq(records) }
   }
 
   /** {@inheritDoc QuorfloatHarness.prompt} */
@@ -1056,7 +1072,8 @@ class CordisHarness implements QuorfloatHarness {
     const request = {
       address: { kind: 'session', sessionId },
       assistantStream: true,
-      maxMessages: 50,
+      maxMessages: PAGE_MAX_MESSAGES,
+      turnWindow: { ...PAGE_TURN_WINDOW },
     }
     const iterator = this.#controller.follow(request, abort.signal)
     let closed = false
@@ -1066,8 +1083,15 @@ class CordisHarness implements QuorfloatHarness {
       try {
         for await (const frame of iterator) {
           if (closed) break
-          const projected = projectFrame(frame)
+          let projected = projectFrame(frame)
           if (projected === undefined) continue
+          if (projected.type === 'snapshot') {
+            const page = await this.#completeTurnPage(sessionId, projected.cursor, {
+              records: projected.records, hasMore: projected.hasMore, cursor: oldestSeq(projected.records),
+            }, abort.signal)
+            projected = { ...projected, records: page.records, hasMore: page.hasMore }
+          }
+          if (closed) break
           try {
             onFrame(projected)
           } catch (error) {

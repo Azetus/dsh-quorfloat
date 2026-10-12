@@ -375,7 +375,7 @@ enum SettingRequest {
 }
 
 /// One page request waiting for its answer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 struct PendingHistory {
     /// The JSON-RPC id the answer must carry.
     id: i64,
@@ -385,6 +385,10 @@ struct PendingHistory {
     /// dropped rather than folded into the wrong one: the ids cannot collide, but the
     /// window can have been replaced while the answer was in flight.
     session_id: String,
+    /// The exclusive cursor also carried by every part, so unrelated pages cannot mix.
+    before_seq: i64,
+    /// An oversized whole-turn page, assembled before its response acknowledgment.
+    assembly: Option<Assembly>,
     /// When the request was sent, so a lost answer does not leave the control busy forever.
     sent_at: i64,
 }
@@ -706,6 +710,11 @@ impl Session {
                 Some(params) => self.end_snapshot(params, sink),
                 None => sink.log("session/snapshot/end carried no params"),
             },
+            "session/history/begin" | "session/history/part" | "session/history/end" => {
+                if let Some(params) = params.as_ref() {
+                    self.take_history_part(method, params, sink);
+                }
+            }
             "session/event" => {
                 if let Some(params) = params.as_ref() {
                     self.transcript.apply_event(params);
@@ -1407,10 +1416,12 @@ impl Session {
         match &outgoing {
             // The page request has its own ledger: its answer is a page, not a follow
             // decision, and `Follow::resolve` would read it as a broken list answer.
-            Outgoing::History { session_id, .. } => {
+            Outgoing::History { session_id, before_seq } => {
                 self.history_request = Some(PendingHistory {
                     id,
                     session_id: session_id.clone(),
+                    before_seq: *before_seq,
+                    assembly: None,
                     sent_at: now,
                 });
             }
@@ -1451,6 +1462,30 @@ impl Session {
         self.history_request.is_some()
     }
 
+    /// Collect transport parts without exposing a partial turn to the frontend.
+    fn take_history_part(&mut self, method: &str, params: &Value, sink: &mut dyn FrameSink) {
+        let Some(pending) = self.history_request.as_mut() else { return };
+        if params.get("sessionId").and_then(Value::as_str) != Some(pending.session_id.as_str())
+            || params.get("beforeSeq").and_then(Value::as_i64) != Some(pending.before_seq) {
+            return;
+        }
+        if method == "session/history/begin" {
+            pending.assembly = Assembly::begin(params, rpc::now_millis());
+            return;
+        }
+        let Some(assembly) = pending.assembly.as_mut() else { return };
+        if !assembly.accepts(params) { return; }
+        if method == "session/history/part" {
+            if assembly.part(params) == Part::Refused {
+                pending.assembly = None;
+                sink.mark("older page dropped: a transport part was refused");
+            }
+        } else if !assembly.is_complete() {
+            pending.assembly = None;
+            sink.mark("older page dropped: a transport part is missing");
+        }
+    }
+
     /// Fold the answer to a page request, or report why it was not folded.
     ///
     /// @param pending - the request the answer belongs to, taken by the caller.
@@ -1464,7 +1499,21 @@ impl Session {
             return;
         }
         match outcome {
-            Ok(page) => sink.mark(&self.transcript.prepend_page(&page).describe()),
+            Ok(page) => {
+                let assembled;
+                let page = if page.get("chunked").and_then(Value::as_bool) == Some(true) {
+                    let identity = json!({ "sessionId": pending.session_id, "generation": page.get("generation") });
+                    assembled = pending.assembly
+                        .filter(|assembly| assembly.accepts(&identity))
+                        .and_then(|assembly| assembly.fold_params());
+                    let Some(page) = assembled.as_ref() else {
+                        sink.mark("older page dropped: incomplete transport assembly");
+                        return;
+                    };
+                    page
+                } else { &page };
+                sink.mark(&self.transcript.prepend_page(page).describe());
+            },
             Err(error) => sink.mark(&format!(
                 "older page refused: [{code}] {message}",
                 code = error.code,

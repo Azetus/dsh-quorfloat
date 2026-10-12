@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { api } from '../../api'
 import { setBottomPin } from '../../logic/bottom-pin'
-import { useVirtualizer } from '@tanstack/react-virtual'
+import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual'
 import type { Snapshot } from '../../logic/state'
 import { foldTurns, type Turn as TurnModel } from '../../logic/turns'
 import { useT } from '../../hooks/useI18n'
@@ -39,6 +39,10 @@ type Row =
  * the items container; and the scroll position that offset was seen at.
  */
 interface EarlierAnchor {
+  /** The transcript this line belongs to; a reset must not reuse it. */
+  readonly sessionId: string | null
+  /** A turn's stable key survives a prepend and unrelated turns appended at the tail. */
+  readonly key: string
   /** Which block the line belongs to. */
   readonly block: 'loose' | 'turn'
   /** Its index within that block. */
@@ -80,6 +84,8 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
   const follow = useRef(true)
   // The same fact as state, because the way back down is a control the reader has to see.
   const [following, setFollowing] = useState(true)
+  // Start hidden until the tail pin has established the first reading position.
+  const [atTop, setAtTop] = useState(false)
   /** The box height at the last pin: what a change in it has to be taken out of. */
   const lastHeight = useRef<number | null>(null)
   /** The line a pending older page is anchored to, if one is being held. */
@@ -117,12 +123,29 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
     [],
   )
   const getItemKey = useCallback((index: number) => latest.current[index]?.key ?? index, [])
+  const retainedIndex = useRef(-1)
+  const pending = anchor.current
+  retainedIndex.current = pending === null ? -1 : pending.block === 'loose'
+    ? pending.local + (view.loose.length - pending.loose)
+    : rows.findIndex(row => row.kind === 'turn' && row.key === pending.key)
+  const rangeExtractor = useCallback((range: Parameters<typeof defaultRangeExtractor>[0]) => {
+    const indexes = defaultRangeExtractor(range)
+    const index = retainedIndex.current
+    // The retained row must stay mounted while a prepend changes the visible range,
+    // so its content inset can be read even before the compensated scroll takes effect.
+    if (index >= 0 && index < range.count && !indexes.includes(index)) {
+      indexes.push(index)
+      indexes.sort((left, right) => left - right)
+    }
+    return indexes
+  }, [])
 
   const virtual = useVirtualizer({
     count: rows.length,
     getScrollElement,
     estimateSize,
     getItemKey,
+    rangeExtractor,
     overscan: OVERSCAN,
     // Where the reader is looking when the panel first paints. The scroll position is set
     // in the layout effect below, but the *range* is computed before that, from this
@@ -132,6 +155,13 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
     // estimate at this point — the range clamps to the last row either way.
     initialOffset: () => (follow.current ? Number.MAX_SAFE_INTEGER : 0),
   })
+
+  // While a page's line is retained, its offset delta owns compensation. Letting the
+  // virtualizer also compensate measured rows would move the reader twice and make its
+  // writes look like reader gestures. Outside that gesture, keep the library's default.
+  virtual.shouldAdjustScrollPositionOnItemSizeChange = anchor.current === null
+    ? undefined
+    : () => false
 
   useLayoutEffect(() => {
     const scroll = scrollRef.current
@@ -151,53 +181,25 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
     const scroll = scrollRef.current
     if (scroll === null) return
     const items = virtual.getVirtualItems()
-    const item = items.find(candidate => candidate.start + candidate.size > scroll.scrollTop) ?? items[0]
+    const container = scroll.querySelector<HTMLElement>('.q-thread-items')
+    const origin = container === null ? 0
+      : container.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop
+    const item = items.find(candidate => candidate.start + candidate.size > scroll.scrollTop - origin) ?? items[0]
     if (item === undefined) return
     const loose = item.index < view.loose.length
+    const turn = virtual.elementsCache.get(item.key)?.querySelector<HTMLElement>('.q-turn')
+    const inset = turn === null || turn === undefined ? 0 : parseFloat(getComputedStyle(turn).paddingTop)
     anchor.current = {
+      sessionId: state.transcript.sessionId,
+      key: rows[item.index]!.key,
       block: loose ? 'loose' : 'turn',
       local: loose ? item.index : item.index - view.loose.length,
-      start: item.start,
+      start: item.start + inset,
       scrollTop: scroll.scrollTop,
       loose: view.loose.length,
       turns: view.turns.length,
     }
   }
-
-  // Hold the retained line still while older content lands above it.
-  //
-  // The compensation is the row's own offset delta — the measured height of everything the page
-  // put above it — rather than the content height delta: a streaming answer at the tail grows
-  // the content at the same moment, and taking that out of the offset would move the reader by
-  // exactly the tail's growth. Runs after every commit, because the offsets it reads are the
-  // virtualizer's measurements and they settle over a few commits.
-  useLayoutEffect(() => {
-    const pending = anchor.current
-    const scroll = scrollRef.current
-    if (pending === null || scroll === null) return
-    // A window that got smaller is not the same conversation (a switch, or a reset): the
-    // retained line no longer means anything, and holding it would drag the reader somewhere
-    // arbitrary.
-    if (view.loose.length < pending.loose || view.turns.length < pending.turns) {
-      anchor.current = null
-      return
-    }
-    const index = pending.block === 'loose'
-      ? pending.local + (view.loose.length - pending.loose)
-      : view.loose.length + pending.local + (view.turns.length - pending.turns)
-    const offset = virtual.getOffsetForIndex(index)?.[0]
-    if (offset === undefined) return
-    const target = pending.scrollTop + (offset - pending.start)
-    if (Math.abs(scroll.scrollTop - target) >= 0.5) {
-      written.current = target
-      scroll.scrollTop = target
-    }
-    // The page has landed and its height is compensated, so the gesture is over: the line is
-    // released, and everything after this behaves like ordinary reading (the reader is no
-    // longer following the tail — asking for older content ends that — so nothing moves them).
-    const grew = view.loose.length > pending.loose || view.turns.length > pending.turns
-    if (grew && !loadingEarlier) anchor.current = null
-  })
 
   // Re-read the mounted rows' sizes after every commit.
   //
@@ -214,6 +216,57 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
     for (const row of thread.querySelectorAll<HTMLElement>('.q-thread-item')) {
       virtual.measureElement(row)
     }
+  })
+
+  // Hold the retained line still while older content lands above it.
+  //
+  // The compensation is the row's own offset delta — the measured height of everything the page
+  // put above it — rather than the content height delta: a streaming answer at the tail grows
+  // the content at the same moment, and taking that out of the offset would move the reader by
+  // exactly the tail's growth. Runs after every commit, because the offsets it reads are the
+  // virtualizer's measurements and they settle over a few commits.
+  useLayoutEffect(() => {
+    const pending = anchor.current
+    const scroll = scrollRef.current
+    if (pending === null || scroll === null) return
+    // A window that got smaller is not the same conversation (a switch, or a reset): the
+    // retained line no longer means anything, and holding it would drag the reader somewhere
+    // arbitrary.
+    if (state.transcript.sessionId !== pending.sessionId ||
+        view.loose.length < pending.loose || view.turns.length < pending.turns) {
+      anchor.current = null
+      return
+    }
+    const index = pending.block === 'loose'
+      ? pending.local + (view.loose.length - pending.loose)
+      : rows.findIndex(row => row.kind === 'turn' && row.key === pending.key)
+    if (index < 0) {
+      anchor.current = null
+      return
+    }
+    // Refresh the measurements after the mounted rows were read. Alignment helpers
+    // return a clamped scroll target (and may align the row's end), not its origin.
+    virtual.getTotalSize()
+    const item = virtual.measurementsCache[index]
+    if (item === undefined) return
+    // A formerly first turn gains separator padding after a prepend. Retain its content
+    // origin, not its outer box, or the question and every line below it move by that gap.
+    const turn = virtual.elementsCache.get(item.key)?.querySelector<HTMLElement>('.q-turn')
+    const inset = turn === null || turn === undefined ? 0 : parseFloat(getComputedStyle(turn).paddingTop)
+    const target = pending.scrollTop + (item.start + inset - pending.start)
+    if (Math.abs(scroll.scrollTop - target) >= 0.5) {
+      scroll.scrollTop = target
+      written.current = scroll.scrollTop
+    }
+    // Keep the line through later estimate-to-measurement corrections. A completed request
+    // does not mean all virtual row sizes have settled; a reader gesture releases it.
+  })
+
+  // Read after tail pinning, page compensation, and row measurement: those can move the
+  // viewport without a reader gesture, including a short transcript that never scrolls.
+  useLayoutEffect(() => {
+    const scroll = scrollRef.current
+    if (scroll !== null) setAtTop(scroll.scrollTop <= 1)
   })
 
   // The other half of the promise: whoever moves the reader (today, the composer growing as
@@ -252,6 +305,12 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
       ref={scrollRef}
       onScroll={event => {
         const el = event.currentTarget
+        setAtTop(el.scrollTop <= 1)
+        const mine = written.current
+        // Compensation is not a gesture to resume following the tail, even if the
+        // browser temporarily clamps the write at the bottom of a short transcript.
+        if (mine !== null && Math.abs(el.scrollTop - mine) <= 1) return
+        written.current = null
         const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 4
         follow.current = atBottom
         // Only on a change: a scroll event per keystroke would otherwise re-render the thread.
@@ -260,8 +319,7 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
         // way that is not a reason to drop the retained line — the page will land after the
         // move, and it would undo it — so the anchor moves with them; with nothing in flight
         // it is released, because holding it would fight the reader.
-        const mine = written.current
-        if (anchor.current !== null && (mine === null || Math.abs(el.scrollTop - mine) > 1)) {
+        if (anchor.current !== null) {
           if (loadingEarlier && !atBottom) captureAnchor()
           else anchor.current = null
         }
@@ -271,7 +329,7 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
           floats over the first lines without being part of the content the retained offset is
           measured against. A control that took up height would move the reader by its own
           height every time it appeared or left. */}
-      {earlier && (
+      {earlier && atTop && (
         <div className="q-earlier">
           <button
             type="button"
@@ -331,6 +389,7 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
         <JumpToBottom
           onPress={() => {
             const scroll = scrollRef.current
+            anchor.current = null
             follow.current = true
             setFollowing(true)
             if (scroll === null) return

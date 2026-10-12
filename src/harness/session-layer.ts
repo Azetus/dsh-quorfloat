@@ -776,13 +776,13 @@ export class SessionLayer {
    *
    * @param sessionId - durable session identity.
    * @param beforeSeq - exclusive backwards cursor within the bound.
-   * @returns the page, bounded to one frame, plus the backwards cursor for the page below it
-   *   (`cursor`, the Harness's own derivation — see `oldestSeq` in `harness/adapter.ts`).
+   * @returns a whole-turn page, or a small acknowledgment after its bounded parts; the
+   *   backwards cursor is the oldest record of the assembled page.
    */
   async readHistory(
     sessionId: string,
     beforeSeq?: number,
-  ): Promise<{ records: readonly unknown[]; hasMore: boolean; cursor: number | null }> {
+  ): Promise<HistoryPageView & { chunked?: true; generation?: number }> {
     const subscription = this.#follows.get(sessionId)
     let throughSeq = subscription !== undefined && subscription.cursor >= 0 ? subscription.cursor : undefined
     if (throughSeq === undefined) throughSeq = await this.#deps.harness.cursor(sessionId)
@@ -790,7 +790,26 @@ export class SessionLayer {
       this.#deps.log.debug('history requested for a session with no events', { sessionId })
       return { records: [], hasMore: false, cursor: null }
     }
-    return boundedHistoryPage(await this.#deps.harness.pageHistory(sessionId, throughSeq, beforeSeq))
+    const page = await this.#deps.harness.pageHistory(sessionId, throughSeq, beforeSeq)
+    // Per-record clipping still applies; page length is bounded by transport parts,
+    // not by cutting away the beginning of an otherwise indivisible turn.
+    const result = boundedHistoryPage(page, Number.POSITIVE_INFINITY)
+    const records = result.records
+    if (historyPageBytes(records) <= HISTORY_PAGE_BUDGET_BYTES) return result
+    // A turn is indivisible. Split transport frames instead of dropping its earlier records.
+    const generation = ++this.#generation
+    const context = { sessionId, generation }
+    const parts = planSnapshotParts(records, context)
+    await this.#deps.notify('session/history/begin', {
+      ...context, beforeSeq, cursor: page.cursor, hasMore: page.hasMore, parts: parts.length,
+    })
+    for (const part of parts) {
+      await this.#deps.notify('session/history/part', {
+        ...context, beforeSeq, index: part.index, records: part.records,
+      })
+    }
+    await this.#deps.notify('session/history/end', { ...context, beforeSeq, parts: parts.length })
+    return { records: [], hasMore: page.hasMore, cursor: page.cursor, chunked: true, generation }
   }
 
   /**
@@ -1011,7 +1030,8 @@ export class SessionLayer {
     state: FollowState,
   ): Promise<void> {
     const context = { sessionId, generation }
-    const parts = planSnapshotParts(frame.records, context)
+    const records = frame.records.map(record => clampHistoryRecord(record).record)
+    const parts = planSnapshotParts(records, context)
     for (const part of parts) {
       if (part.bytes > SNAPSHOT_PART_BUDGET_BYTES) {
         // Not fatal — the part still travels — but the one case the budget cannot
