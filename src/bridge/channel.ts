@@ -231,7 +231,22 @@ export class QuorfloatChannel {
    */
   async close(graceMs: number): Promise<{ exited: boolean; code: number | null; signal: NodeJS.Signals | null; escalated: boolean }> {
     if (this.#state === 'closed') {
-      return { exited: true, code: this.#exitResult?.code ?? null, signal: this.#exitResult?.signal ?? null, escalated: false }
+      // A failed pipe closes the transport before the process necessarily exits.
+      // Do not abandon a live child merely because it can no longer answer RPC.
+      const alreadyExited = this.#exitResult !== undefined || this.#child.exitCode !== null || this.#child.signalCode !== null
+      if (!alreadyExited) {
+        this.#child.kill('SIGTERM')
+        if (!(await this.#waitForExit(graceMs))) {
+          this.#child.kill('SIGKILL')
+          await this.#waitForExit(graceMs)
+        }
+      }
+      return {
+        exited: this.#exitResult !== undefined || this.#child.exitCode !== null || this.#child.signalCode !== null,
+        code: this.#exitResult?.code ?? this.#child.exitCode,
+        signal: this.#exitResult?.signal ?? this.#child.signalCode,
+        escalated: !alreadyExited,
+      }
     }
     if (this.#state === 'created') {
       // Never started: nothing was written, so a signal is the only option.

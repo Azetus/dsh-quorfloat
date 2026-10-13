@@ -42,7 +42,7 @@
     "build:frontend": "npm --prefix quorfloat/frontend run build",
     "build:sidecar": "node scripts/build-sidecar.mjs",
     "typecheck": "node scripts/tsc.mjs -p tsconfig.json --noEmit",
-    "test": "npm run build:plugin --silent && node --test --test-timeout=30000 \"tests/*.test.mjs\"",
+    "test": "npm run build:local --silent && node --test --test-timeout=30000 \"tests/*.test.mjs\"",
     "test:only": "node --test --test-timeout=30000 \"tests/*.test.mjs\"",
     "test:frontend": "npm --prefix quorfloat/frontend test",
     "contract:extract": "node tests/fixtures/extract-harness-contract.mjs",

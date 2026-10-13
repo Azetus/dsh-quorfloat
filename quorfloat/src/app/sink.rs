@@ -122,10 +122,6 @@ pub struct Reader {
     /// Records why the session ended, so the window closing and the host closing
     /// the channel do not have to be told apart afterwards.
     outcome: Arc<Mutex<Option<SessionExit>>>,
-    /// Tells the frontend that the state changed. Provided by the shell: the reader
-    /// cannot reach the webview, so it emits the shell's event, which the frontend
-    /// listens to and re-renders from.
-    nudge: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl Reader {
@@ -135,16 +131,14 @@ impl Reader {
     /// @param sink - where answers go.
     /// @param wake - how to notify the dispatcher.
     /// @param outcome - where to record why the session ended.
-    /// @param nudge - how to tell the frontend the state changed.
     #[must_use]
     pub fn new(
         session: Arc<Mutex<Session>>,
         sink: Arc<SharedSink>,
         wake: Sender<Wake>,
         outcome: Arc<Mutex<Option<SessionExit>>>,
-        nudge: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
-        Self { session, sink, wake, outcome, nudge }
+        Self { session, sink, wake, outcome }
     }
 
     /// Read frames until the stream ends, answering each one.
@@ -211,16 +205,14 @@ impl Reader {
         self.notify(Wake::Exit(exit));
     }
 
-    /// Tell the dispatcher something happened, and tell the frontend to refresh.
+    /// Tell the dispatcher something happened; it also refreshes the frontend.
     ///
     /// A send failure means the shell is gone, which ends the process anyway;
     /// there is nothing to recover.
     fn notify(&self, wake: Wake) {
         let _ = self.wake.send(wake);
-        // Without this the frontend would not refresh while the window is hidden —
-        // and hidden is its normal state, so the configuration the host sends would
-        // never be reflected in what the user eventually sees.
-        (self.nudge)();
+        // The protocol thread never enters the webview: UI startup or a slow
+        // refresh must not delay the next ping, notification or shutdown.
     }
 }
 

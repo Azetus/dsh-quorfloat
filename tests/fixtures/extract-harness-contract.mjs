@@ -109,6 +109,9 @@ function main() {
       process.exit(1)
     }
     mkdirSync(OUT_DIR, { recursive: true })
+    // This directory owns the generated ES module on every platform, regardless
+    // of the package type used by the surrounding developer toolchain.
+    writeFileSync(join(OUT_DIR, 'package.json'), JSON.stringify({ type: 'module' }) + '\n')
     const outFile = join(OUT_DIR, 'typert.host.js')
     writeFileSync(outFile, source)
     const invocations = [...source.matchAll(/id: '([^']+)#([^']+)'/g)].map(match => `${match[1]}#${match[2]}`)

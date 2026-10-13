@@ -129,7 +129,10 @@ export class QuorfloatSupervisor {
   #restartExhausted = false
   #lastError: { code: string; message: string } | undefined
   #heartbeatTimer: NodeJS.Timeout | undefined
+  #heartbeatChannel: QuorfloatChannel | undefined
   #restartTimer: NodeJS.Timeout | undefined
+  #stopPromise: ReturnType<QuorfloatChannel['close']> | undefined
+  #lifecycleRevision = 0
   #generation = 0
   /** Peer stderr lines already forwarded for the current channel. */
   #stderrDelivered = 0
@@ -181,9 +184,10 @@ export class QuorfloatSupervisor {
    * @returns the snapshot after the spawn attempt was made.
    */
   async start(): Promise<SupervisorSnapshot> {
-    if (this.#state === 'starting' || this.#state === 'running' || this.#state === 'degraded') {
+    if (this.#state === 'starting' || this.#state === 'running' || this.#state === 'degraded' || this.#state === 'stopping') {
       return this.snapshot()
     }
+    this.#lifecycleRevision += 1
     this.#stopping = false
     this.#restartExhausted = false
     const config = this.#deps.config()
@@ -214,15 +218,24 @@ export class QuorfloatSupervisor {
    * @returns how the process ended; `exited: true` means it is gone.
    */
   async stop(): Promise<{ exited: boolean; code: number | null; signal: NodeJS.Signals | null; escalated: boolean }> {
+    this.#lifecycleRevision += 1
     this.#stopping = true
     this.#clearTimers()
+    if (this.#stopPromise !== undefined) return await this.#stopPromise
     const channel = this.#channel
     if (channel === undefined) {
       this.#transition('stopped', undefined)
       return { exited: true, code: null, signal: null, escalated: false }
     }
     this.#transition('stopping', undefined)
-    const result = await channel.close(this.#deps.config().shutdownGraceMs)
+    const closing = channel.close(this.#deps.config().shutdownGraceMs)
+    this.#stopPromise = closing
+    let result: Awaited<typeof closing>
+    try {
+      result = await closing
+    } finally {
+      this.#stopPromise = undefined
+    }
     this.#channel = undefined
     this.#router = undefined
     this.#child = undefined
@@ -526,15 +539,18 @@ export class QuorfloatSupervisor {
   async #beat(generation: number): Promise<void> {
     if (generation !== this.#generation) return
     const channel = this.#channel
-    if (channel === undefined || channel.state !== 'started') return
+    if (channel === undefined || channel.state !== 'started' || this.#stopping || this.#heartbeatChannel === channel) return
+    this.#heartbeatChannel = channel
     try {
       await channel.notify('host/heartbeat', { t: Date.now() })
       // `ping` is deliberately a request: a notification would only prove that
       // the pipe accepts bytes, not that the peer is still running its loop.
       await channel.request('ping', {}, Math.max(1000, this.#deps.config().heartbeatMs))
+      if (generation !== this.#generation || channel !== this.#channel || this.#stopping) return
       this.#consecutiveMissed = 0
       return
     } catch (error) {
+      if (generation !== this.#generation || channel !== this.#channel || this.#stopping) return
       this.#consecutiveMissed += 1
       this.#deps.log.warn('quorfloat missed a heartbeat', {
         missed: this.#consecutiveMissed,
@@ -549,6 +565,8 @@ export class QuorfloatSupervisor {
           }),
         )
       }
+    } finally {
+      if (this.#heartbeatChannel === channel) this.#heartbeatChannel = undefined
     }
   }
 
@@ -581,9 +599,13 @@ export class QuorfloatSupervisor {
    * @param reason - the failure that triggered the restart.
    */
   async #restartAfterFailure(generation: number, reason: ChannelError): Promise<void> {
-    if (generation !== this.#generation) return
+    if (generation !== this.#generation || this.#stopping || this.#restartTimer !== undefined) return
     this.#lastError = { code: reason.code, message: reason.message }
-    await this.stop()
+    const closing = this.stop()
+    const revision = this.#lifecycleRevision
+    await closing
+    // A manual stop while shutdown was pending cancels the automatic restart.
+    if (generation !== this.#generation || revision !== this.#lifecycleRevision) return
     // `stop()` marks the supervisor as deliberately stopping, which suppresses
     // the exit handler; the retry path has to clear that flag before it asks for
     // a new process, or the restart would be treated as an unwanted one.

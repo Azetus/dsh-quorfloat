@@ -252,6 +252,35 @@ fn run() -> Result<SessionExit, String> {
     // closing the channel are different events and the exit code depends on which
     // happened, so it is recorded rather than inferred afterwards.
     let outcome: Arc<Mutex<Option<SessionExit>>> = Arc::new(Mutex::new(None));
+    let event_loop_started = Arc::new(AtomicBool::new(false));
+
+    // `hello` starts the host's heartbeat budget. Answer stdin immediately,
+    // before WebView2 or WKWebView initialisation can consume that budget.
+    let reader = Reader::new(
+        Arc::clone(&session),
+        Arc::clone(&sink),
+        wake_tx.clone(),
+        Arc::clone(&outcome),
+    );
+    let reader_session = Arc::clone(&session);
+    let reader_sink = Arc::clone(&sink);
+    let reader_marker = marker.clone();
+    let reader_outcome = Arc::clone(&outcome);
+    let reader_event_loop = Arc::clone(&event_loop_started);
+    std::thread::Builder::new()
+        .name("quorfloat-stdin".to_owned())
+        .spawn(move || {
+            reader.run();
+            if !reader_event_loop.load(Ordering::Acquire) {
+                // No event loop can consume Wake::Exit during shell creation.
+                // The reader has already flushed the shutdown response; exit
+                // cleanly rather than waiting for a window the host no longer wants.
+                let exit = lock(&reader_outcome).clone().unwrap_or(SessionExit::PeerClosed);
+                record_end(&reader_session, &reader_sink, &reader_marker, &exit);
+                std::process::exit(0);
+            }
+        })
+        .map_err(|error| format!("could not start the stdin reader: {error}"))?;
 
     let shell_session = Arc::clone(&session);
     let shell_sink = Arc::clone(&sink);
@@ -352,18 +381,6 @@ fn run() -> Result<SessionExit, String> {
             // and the host's commands: one thread decides what the window does.
             let tray_wake = wake_tx.clone();
 
-            let reader = Reader::new(
-                Arc::clone(&shell_session),
-                Arc::clone(&shell_sink),
-                wake_tx.clone(),
-                Arc::clone(&shell_outcome),
-                emit.clone(),
-            );
-            std::thread::Builder::new()
-                .name("quorfloat-stdin".to_owned())
-                .spawn(move || reader.run())
-                .map_err(|error| format!("could not start the stdin reader: {error}"))?;
-
             // The tray is built after the dispatcher exists (it is what answers the menu), so
             // it needs its own handles: the dispatcher takes ownership below.
             let tray_handle = handle.clone();
@@ -434,6 +451,7 @@ fn run() -> Result<SessionExit, String> {
         .build(tauri::generate_context!())
         .map_err(|error| format!("could not build the shell: {error}"))?;
 
+    event_loop_started.store(true, Ordering::Release);
     app.run(|_, _| {});
     // The dispatcher exits the process with `AppHandle::exit` once the session ends;
     // reaching here means the event loop stopped without a recorded exit.

@@ -22,17 +22,14 @@
  *   node scripts/build-sidecar.mjs --help
  */
 
-import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { buildSidecar, hostTriple } from './cargo.mjs'
+import { runNpm } from './release-shared.mjs'
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
-
-/** Whether `npm` needs a shell to be resolved (it does on Windows). */
-const NEEDS_SHELL = process.platform === 'win32'
 
 /** Parse the options this script owns. */
 function parseArgs(argv) {
@@ -70,20 +67,6 @@ assembles bundles around it.
 `)
 }
 
-/**
- * Run a command in the checkout, inheriting stdio so its output is visible.
- *
- * The shell is enabled on Windows only, because `npm` is a `.cmd` shim there and
- * `spawnSync` does not resolve it without one. Everywhere else it stays off, so a
- * path containing a space or a shell metacharacter cannot be re-parsed.
- *
- * @returns true when the command reported success.
- */
-function run(command, args) {
-  const result = spawnSync(command, args, { cwd: ROOT, stdio: 'inherit', shell: NEEDS_SHELL })
-  return result.status === 0
-}
-
 function main() {
   const options = parseArgs(process.argv.slice(2))
   if (options.help) {
@@ -93,9 +76,7 @@ function main() {
   const profile = options.release ? 'release' : 'debug'
 
   process.stdout.write('build:sidecar: npm run build:frontend (cargo embeds the result in the sidecar)\n')
-  if (!run('npm', ['run', 'build:frontend'])) {
-    throw new Error('the frontend build failed; run `npm run frontend:install` if its dependencies are missing')
-  }
+  runNpm(['run', 'build:frontend'])
   const dist = join(ROOT, 'quorfloat', 'frontend', 'dist', 'index.html')
   if (!existsSync(dist)) throw new Error(`the frontend build produced no ${relative(ROOT, dist)}`)
 
