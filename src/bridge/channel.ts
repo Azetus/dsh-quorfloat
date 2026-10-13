@@ -70,6 +70,7 @@ export class QuorfloatChannel {
   readonly #decoder = new FrameDecoder()
   readonly #pending = new Map<RequestId, PendingRequest>()
   readonly #handlers = new Map<string, RequestHandler>()
+  readonly #writesClosed = new AbortController()
   #nextId = 1
   #state: ChannelState = 'created'
   #closeReason: ChannelError | undefined
@@ -149,6 +150,9 @@ export class QuorfloatChannel {
     this.#child.stdout.on('error', (error: Error) => {
       this.#fail(new ChannelError('channel-closed', `stdout error: ${error.message}`))
     })
+    this.#child.stdin.on('error', (error: Error) => {
+      this.#fail(new ChannelError('channel-closed', `stdin error: ${error.message}`))
+    })
 
     // stderr is diagnostics only. It is forwarded line by line so quorfloat's
     // logs stay readable in the Harness log without ever touching stdout.
@@ -185,6 +189,7 @@ export class QuorfloatChannel {
     const id = this.#nextId++
     const message = buildRequest(id, method, params)
     const budget = timeoutMs ?? this.#options.requestTimeoutMs
+    const writeCancelled = new AbortController()
     const answer = new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.#pending.delete(id)
@@ -196,17 +201,19 @@ export class QuorfloatChannel {
       this.#pending.set(id, { method, resolve, reject, timer })
     })
     try {
-      await this.#write(message)
-    } catch (error) {
+      // Observe both promises immediately: a reply can time out or the peer can
+      // exit while stdin is still waiting for drain.
+      const [result] = await Promise.all([answer, this.#write(message, budget, writeCancelled.signal)])
+      return result as R
+    } finally {
       const pending = this.#pending.get(id)
       if (pending !== undefined) {
         clearTimeout(pending.timer)
         this.#pending.delete(id)
       }
-      throw error
+      // A failed reply must release its write wait and listeners as well.
+      writeCancelled.abort()
     }
-    const result = await answer
-    return result as R
   }
 
   /**
@@ -316,7 +323,11 @@ export class QuorfloatChannel {
    * @param message - the message to encode and send.
    * @throws {ChannelError} when the channel is unusable or the peer is too far behind.
    */
-  async #write(message: RpcMessage): Promise<void> {
+  async #write(
+    message: RpcMessage,
+    timeoutMs = this.#options.requestTimeoutMs,
+    signal?: AbortSignal,
+  ): Promise<void> {
     if (this.#state === 'closed' || this.#child.stdin.destroyed) {
       throw new ChannelError('channel-closed', 'cannot write: channel is closed')
     }
@@ -333,20 +344,45 @@ export class QuorfloatChannel {
     // 'drain' then keeps memory bounded instead of buffering without limit.
     if (!this.#child.stdin.write(frame)) {
       await new Promise<void>((resolve, reject) => {
-        const onDrain = (): void => {
+        let settled = false
+        const finish = (error?: ChannelError): void => {
+          if (settled) return
+          settled = true
           cleanup()
-          resolve()
+          if (error === undefined) resolve()
+          else reject(error)
+        }
+        const onDrain = (): void => {
+          finish()
         }
         const onError = (error: Error): void => {
-          cleanup()
-          reject(new ChannelError('channel-closed', `stdin error: ${error.message}`))
+          finish(new ChannelError('channel-closed', `stdin error: ${error.message}`))
+        }
+        const onClose = (): void => {
+          finish(this.#closeReason ?? new ChannelError('channel-closed', 'stdin closed while writing a frame'))
+        }
+        const onAbort = (): void => {
+          finish(new ChannelError('channel-closed', 'frame write cancelled'))
         }
         const cleanup = (): void => {
+          clearTimeout(timer)
           this.#child.stdin.off('drain', onDrain)
           this.#child.stdin.off('error', onError)
+          this.#child.stdin.off('close', onClose)
+          this.#writesClosed.signal.removeEventListener('abort', onClose)
+          signal?.removeEventListener('abort', onAbort)
         }
+        const timer = setTimeout(() => {
+          finish(new ChannelError('request-timeout', `stdin did not drain within ${timeoutMs}ms`, { budget: timeoutMs }))
+        }, timeoutMs)
+        timer.unref?.()
         this.#child.stdin.once('drain', onDrain)
         this.#child.stdin.once('error', onError)
+        this.#child.stdin.once('close', onClose)
+        this.#writesClosed.signal.addEventListener('abort', onClose, { once: true })
+        signal?.addEventListener('abort', onAbort, { once: true })
+        if (this.#writesClosed.signal.aborted || this.#child.stdin.destroyed) onClose()
+        else if (signal?.aborted === true) onAbort()
       })
     }
   }
@@ -475,6 +511,7 @@ export class QuorfloatChannel {
       this.#pending.delete(id)
       pending.reject(reason)
     }
+    this.#writesClosed.abort()
     this.#options.onClosed?.(reason)
   }
 }
