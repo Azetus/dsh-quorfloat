@@ -35,10 +35,10 @@ npm 主包名为 **`dsh-quorfloat`**，只需安装这个主包，平台依赖�
 
 离线安装请下载当前版本对应操作系统的自包含 tgz，例如：
 
-- **macOS**：`dsh-quorfloat-0.1.3-darwin.tgz`，同时支持 Apple Silicon 和 Intel。
-- **Windows**：`dsh-quorfloat-0.1.3-win32.tgz`，选择适用于当前机器架构的发布包。
+- **macOS**：`dsh-quorfloat-0.1.4-darwin.tgz`，同时支持 Apple Silicon 和 Intel。
+- **Windows**：`dsh-quorfloat-0.1.4-win32.tgz`，选择适用于当前机器架构的发布包。
 
-下方示例使用 0.1.3；安装其他版本时替换文件名或版本号即可。
+下方示例使用 0.1.4；安装其他版本时替换文件名或版本号即可。
 
 ### 浏览器 WebUI
 
@@ -49,14 +49,14 @@ npm 主包名为 **`dsh-quorfloat`**，只需安装这个主包，平台依赖�
 使用本地 tgz 的**绝对路径**安装，无需解压。macOS 示例：
 
 ```bash
-dsh plugin --profile web add "/绝对路径/dsh-quorfloat-0.1.3-darwin.tgz"
+dsh plugin --profile web add "/绝对路径/dsh-quorfloat-0.1.4-darwin.tgz"
 dsh web
 ```
 
 Windows 示例：
 
 ```powershell
-dsh plugin --profile web add "C:/Downloads/dsh-quorfloat-0.1.3-win32.tgz"
+dsh plugin --profile web add "C:/Downloads/dsh-quorfloat-0.1.4-win32.tgz"
 dsh web
 ```
 
@@ -71,7 +71,7 @@ dsh plugin --profile web add dsh-quorfloat
 dsh web
 ```
 
-如需固定版本，使用 `dsh-quorfloat@0.1.3` 替换包名。
+如需固定版本，使用 `dsh-quorfloat@0.1.4` 替换包名。
 
 ### Harness 官方桌面版
 
@@ -80,13 +80,13 @@ dsh web
 #### 离线安装（tgz）
 
 1. 下载当前操作系统对应的自包含 tgz，无需解压。
-2. 在添加插件弹窗输入 tgz 的**绝对路径**，例如 macOS 的 `/绝对路径/dsh-quorfloat-0.1.3-darwin.tgz`，或 Windows 的 `C:/Downloads/dsh-quorfloat-0.1.3-win32.tgz`。
+2. 在添加插件弹窗输入 tgz 的**绝对路径**，例如 macOS 的 `/绝对路径/dsh-quorfloat-0.1.4-darwin.tgz`，或 Windows 的 `C:/Downloads/dsh-quorfloat-0.1.4-win32.tgz`。
 3. 点击安装；若出现启用提示，按提示启用插件。
 4. 完全退出并重新启动 Harness 桌面应用。
 
 #### npm 安装
 
-1. 点击左侧栏 “插件” -> "添加插件"，在添加插件弹窗输入 **`dsh-quorfloat`**，或指定版本 **`dsh-quorfloat@0.1.3`**。
+1. 点击左侧栏 “插件” -> "添加插件"，在添加插件弹窗输入 **`dsh-quorfloat`**，或指定版本 **`dsh-quorfloat@0.1.4`**。
 2. 点击安装；若出现启用提示，按提示启用插件。包管理器会自动安装当前平台的面板程序。
 3. 完全退出并重新启动 Harness 桌面应用。
 
@@ -149,8 +149,8 @@ npm run build
 
 | 平台 | bundle 目录 | 离线安装包 |
 |---|---|---|
-| macOS | `bundles/dsh-quorfloat-0.1.3-darwin/` | `bundles/dsh-quorfloat-0.1.3-darwin.tgz` |
-| Windows | `bundles/dsh-quorfloat-0.1.3-win32/` | `bundles/dsh-quorfloat-0.1.3-win32.tgz` |
+| macOS | `bundles/dsh-quorfloat-0.1.4-darwin/` | `bundles/dsh-quorfloat-0.1.4-darwin.tgz` |
+| Windows | `bundles/dsh-quorfloat-0.1.4-win32/` | `bundles/dsh-quorfloat-0.1.4-win32.tgz` |
 
 macOS 产物通过 `lipo` 合并为双架构二进制；Windows 离线包默认采用当前 Rust 工具链的宿主架构。使用新生成的 tgz，按上方安装方式安装后重启 Harness。
 

@@ -31,12 +31,13 @@ export function stageReadmeResources(directory, { npm = false } = {}) {
   if (!npm) return
 
   const repository = MANIFEST.repository.url.replace(/^git\+/u, '').replace(/\.git$/u, '')
-  const raw = `https://raw.githubusercontent.com${new URL(repository).pathname}/HEAD`
+  const ref = encodeURIComponent(process.env.GITHUB_SHA || 'HEAD')
+  const raw = `https://raw.githubusercontent.com${new URL(repository).pathname}/${ref}`
   for (const entry of ['README.md', 'README_EN.md']) {
     const path = join(directory, entry)
     const text = readFileSync(path, 'utf8')
       .replace(/\]\((README(?:_EN)?\.md)\)/gu,
-        (_match, file) => `](${repository}/blob/HEAD/${file})`)
+        (_match, file) => `](${repository}/blob/${ref}/${file})`)
       .replace(/(<img\b[^>]*\bsrc=")(assets\/[^"<>]+)(")/gu,
         (_match, prefix, file, suffix) => `${prefix}${raw}/${file}${suffix}`)
     writeFileSync(path, text)

@@ -26,6 +26,9 @@ Desktop.ini
 # scripts/release-npm.mjs 的产物：npm 发布包，按版本分目录
 /bundles/npm/
 
+# Downloaded workflow packages used by the publish job
+/.release-artifacts/
+
 # npm run toolchain
 .tooling/
 

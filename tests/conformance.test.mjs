@@ -25,10 +25,12 @@ import assert from 'node:assert/strict'
 import { existsSync } from 'node:fs'
 import { test } from 'node:test'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { loadModule, repoRoot } from './helpers.mjs'
 
-const CONTRACT = join(repoRoot, '.tooling/conformance/typert.host.js')
+// CI uses the generated contract shipped by the pinned upstream npm package.
+const CONTRACT = process.env.DSH_HARNESS_CONTRACT ?? join(repoRoot, '.tooling/conformance/typert.host.js')
 const hasContract = existsSync(CONTRACT)
 
 /**
@@ -57,7 +59,7 @@ const skip = hasContract
   : 'run `node tests/fixtures/extract-harness-contract.mjs` first (needs DeepSeek Harness installed)'
 
 /** The generated manifest, loaded once. */
-const contract = hasContract ? (await import(CONTRACT)).TYPERT : undefined
+const contract = hasContract ? (await import(pathToFileURL(CONTRACT).href)).TYPERT : undefined
 
 /** Find the invocation descriptor for one Remote method. */
 function invocation(method) {

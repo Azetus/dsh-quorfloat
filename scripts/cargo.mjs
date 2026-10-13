@@ -103,6 +103,7 @@ export function buildSidecar({ root, target, release = false, label = 'build' })
   if (crossCompiling) requireRustTarget(triple)
 
   const args = ['build']
+  if (process.env.DSH_QUORFLOAT_CARGO_LOCKED === '1') args.push('--locked')
   if (release) args.push('--release')
   args.push('--manifest-path', 'quorfloat/Cargo.toml')
   if (crossCompiling) args.push('--target', triple)

@@ -13,6 +13,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import { homeDir, loadModule, repoRoot } from './helpers.mjs'
 
@@ -29,13 +30,13 @@ async function loadPatch() {
 async function importYaml() {
   // `homeDir()` rather than `process.env['HOME']`: on Windows the profile lives
   // under `USERPROFILE` and a relative specifier would throw here too.
-  const candidates = [
+  const candidates = process.env.DSH_YAML_PATH ? [process.env.DSH_YAML_PATH] : [
     join(homeDir(), '.dsh/profiles/node_modules/yaml/dist/index.js'),
     join(homeDir(), '.dsh/profiles/node_modules/js-yaml/index.js'),
   ]
   for (const candidate of candidates) {
     try {
-      const module = await import(candidate)
+      const module = await import(pathToFileURL(candidate).href)
       if (typeof module.parse === 'function') return module
       if (typeof module.default?.parse === 'function') return module.default
       if (typeof module.load === 'function') return { parse: module.load }
