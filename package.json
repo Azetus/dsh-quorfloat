@@ -3,6 +3,15 @@
   "version": "0.1.4",
   "private": true,
   "description": "System-level floating conversation window for DeepSeek Harness (host plugin half)",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "floating-window",
+    "global-hotkey",
+    "ai-agent",
+    "chat"
+  ],
   "type": "module",
   "license": "MIT",
   "repository": {
