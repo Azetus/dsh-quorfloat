@@ -1,22 +1,17 @@
 /** Publish the workflow's tarballs in dependency order, using npm OIDC. */
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { appendFileSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { setTimeout as delay } from 'node:timers/promises'
 
 import { MANIFEST, ROOT, packageStem, runNpm } from './release-shared.mjs'
 import { assertVersionsAgree } from './version.mjs'
 
 const REGISTRY = 'https://registry.npmjs.org/'
-// npm can accept a publication before the version becomes readable. Keep the
-// three packages' combined wait below the workflow's 15-minute publish budget.
-const VISIBILITY_TIMEOUT_MS = 180_000
-const VISIBILITY_POLL_MS = 10_000
 
-async function published(name, version, timeoutMs = 30_000) {
+async function published(name, version) {
   const response = await fetch(`${REGISTRY}${encodeURIComponent(name)}/${version}`, {
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: AbortSignal.timeout(30_000),
   })
   if (response.status === 404) return null
   if (!response.ok) throw new Error(`registry lookup failed for ${name}: HTTP ${response.status}`)
@@ -49,26 +44,10 @@ function verifyExisting(item, remote) {
   }
 }
 
-async function waitForPublication(item) {
-  const startedAt = Date.now()
-  const deadline = startedAt + VISIBILITY_TIMEOUT_MS
-  for (;;) {
-    const remaining = deadline - Date.now()
-    if (remaining <= 0) {
-      throw new Error(`${item.name}@${item.version}: npm accepted the publish, but the version is still not visible after 180s; wait and rerun the failed publish job using the same artifacts`)
-    }
-    const remote = await published(item.name, item.version, Math.min(30_000, remaining))
-    if (remote !== null) {
-      verifyExisting(item, remote)
-      process.stdout.write(`publish: ${item.name}@${item.version} is visible and its integrity matches\n`)
-      return
-    }
-    const waitMs = Math.min(VISIBILITY_POLL_MS, Math.max(0, deadline - Date.now()))
-    if (waitMs > 0) {
-      process.stdout.write(`publish: ${item.name}@${item.version} accepted; waiting for registry visibility (${Math.floor((Date.now() - startedAt) / 1000)}s elapsed)\n`)
-      // Poll registry reads only. Never repeat a successful npm publish.
-      await delay(waitMs)
-    }
+function report(item, status) {
+  process.stdout.write(`publish: ${item.name}@${item.version}: ${status}\n`)
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- ${item.name}@${item.version}: ${status}\n`)
   }
 }
 
@@ -97,16 +76,25 @@ async function main() {
   }
   // Check every package before the first write, including retries after a partial publish.
   for (const item of items) verifyExisting(item, await published(item.name, version))
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+      '## npm publication submissions\n\n'
+      + 'New submissions are accepted when npm publish succeeds. npm scans them before installation becomes available; this job does not wait for that scan.\n\n')
+  }
   for (const item of items) {
     const remote = await published(item.name, version)
     verifyExisting(item, remote)
     if (remote !== null) {
-      process.stdout.write(`publish: ${item.name}@${version} already has this exact tarball; skipping\n`)
+      report(item, 'already available with matching integrity; skipped')
       continue
     }
     runNpm(['publish', item.archive, '--access', 'public', '--tag', 'latest', `--registry=${REGISTRY}`])
-    await waitForPublication(item)
+    // npm may scan accepted packages for minutes before registry reads succeed.
+    // A successful publish is the submission boundary: do not block the next
+    // package, repeat the upload, or fail the job while that scan is pending.
+    report(item, 'accepted by npm; installation availability may still be pending')
   }
+  process.stdout.write('publish: all three packages are accepted or already verified; npm scanning may still be in progress\n')
 }
 
 main().catch(error => {
