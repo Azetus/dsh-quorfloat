@@ -252,7 +252,7 @@ fn run() -> Result<SessionExit, String> {
     // closing the channel are different events and the exit code depends on which
     // happened, so it is recorded rather than inferred afterwards.
     let outcome: Arc<Mutex<Option<SessionExit>>> = Arc::new(Mutex::new(None));
-    let event_loop_started = Arc::new(AtomicBool::new(false));
+    let shell_ready = Arc::new(AtomicBool::new(false));
 
     // `hello` starts the host's heartbeat budget. Answer stdin immediately,
     // before WebView2 or WKWebView initialisation can consume that budget.
@@ -266,13 +266,13 @@ fn run() -> Result<SessionExit, String> {
     let reader_sink = Arc::clone(&sink);
     let reader_marker = marker.clone();
     let reader_outcome = Arc::clone(&outcome);
-    let reader_event_loop = Arc::clone(&event_loop_started);
+    let reader_shell_ready = Arc::clone(&shell_ready);
     std::thread::Builder::new()
         .name("quorfloat-stdin".to_owned())
         .spawn(move || {
             reader.run();
-            if !reader_event_loop.load(Ordering::Acquire) {
-                // No event loop can consume Wake::Exit during shell creation.
+            if !reader_shell_ready.load(Ordering::Acquire) {
+                // The main thread cannot consume Wake::Exit during shell creation.
                 // The reader has already flushed the shutdown response; exit
                 // cleanly rather than waiting for a window the host no longer wants.
                 let exit = lock(&reader_outcome).clone().unwrap_or(SessionExit::PeerClosed);
@@ -451,8 +451,13 @@ fn run() -> Result<SessionExit, String> {
         .build(tauri::generate_context!())
         .map_err(|error| format!("could not build the shell: {error}"))?;
 
-    event_loop_started.store(true, Ordering::Release);
-    app.run(|_, _| {});
+    app.run(move |_, event| {
+        // Tauri runs setup inside app.run(), before delivering Ready. Entering
+        // run is not enough: WebView creation can still occupy the main thread.
+        if matches!(event, tauri::RunEvent::Ready) {
+            shell_ready.store(true, Ordering::Release);
+        }
+    });
     // The dispatcher exits the process with `AppHandle::exit` once the session ends;
     // reaching here means the event loop stopped without a recorded exit.
     let recorded = lock(&outcome).clone().unwrap_or(SessionExit::PeerClosed);
