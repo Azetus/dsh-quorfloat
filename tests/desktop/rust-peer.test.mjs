@@ -1,4 +1,5 @@
 // Category 1 (cross-process protocol): the host↔sidecar wire against the real Rust binary.
+// Desktop integration suite: requires a local window server and WebView runtime.
 /**
  * Cross-language handshake: the real host plugin against the real Rust binary.
  *
@@ -21,7 +22,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { after, before, test } from 'node:test'
 import { join } from 'node:path'
 
-import { buildSupervisor, repoRoot, sleep, waitFor } from './helpers.mjs'
+import { buildSupervisor, repoRoot, sleep, waitFor } from '../helpers.mjs'
 
 /**
  * The sidecar's own state files and the variable that names where each one lives.
@@ -140,9 +141,9 @@ async function start(config = {}) {
 }
 
 test('the real supervisor completes a handshake with the Rust binary', { skip }, async t => {
-  const { QuorfloatSupervisor } = await import(new URL('../lib/host/supervisor.js', import.meta.url))
-  const { HostRouter } = await import(new URL('../lib/bridge/router.js', import.meta.url))
-  const { DEFAULT_CONFIG } = await import(new URL('../lib/config.js', import.meta.url))
+  const { QuorfloatSupervisor } = await import(new URL('../../lib/host/supervisor.js', import.meta.url))
+  const { HostRouter } = await import(new URL('../../lib/bridge/router.js', import.meta.url))
+  const { DEFAULT_CONFIG } = await import(new URL('../../lib/config.js', import.meta.url))
 
   const effective = {
     ...DEFAULT_CONFIG,
@@ -288,9 +289,9 @@ test('a real accelerator registers and the session stays healthy', { skip }, asy
   // the assertion is on the whole session: a registration that broke the event
   // loop would be worse than one that failed.
   process.env['DSH_QUORFLOAT_HOTKEY'] = 'Control+Alt+Shift+F13'
-  const { QuorfloatSupervisor } = await import(new URL('../lib/host/supervisor.js', import.meta.url))
-  const { HostRouter } = await import(new URL('../lib/bridge/router.js', import.meta.url))
-  const { DEFAULT_CONFIG } = await import(new URL('../lib/config.js', import.meta.url))
+  const { QuorfloatSupervisor } = await import(new URL('../../lib/host/supervisor.js', import.meta.url))
+  const { HostRouter } = await import(new URL('../../lib/bridge/router.js', import.meta.url))
+  const { DEFAULT_CONFIG } = await import(new URL('../../lib/config.js', import.meta.url))
   const effective = {
     ...DEFAULT_CONFIG,
     heartbeatMs: 200,
@@ -348,9 +349,9 @@ test('the sidecar reports a measured window capability and its hidden start', { 
   // not created. `hello` is written before any window exists, so the claim has to
   // come later — and this checks it arrives, and arrives honest.
   process.env['DSH_QUORFLOAT_HOTKEY'] = 'Control+Alt+Shift+F13'
-  const { QuorfloatSupervisor } = await import(new URL('../lib/host/supervisor.js', import.meta.url))
-  const { HostRouter } = await import(new URL('../lib/bridge/router.js', import.meta.url))
-  const { DEFAULT_CONFIG } = await import(new URL('../lib/config.js', import.meta.url))
+  const { QuorfloatSupervisor } = await import(new URL('../../lib/host/supervisor.js', import.meta.url))
+  const { HostRouter } = await import(new URL('../../lib/bridge/router.js', import.meta.url))
+  const { DEFAULT_CONFIG } = await import(new URL('../../lib/config.js', import.meta.url))
   const effective = {
     ...DEFAULT_CONFIG,
     heartbeatMs: 200,
@@ -422,9 +423,9 @@ test('the real host publishes an approval the panel records as a card', { skip }
 
   process.env['DSH_QUORFLOAT_RUST_MARKER'] = markerPath
   process.env['DSH_QUORFLOAT_HOTKEY'] = 'Alt+Banana'
-  const { QuorfloatSupervisor } = await import(new URL('../lib/host/supervisor.js', import.meta.url))
-  const { HostRouter } = await import(new URL('../lib/bridge/router.js', import.meta.url))
-  const { DEFAULT_CONFIG } = await import(new URL('../lib/config.js', import.meta.url))
+  const { QuorfloatSupervisor } = await import(new URL('../../lib/host/supervisor.js', import.meta.url))
+  const { HostRouter } = await import(new URL('../../lib/bridge/router.js', import.meta.url))
+  const { DEFAULT_CONFIG } = await import(new URL('../../lib/config.js', import.meta.url))
   const effective = {
     ...DEFAULT_CONFIG,
     heartbeatMs: 200,
@@ -570,9 +571,9 @@ test('the panel reads the conversation list and attaches to nothing on its own',
 
   process.env['DSH_QUORFLOAT_RUST_MARKER'] = markerPath
   process.env['DSH_QUORFLOAT_HOTKEY'] = 'Alt+Banana'
-  const { QuorfloatSupervisor } = await import(new URL('../lib/host/supervisor.js', import.meta.url))
-  const { HostRouter } = await import(new URL('../lib/bridge/router.js', import.meta.url))
-  const { DEFAULT_CONFIG } = await import(new URL('../lib/config.js', import.meta.url))
+  const { QuorfloatSupervisor } = await import(new URL('../../lib/host/supervisor.js', import.meta.url))
+  const { HostRouter } = await import(new URL('../../lib/bridge/router.js', import.meta.url))
+  const { DEFAULT_CONFIG } = await import(new URL('../../lib/config.js', import.meta.url))
   const effective = {
     ...DEFAULT_CONFIG,
     heartbeatMs: 200,
@@ -652,9 +653,9 @@ test('the host can ask the sidecar to show and hide its window', { skip }, async
   // The direction that was missing. Asserted through the peer's own report rather
   // than a promise, because the command is a notification: the host learns the
   // result the same way it learns everything else about the panel's state.
-  const { QuorfloatSupervisor } = await import(new URL('../lib/host/supervisor.js', import.meta.url))
-  const { HostRouter } = await import(new URL('../lib/bridge/router.js', import.meta.url))
-  const { DEFAULT_CONFIG } = await import(new URL('../lib/config.js', import.meta.url))
+  const { QuorfloatSupervisor } = await import(new URL('../../lib/host/supervisor.js', import.meta.url))
+  const { HostRouter } = await import(new URL('../../lib/bridge/router.js', import.meta.url))
+  const { DEFAULT_CONFIG } = await import(new URL('../../lib/config.js', import.meta.url))
   const effective = {
     ...DEFAULT_CONFIG,
     heartbeatMs: 200,
@@ -722,9 +723,9 @@ test('the real sidecar folds a conversation and a stream over the real wire', { 
 
   process.env['DSH_QUORFLOAT_RUST_MARKER'] = markerPath
   process.env['DSH_QUORFLOAT_HOTKEY'] = 'Alt+Banana'
-  const { QuorfloatSupervisor } = await import(new URL('../lib/host/supervisor.js', import.meta.url))
-  const { HostRouter } = await import(new URL('../lib/bridge/router.js', import.meta.url))
-  const { DEFAULT_CONFIG } = await import(new URL('../lib/config.js', import.meta.url))
+  const { QuorfloatSupervisor } = await import(new URL('../../lib/host/supervisor.js', import.meta.url))
+  const { HostRouter } = await import(new URL('../../lib/bridge/router.js', import.meta.url))
+  const { DEFAULT_CONFIG } = await import(new URL('../../lib/config.js', import.meta.url))
   const effective = {
     ...DEFAULT_CONFIG,
     heartbeatMs: 200,

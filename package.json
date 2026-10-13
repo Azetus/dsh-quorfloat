@@ -42,8 +42,10 @@
     "build:frontend": "npm --prefix quorfloat/frontend run build",
     "build:sidecar": "node scripts/build-sidecar.mjs",
     "typecheck": "node scripts/tsc.mjs -p tsconfig.json --noEmit",
-    "test": "npm run build:local --silent && node --test --test-timeout=30000 \"tests/*.test.mjs\"",
-    "test:only": "node --test --test-timeout=30000 \"tests/*.test.mjs\"",
+    "test": "npm run build:local --silent && node scripts/test.mjs all",
+    "test:only": "node scripts/test.mjs all",
+    "test:unit": "npm run build:plugin --silent && node scripts/test.mjs unit",
+    "test:desktop": "npm run build:local --silent && node scripts/test.mjs desktop",
     "test:frontend": "npm --prefix quorfloat/frontend test",
     "contract:extract": "node tests/fixtures/extract-harness-contract.mjs",
     "dev": "node scripts/dev.mjs"

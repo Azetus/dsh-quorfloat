@@ -6,7 +6,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { buildSidecar } from './cargo.mjs'
 import { MANIFEST, ROOT, packageStem, runNpm } from './release-shared.mjs'
 import { assertVersionsAgree } from './version.mjs'
 
@@ -57,14 +56,12 @@ function test() {
   const original = new Map(Object.keys(overrides).map(key => [key, process.env[key]]))
   Object.assign(process.env, overrides)
   try {
-    // JS protocol tests prefer the debug executable; build the current version first.
-    buildSidecar({ root: ROOT, label: 'ci:test' })
+    // The publish gate excludes desktop integration: it never launches the real
+    // Tauri sidecar. Release executables are built by the preceding package steps.
     run('cargo', ['test', '--locked', '--manifest-path', 'quorfloat/Cargo.toml'])
     runNpm(['--prefix', 'quorfloat/frontend', 'run', 'typecheck'])
     runNpm(['run', 'test:frontend'])
-    // TAP includes assertion details as each test finishes, even if a leaked
-    // process prevents Node from reaching the final suite summary.
-    run(process.execPath, ['--test', '--test-reporter=tap', '--test-timeout=30000', 'tests/*.test.mjs'])
+    run(process.execPath, ['scripts/test.mjs', 'unit', '--tap'])
   } finally {
     for (const [key, value] of original) {
       if (value === undefined) delete process.env[key]
