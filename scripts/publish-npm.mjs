@@ -1,6 +1,5 @@
 /** Publish the workflow's tarballs in dependency order, using npm OIDC. */
 import { spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import { appendFileSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 
@@ -9,13 +8,32 @@ import { assertVersionsAgree } from './version.mjs'
 
 const REGISTRY = 'https://registry.npmjs.org/'
 
-async function published(name, version) {
-  const response = await fetch(`${REGISTRY}${encodeURIComponent(name)}/${version}`, {
+async function registryJson(path) {
+  const response = await fetch(`${REGISTRY}${path}`, {
     signal: AbortSignal.timeout(30_000),
+    headers: { 'Cache-Control': 'no-cache' },
   })
   if (response.status === 404) return null
-  if (!response.ok) throw new Error(`registry lookup failed for ${name}: HTTP ${response.status}`)
+  if (!response.ok) throw new Error(`registry lookup failed for ${path}: HTTP ${response.status}`)
   return response.json()
+}
+
+async function existingVersion(name, version) {
+  const escaped = encodeURIComponent(name)
+  const remote = await registryJson(`${escaped}/${version}`)
+  if (remote !== null) {
+    if (remote.name !== name || remote.version !== version) {
+      throw new Error(`registry returned an unexpected identity for ${name}@${version}`)
+    }
+    return 'version already published; skipped'
+  }
+  // npm exposes dist-tags while an accepted version is still being scanned.
+  // A version lookup alone can return 404 and wrongly trigger a second upload.
+  const tags = await registryJson(`-/package/${escaped}/dist-tags`)
+  if (tags !== null && Object.values(tags).includes(version)) {
+    return 'version already submitted (registry dist-tag exists); skipped; scanning may still be pending'
+  }
+  return null
 }
 
 function inventory(directory, name, version) {
@@ -32,16 +50,7 @@ function inventory(directory, name, version) {
   if (manifest.repository?.url !== MANIFEST.repository.url) {
     throw new Error(`repository mismatch in ${archive}`)
   }
-  return {
-    name, version, archive, manifest,
-    integrity: `sha512-${createHash('sha512').update(readFileSync(archive)).digest('base64')}`,
-  }
-}
-
-function verifyExisting(item, remote) {
-  if (remote !== null && remote.dist?.integrity !== item.integrity) {
-    throw new Error(`${item.name}@${item.version} already exists with different contents; refusing to continue`)
-  }
+  return { name, version, archive, manifest }
 }
 
 function report(item, status) {
@@ -74,18 +83,18 @@ async function main() {
       || expectedDependencies.some(name => mainPackage.optionalDependencies[name] !== version)) {
     throw new Error('main package must depend on both native packages at this exact version')
   }
-  // Check every package before the first write, including retries after a partial publish.
-  for (const item of items) verifyExisting(item, await published(item.name, version))
+  // A release may be rebuilt after a partial submission. Existing versions are
+  // immutable and skipped by identity; archive byte equality is not a retry gate.
+  // Resolve all three states before making the first registry write.
+  const existing = await Promise.all(items.map(item => existingVersion(item.name, version)))
   if (process.env.GITHUB_STEP_SUMMARY) {
     appendFileSync(process.env.GITHUB_STEP_SUMMARY,
       '## npm publication submissions\n\n'
       + 'New submissions are accepted when npm publish succeeds. npm scans them before installation becomes available; this job does not wait for that scan.\n\n')
   }
-  for (const item of items) {
-    const remote = await published(item.name, version)
-    verifyExisting(item, remote)
-    if (remote !== null) {
-      report(item, 'already available with matching integrity; skipped')
+  for (const [index, item] of items.entries()) {
+    if (existing[index] !== null) {
+      report(item, existing[index])
       continue
     }
     runNpm(['publish', item.archive, '--access', 'public', '--tag', 'latest', `--registry=${REGISTRY}`])
@@ -94,7 +103,7 @@ async function main() {
     // package, repeat the upload, or fail the job while that scan is pending.
     report(item, 'accepted by npm; installation availability may still be pending')
   }
-  process.stdout.write('publish: all three packages are accepted or already verified; npm scanning may still be in progress\n')
+  process.stdout.write('publish: all three package versions are accepted or already exist; npm scanning may still be in progress\n')
 }
 
 main().catch(error => {
