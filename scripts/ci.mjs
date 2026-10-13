@@ -62,7 +62,9 @@ function test() {
     run('cargo', ['test', '--locked', '--manifest-path', 'quorfloat/Cargo.toml'])
     runNpm(['--prefix', 'quorfloat/frontend', 'run', 'typecheck'])
     runNpm(['run', 'test:frontend'])
-    runNpm(['run', 'test:only'])
+    // TAP includes assertion details as each test finishes, even if a leaked
+    // process prevents Node from reaching the final suite summary.
+    run(process.execPath, ['--test', '--test-reporter=tap', '--test-timeout=30000', 'tests/*.test.mjs'])
   } finally {
     for (const [key, value] of original) {
       if (value === undefined) delete process.env[key]

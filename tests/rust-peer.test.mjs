@@ -139,7 +139,7 @@ async function start(config = {}) {
   return app
 }
 
-test('the real supervisor completes a handshake with the Rust binary', { skip }, async () => {
+test('the real supervisor completes a handshake with the Rust binary', { skip }, async t => {
   const { QuorfloatSupervisor } = await import(new URL('../lib/host/supervisor.js', import.meta.url))
   const { HostRouter } = await import(new URL('../lib/bridge/router.js', import.meta.url))
   const { DEFAULT_CONFIG } = await import(new URL('../lib/config.js', import.meta.url))
@@ -245,8 +245,14 @@ test('the real supervisor completes a handshake with the Rust binary', { skip },
     assert.equal(after.state, 'running', 'still running after several heartbeats')
     assert.equal(after.consecutiveMissedHeartbeats, 0, 'every ping was answered')
     assert.equal(after.rejectedFrames, 0, 'the host rejected none of our frames, in either direction')
+  } catch (error) {
+    t.diagnostic(JSON.stringify({ snapshot: supervisor.snapshot(), logLines }))
+    throw error
   } finally {
     const result = await supervisor.stop()
+    if (!result.exited || result.escalated || result.code !== 0) {
+      t.diagnostic(JSON.stringify({ shutdown: result, logLines }))
+    }
     assert.equal(result.exited, true, 'the binary exited when asked')
     assert.equal(result.escalated, false, 'it exited on the shutdown request, without SIGTERM')
     assert.equal(result.code, 0, `clean exit, got code ${result.code} signal ${result.signal}`)
