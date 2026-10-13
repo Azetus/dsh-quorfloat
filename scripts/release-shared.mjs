@@ -2,8 +2,8 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync,
-  readdirSync, renameSync, rmSync, statSync,
+  cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync,
+  readdirSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { basename, delimiter, dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -19,6 +19,28 @@ const SCRATCH = join(ROOT, '.tooling', 'release')
 /** npm's flat tarball stem, also used for staged directories on every platform. */
 export function packageStem(name) {
   return name.replace(/^@/u, '').replace(/\//gu, '-')
+}
+
+/** Ship readable local documentation; npm's web README uses repository URLs. */
+export function stageReadmeResources(directory, { npm = false } = {}) {
+  for (const entry of ['README.md', 'README_EN.md', 'LICENSE', 'assets']) {
+    cpSync(join(ROOT, entry), join(directory, entry), {
+      recursive: true, force: true, filter: path => !isBundleJunk(path),
+    })
+  }
+  if (!npm) return
+
+  const repository = MANIFEST.repository.url.replace(/^git\+/u, '').replace(/\.git$/u, '')
+  const raw = `https://raw.githubusercontent.com${new URL(repository).pathname}/HEAD`
+  for (const entry of ['README.md', 'README_EN.md']) {
+    const path = join(directory, entry)
+    const text = readFileSync(path, 'utf8')
+      .replace(/\]\((README(?:_EN)?\.md)\)/gu,
+        (_match, file) => `](${repository}/blob/HEAD/${file})`)
+      .replace(/(<img\b[^>]*\bsrc=")(assets\/[^"<>]+)(")/gu,
+        (_match, prefix, file, suffix) => `${prefix}${raw}/${file}${suffix}`)
+    writeFileSync(path, text)
+  }
 }
 
 /** Parse the options this script owns. */

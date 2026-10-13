@@ -7,7 +7,7 @@ import { isBundleJunk, stageSidecar } from './assemble.mjs'
 import { assertVersionsAgree } from './version.mjs'
 import {
   ROOT, MANIFEST, APPLE_TARGETS, parseArgs, selectTargets, buildReleaseExecutable,
-  lipoInfo, walk, bundlePath, hashFiles, packBundle, packageStem,
+  lipoInfo, walk, bundlePath, hashFiles, packBundle, packageStem, stageReadmeResources,
 } from './release-shared.mjs'
 
 const DEFAULT_OUT = 'bundles/npm'
@@ -68,8 +68,7 @@ function writeInfo(directory, metadata) {
 
 function assembleMain(directory) {
   copy(join(ROOT, 'lib'), join(directory, 'lib'))
-  copy(join(ROOT, 'README.md'), join(directory, 'README.md'))
-  copy(join(ROOT, 'LICENSE'), join(directory, 'LICENSE'))
+  stageReadmeResources(directory, { npm: true })
   const source = readFileSync(join(ROOT, 'cordis.patch.yml'), 'utf8')
   const declarations = source.split('\n').filter(line => /^\s*quorfloatPath:/u.test(line))
   if (declarations.length !== 1 || !/^\s*quorfloatPath:\s*(?:""|'')\s*(?:#.*)?$/u.test(declarations[0])) {

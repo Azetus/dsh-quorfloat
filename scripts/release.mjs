@@ -42,7 +42,7 @@ import { SIDECAR_NAME, isBundleJunk, stageSidecar } from './assemble.mjs'
 import { assertVersionsAgree } from './version.mjs'
 import {
   ROOT, MANIFEST, parseArgs, selectTargets, buildReleaseExecutable,
-  lipoInfo, walk, bundlePath, hashFiles, treeSize, packBundle,
+  lipoInfo, walk, bundlePath, hashFiles, treeSize, packBundle, stageReadmeResources,
 } from './release-shared.mjs'
 
 /** Default directory the bundles are written into, relative to the checkout. */
@@ -131,6 +131,7 @@ function assemble({ bundle, executable, targets, platform }) {
     label: 'release',
   })
   cpSync(join(ROOT, 'lib'), join(bundle, 'lib'), { recursive: true, force: true, filter: source => !isBundleJunk(source) })
+  stageReadmeResources(bundle)
   writePatch(bundle)
   writeManifest(bundle, platform)
 
