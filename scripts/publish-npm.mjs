@@ -3,15 +3,20 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 
 import { MANIFEST, ROOT, packageStem, runNpm } from './release-shared.mjs'
 import { assertVersionsAgree } from './version.mjs'
 
 const REGISTRY = 'https://registry.npmjs.org/'
+// npm can accept a publication before the version becomes readable. Keep the
+// three packages' combined wait below the workflow's 15-minute publish budget.
+const VISIBILITY_TIMEOUT_MS = 180_000
+const VISIBILITY_POLL_MS = 10_000
 
-async function published(name, version) {
+async function published(name, version, timeoutMs = 30_000) {
   const response = await fetch(`${REGISTRY}${encodeURIComponent(name)}/${version}`, {
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(timeoutMs),
   })
   if (response.status === 404) return null
   if (!response.ok) throw new Error(`registry lookup failed for ${name}: HTTP ${response.status}`)
@@ -41,6 +46,29 @@ function inventory(directory, name, version) {
 function verifyExisting(item, remote) {
   if (remote !== null && remote.dist?.integrity !== item.integrity) {
     throw new Error(`${item.name}@${item.version} already exists with different contents; refusing to continue`)
+  }
+}
+
+async function waitForPublication(item) {
+  const startedAt = Date.now()
+  const deadline = startedAt + VISIBILITY_TIMEOUT_MS
+  for (;;) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) {
+      throw new Error(`${item.name}@${item.version}: npm accepted the publish, but the version is still not visible after 180s; wait and rerun the failed publish job using the same artifacts`)
+    }
+    const remote = await published(item.name, item.version, Math.min(30_000, remaining))
+    if (remote !== null) {
+      verifyExisting(item, remote)
+      process.stdout.write(`publish: ${item.name}@${item.version} is visible and its integrity matches\n`)
+      return
+    }
+    const waitMs = Math.min(VISIBILITY_POLL_MS, Math.max(0, deadline - Date.now()))
+    if (waitMs > 0) {
+      process.stdout.write(`publish: ${item.name}@${item.version} accepted; waiting for registry visibility (${Math.floor((Date.now() - startedAt) / 1000)}s elapsed)\n`)
+      // Poll registry reads only. Never repeat a successful npm publish.
+      await delay(waitMs)
+    }
   }
 }
 
@@ -77,9 +105,7 @@ async function main() {
       continue
     }
     runNpm(['publish', item.archive, '--access', 'public', '--tag', 'latest', `--registry=${REGISTRY}`])
-    const result = await published(item.name, version)
-    if (result === null) throw new Error(`${item.name}@${version} is not yet visible; rerun the failed publish job`)
-    verifyExisting(item, result)
+    await waitForPublication(item)
   }
 }
 
