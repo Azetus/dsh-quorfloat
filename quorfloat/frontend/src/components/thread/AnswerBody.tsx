@@ -4,7 +4,9 @@ import { renderMarkdown } from '../../logic/markdown'
 import { externalWebUrl } from '../../logic/links'
 import { api } from '../../api'
 import { useLanguage, useT } from '../../hooks/useI18n'
-import { useEffect, useState, type MouseEvent } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { createPortal } from 'react-dom'
+import { MarkdownImage } from './MarkdownImage'
 
 /** Props for {@link AnswerBody}. */
 export interface AnswerBodyProps {
@@ -25,10 +27,27 @@ export function AnswerBody({ markdown }: AnswerBodyProps) {
   const language = useLanguage()
   const t = useT()
   const [note, setNote] = useState<string | null>(null)
+  const body = useRef<HTMLDivElement>(null)
+  const requestedImages = useRef(new Set<string>())
+  const html = useMemo(() => renderMarkdown(markdown, language), [markdown, language])
+  const [images, setImages] = useState<readonly { target: HTMLElement; src: string; alt: string }[]>([])
   useEffect(() => { setNote(null) }, [markdown, language])
+  useLayoutEffect(() => {
+    const targets = body.current?.querySelectorAll<HTMLElement>('[data-image-src]') ?? []
+    setImages(Array.from(targets).flatMap(target => {
+      const src = externalWebUrl(target.dataset.imageSrc ?? '')
+      return src === null ? [] : [{ target, src, alt: target.dataset.imageAlt ?? '' }]
+    }))
+  }, [html])
 
   const openLink = (event: MouseEvent<HTMLDivElement>) => {
     if (event.type === 'auxclick' && event.button !== 1) return
+    // A Markdown image may be wrapped in an authored link. Neither loading it
+    // nor clicking the displayed image should activate that enclosing anchor.
+    if (event.target instanceof Element && event.target.closest('[data-image-src]') !== null) {
+      event.preventDefault()
+      return
+    }
     const anchor = event.target instanceof Element ? event.target.closest('a') : null
     if (anchor === null || !event.currentTarget.contains(anchor)) return
     const address = anchor.getAttribute('href')
@@ -46,10 +65,16 @@ export function AnswerBody({ markdown }: AnswerBodyProps) {
   return <>
     <div
       className="q-answer"
+      ref={body}
       onClick={openLink}
       onAuxClick={openLink}
-      dangerouslySetInnerHTML={{ __html: renderMarkdown(markdown, language) }}
+      dangerouslySetInnerHTML={{ __html: html }}
     />
+    {images.map(({ target, src, alt }, index) => createPortal(
+      <MarkdownImage src={src} alt={alt} requested={requestedImages.current} />,
+      target,
+      `${index}:${src}`,
+    ))}
     {note !== null && <p className="q-markdown-note" role="status">{note}</p>}
   </>
 }

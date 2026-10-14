@@ -138,7 +138,10 @@ export const zh: Record<MessageKey, string> = {
   // 会话 Markdown 引用的资源。
   'markdown.image': '图片',
   'markdown.imageUnsupported': '暂不支持此图片地址',
-  'markdown.viewImage': '在浏览器查看图片',
+  'markdown.loadImage': '加载图片',
+  'markdown.imageLoading': '图片加载中…',
+  'markdown.imageFailed': '图片加载失败',
+  'markdown.retryImage': '重试',
   'markdown.linkUnsupported': '暂不支持此链接地址',
   'markdown.openFailed': '无法打开浏览器，请复制链接后手动打开。',
 

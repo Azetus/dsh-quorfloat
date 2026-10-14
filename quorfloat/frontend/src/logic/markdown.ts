@@ -14,7 +14,8 @@ const markdown = new MarkdownIt({
   breaks: false,
 })
 
-// Images describe a resource; rendering a conversation must not fetch that resource.
+// Only emit inert placeholders. React creates a remote img after an explicit click;
+// URLs in data attributes do not fetch resources while Markdown is being rendered.
 markdown.renderer.rules.image = (tokens, index, options, env, renderer) => {
   const token = tokens[index]!
   const language: Language = env.language === 'en' ? 'en' : 'zh'
@@ -22,13 +23,10 @@ markdown.renderer.rules.image = (tokens, index, options, env, renderer) => {
   const description = renderer.renderInlineAsText(token.children ?? [], options, env)
     || translate(language, 'markdown.image')
   const address = externalWebUrl(token.attrGet('src') ?? '')
-  // A linked image already has an enclosing anchor; never emit nested anchors.
-  const insideLink = tokens.slice(0, index).reduce((depth, entry) =>
-    depth + (entry.type === 'link_open' ? 1 : entry.type === 'link_close' ? -1 : 0), 0) > 0
-  const action = address === null
-    ? escape(translate(language, 'markdown.imageUnsupported'))
-    : insideLink ? '' : `<a href="${escape(address)}" rel="noopener noreferrer">${escape(translate(language, 'markdown.viewImage'))}</a>`
-  return `<span class="q-image-reference">${escape(description)}${action === '' ? '' : ` · ${action}`}</span>`
+  if (address === null) {
+    return `<span class="q-image-reference">${escape(description)} · ${escape(translate(language, 'markdown.imageUnsupported'))}</span>`
+  }
+  return `<span class="q-image-preview" data-image-src="${escape(address)}" data-image-alt="${escape(description)}"></span>`
 }
 
 /**

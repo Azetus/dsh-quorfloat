@@ -146,7 +146,10 @@ export const en = {
   // Resources referenced by conversation Markdown.
   'markdown.image': 'Image',
   'markdown.imageUnsupported': 'This image address is not supported yet.',
-  'markdown.viewImage': 'View image in browser',
+  'markdown.loadImage': 'Load image',
+  'markdown.imageLoading': 'Loading image…',
+  'markdown.imageFailed': 'Could not load image',
+  'markdown.retryImage': 'Retry',
   'markdown.linkUnsupported': 'This link address is not supported.',
   'markdown.openFailed': 'Could not open your browser. Copy the link and open it manually.',
 

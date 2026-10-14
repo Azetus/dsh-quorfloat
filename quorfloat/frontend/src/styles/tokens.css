@@ -380,6 +380,9 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
 .q-answer th, .q-answer td { border: 1px solid var(--q-line); padding: 4px 9px; font-size: 12px; text-align: left; }
 .q-answer a { color: var(--q-accent); }
 .q-image-reference, .q-markdown-note { color: var(--q-muted); }
+.q-image-preview { display: inline-block; max-width: 100%; vertical-align: top; }
+.q-image-preview img { display: block; max-width: 100%; height: auto; }
+.q-image-load { color: var(--q-accent); padding: 0 4px; border-radius: 4px; }
 .q-markdown-note { margin: 8px 0; font-size: 12px; }
 
 .q-answerbar { display: flex; align-items: center; gap: 10px; color: var(--q-muted); font-size: 12px; margin-top: 16px; }
