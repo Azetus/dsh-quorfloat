@@ -35,32 +35,14 @@ npm 主包名为 **`dsh-quorfloat`**，只需安装这个主包，平台依赖�
 
 离线安装请下载当前版本对应操作系统的自包含 tgz，例如：
 
-- **macOS**：`dsh-quorfloat-0.1.4-darwin.tgz`，同时支持 Apple Silicon 和 Intel。
-- **Windows**：`dsh-quorfloat-0.1.4-win32.tgz`，选择适用于当前机器架构的发布包。
+- **macOS**：`dsh-quorfloat-<version>-darwin.tgz`，同时支持 Apple Silicon 和 Intel。
+- **Windows**：`dsh-quorfloat-<version>-win32.tgz`，选择适用于当前机器架构的发布包。
 
-下方示例使用 0.1.4；安装其他版本时替换文件名或版本号即可。
+下方示例中的 `<version>` 是占位符，请替换为下载文件或待安装版本的实际版本号。
 
 ### 浏览器 WebUI
 
 先停止正在运行的 `dsh web` 服务。以下命令安装到 `web` profile；若使用自定义 profile，将 `web` 替换为自己的 profile 名称，并用相同 profile 启动 Harness。
-
-#### 离线安装（tgz）
-
-使用本地 tgz 的**绝对路径**安装，无需解压。macOS 示例：
-
-```bash
-dsh plugin --profile web add "/绝对路径/dsh-quorfloat-0.1.4-darwin.tgz"
-dsh web
-```
-
-Windows 示例：
-
-```powershell
-dsh plugin --profile web add "C:/Downloads/dsh-quorfloat-0.1.4-win32.tgz"
-dsh web
-```
-
-路径包含空格时保留外层引号。
 
 #### npm 安装
 
@@ -71,24 +53,42 @@ dsh plugin --profile web add dsh-quorfloat
 dsh web
 ```
 
-如需固定版本，使用 `dsh-quorfloat@0.1.4` 替换包名。
+如需固定版本，使用 `dsh-quorfloat@<version>` 替换包名。
+
+#### 离线安装（tgz）
+
+使用本地 tgz 的**绝对路径**安装，无需解压。macOS 示例：
+
+```bash
+dsh plugin --profile web add "/绝对路径/dsh-quorfloat-<version>-darwin.tgz"
+dsh web
+```
+
+Windows 示例：
+
+```powershell
+dsh plugin --profile web add "C:/Downloads/dsh-quorfloat-<version>-win32.tgz"
+dsh web
+```
+
+路径包含空格时保留外层引号。
 
 ### Harness 官方桌面版
 
 先启动桌面应用，在左侧栏打开“插件”，点击“添加插件”。
 
+#### npm 安装
+
+1. 点击左侧栏 “插件” -> "添加插件"，在添加插件弹窗输入 **`dsh-quorfloat`**，或指定版本 **`dsh-quorfloat@<version>`**。
+2. 点击安装；若出现启用提示，按提示启用插件。包管理器会自动安装当前平台的面板程序。
+3. 完全退出并重新启动 Harness 桌面应用。
+
 #### 离线安装（tgz）
 
 1. 下载当前操作系统对应的自包含 tgz，无需解压。
-2. 在添加插件弹窗输入 tgz 的**绝对路径**，例如 macOS 的 `/绝对路径/dsh-quorfloat-0.1.4-darwin.tgz`，或 Windows 的 `C:/Downloads/dsh-quorfloat-0.1.4-win32.tgz`。
+2. 在添加插件弹窗输入 tgz 的**绝对路径**，例如 macOS 的 `/绝对路径/dsh-quorfloat-<version>-darwin.tgz`，或 Windows 的 `C:/Downloads/dsh-quorfloat-<version>-win32.tgz`。
 3. 点击安装；若出现启用提示，按提示启用插件。
 4. 完全退出并重新启动 Harness 桌面应用。
-
-#### npm 安装
-
-1. 点击左侧栏 “插件” -> "添加插件"，在添加插件弹窗输入 **`dsh-quorfloat`**，或指定版本 **`dsh-quorfloat@0.1.4`**。
-2. 点击安装；若出现启用提示，按提示启用插件。包管理器会自动安装当前平台的面板程序。
-3. 完全退出并重新启动 Harness 桌面应用。
 
 **安装或更新后需要重启 Harness 本体。** 仅关闭悬浮窗、关闭桌面窗口或刷新 WebUI 页面不足以重新加载宿主插件。
 
@@ -145,12 +145,12 @@ npm run build
 
 该命令依次编译宿主插件、面板前端与 release 悬浮窗，然后组装 bundle 并自动执行 npm 打包，无需再手动运行 `npm pack`。
 
-产物位于 `bundles/`，例如当前版本：
+产物位于 `bundles/`，路径中的 `<version>` 为源码声明的版本号：
 
 | 平台 | bundle 目录 | 离线安装包 |
 |---|---|---|
-| macOS | `bundles/dsh-quorfloat-0.1.4-darwin/` | `bundles/dsh-quorfloat-0.1.4-darwin.tgz` |
-| Windows | `bundles/dsh-quorfloat-0.1.4-win32/` | `bundles/dsh-quorfloat-0.1.4-win32.tgz` |
+| macOS | `bundles/dsh-quorfloat-<version>-darwin/` | `bundles/dsh-quorfloat-<version>-darwin.tgz` |
+| Windows | `bundles/dsh-quorfloat-<version>-win32/` | `bundles/dsh-quorfloat-<version>-win32.tgz` |
 
 macOS 产物通过 `lipo` 合并为双架构二进制；Windows 离线包默认采用当前 Rust 工具链的宿主架构。使用新生成的 tgz，按上方安装方式安装后重启 Harness。
 

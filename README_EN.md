@@ -35,32 +35,14 @@ The main npm package is **`dsh-quorfloat`**. Install only this package; platform
 
 For offline installation, download the self-contained tgz for your operating system and the current release, for example:
 
-- **macOS**: `dsh-quorfloat-0.1.4-darwin.tgz`, supporting both Apple Silicon and Intel.
-- **Windows**: `dsh-quorfloat-0.1.4-win32.tgz`. Choose the release package that matches your machine's architecture.
+- **macOS**: `dsh-quorfloat-<version>-darwin.tgz`, supporting both Apple Silicon and Intel.
+- **Windows**: `dsh-quorfloat-<version>-win32.tgz`. Choose the release package that matches your machine's architecture.
 
-The examples below use version 0.1.4. Replace the filename or version number when installing a different release.
+In the examples below, `<version>` is a placeholder. Replace it with the actual version of the downloaded file or the version you want to install.
 
 ### Browser WebUI
 
 First, stop the running `dsh web` service. The commands below install into the `web` profile. If you use a custom profile, replace `web` with your profile name and start Harness with the same profile.
-
-#### Offline installation (tgz)
-
-Install using the **absolute path** to the local tgz. No extraction is needed. On macOS:
-
-```bash
-dsh plugin --profile web add "/absolute/path/dsh-quorfloat-0.1.4-darwin.tgz"
-dsh web
-```
-
-On Windows:
-
-```powershell
-dsh plugin --profile web add "C:/Downloads/dsh-quorfloat-0.1.4-win32.tgz"
-dsh web
-```
-
-Keep the surrounding quotation marks if the path contains spaces.
 
 #### npm installation
 
@@ -71,24 +53,42 @@ dsh plugin --profile web add dsh-quorfloat
 dsh web
 ```
 
-To install a specific version, replace the package name with `dsh-quorfloat@0.1.4`.
+To install a specific version, replace the package name with `dsh-quorfloat@<version>`.
+
+#### Offline installation (tgz)
+
+Install using the **absolute path** to the local tgz. No extraction is needed. On macOS:
+
+```bash
+dsh plugin --profile web add "/absolute/path/dsh-quorfloat-<version>-darwin.tgz"
+dsh web
+```
+
+On Windows:
+
+```powershell
+dsh plugin --profile web add "C:/Downloads/dsh-quorfloat-<version>-win32.tgz"
+dsh web
+```
+
+Keep the surrounding quotation marks if the path contains spaces.
 
 ### Official Harness Desktop App
 
 Launch the desktop app, open “Plugins” in the left sidebar, and click “Add Plugin”.
 
+#### npm installation
+
+1. Click “Plugins” → “Add Plugin” in the left sidebar. Enter **`dsh-quorfloat`** in the Add Plugin dialog, or **`dsh-quorfloat@<version>`** for a specific version.
+2. Click Install. If prompted to enable the plugin, follow the prompt. The package manager automatically installs the panel application for your platform.
+3. Fully quit and restart the Harness desktop app.
+
 #### Offline installation (tgz)
 
 1. Download the self-contained tgz for your operating system. No extraction is needed.
-2. Enter the tgz's **absolute path** in the Add Plugin dialog, such as `/absolute/path/dsh-quorfloat-0.1.4-darwin.tgz` on macOS or `C:/Downloads/dsh-quorfloat-0.1.4-win32.tgz` on Windows.
+2. Enter the tgz's **absolute path** in the Add Plugin dialog, such as `/absolute/path/dsh-quorfloat-<version>-darwin.tgz` on macOS or `C:/Downloads/dsh-quorfloat-<version>-win32.tgz` on Windows.
 3. Click Install. If prompted to enable the plugin, follow the prompt.
 4. Fully quit and restart the Harness desktop app.
-
-#### npm installation
-
-1. Click “Plugins” → “Add Plugin” in the left sidebar. Enter **`dsh-quorfloat`** in the Add Plugin dialog, or **`dsh-quorfloat@0.1.4`** for a specific version.
-2. Click Install. If prompted to enable the plugin, follow the prompt. The package manager automatically installs the panel application for your platform.
-3. Fully quit and restart the Harness desktop app.
 
 **Restart Harness itself after installing or updating the plugin.** Closing only the floating panel, closing the desktop window, or refreshing the WebUI page is insufficient to reload the host plugin.
 
@@ -145,12 +145,12 @@ npm run build
 
 This command compiles the host plugin, panel frontend, and release sidecar in order, then assembles the bundle and automatically packs it with npm. There is no need to run `npm pack` manually.
 
-Outputs are placed in `bundles/`. For the current version:
+Outputs are placed in `bundles/`. In these paths, `<version>` is the version declared by the source:
 
 | Platform | Bundle directory | Offline installation package |
 |---|---|---|
-| macOS | `bundles/dsh-quorfloat-0.1.4-darwin/` | `bundles/dsh-quorfloat-0.1.4-darwin.tgz` |
-| Windows | `bundles/dsh-quorfloat-0.1.4-win32/` | `bundles/dsh-quorfloat-0.1.4-win32.tgz` |
+| macOS | `bundles/dsh-quorfloat-<version>-darwin/` | `bundles/dsh-quorfloat-<version>-darwin.tgz` |
+| Windows | `bundles/dsh-quorfloat-<version>-win32/` | `bundles/dsh-quorfloat-<version>-win32.tgz` |
 
 The macOS binary combines both architectures using `lipo`. The Windows offline package defaults to the host architecture of the current Rust toolchain. Install the newly generated tgz using the instructions above, then restart Harness.
 
