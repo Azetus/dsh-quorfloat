@@ -29,6 +29,15 @@ const ACK_TIMEOUT_MS = 2000
  *  180ms; this is the "the transition never ran" path, e.g. reduced motion). */
 const FADE_FALLBACK_MS = 300
 
+/** How long after a press inside the panel a blur still counts as that press's own.
+ *
+ *  Starting the native drag (the top bar's `data-tauri-drag-region`, which Tauri answers
+ *  with `start_dragging` on mousedown) hands the mouse to the system's move loop, and the
+ *  webview loses focus as it does — a blur that says nothing about the user having gone
+ *  somewhere else. The press is the only evidence that this is what happened, and it stays
+ *  valid for about as long as a click can take. */
+const DRAG_BLUR_WINDOW_MS = 500
+
 /**
  * Own the panel's show/hide flight.
  *
@@ -49,6 +58,9 @@ export function useFlight(
   const flight = useRef<VisibilityState>({ visible: false, hiding: false, hideSent: false })
   const generation = useRef(0)
   const ackTimer = useRef<number | undefined>(undefined)
+  // When the panel was last pressed, for the guard below. A timestamp rather than a flag
+  // because it has to expire: the press explains the *next* blur, not any blur ever after.
+  const dragPressedAt = useRef<number | null>(null)
   const stateRef = useRef<Snapshot | null>(null)
   const onShownRef = useRef(onShown)
   onShownRef.current = onShown
@@ -165,19 +177,48 @@ export function useFlight(
   // it by what the user gets: 失焦时保持展开), and `hidesOnBlur` is the one place that is
   // undone. A programmatic hide blurs the webview too; `requestHide`'s guards swallow that
   // (with its own marker), which is why this handler can stay this simple.
+  //
+  // Starting the native drag blurs the webview as well, and that blur is not the user
+  // leaving. A press inside the panel is what tells the two apart, and it is armed where
+  // the press happens rather than where the drag region is: Tauri decides that from its own
+  // injected script, which is not ours to restate — and a press on one of the bar's buttons
+  // blurs nothing, so arming widely can only excuse the drag that a press may have started.
   useEffect(() => {
+    const onPress = (event: MouseEvent): void => {
+      if (event.button !== 0) return
+      dragPressedAt.current = performance.now()
+    }
     const onBlur = (): void => {
+      // This blur is the one the press can explain. Reading and clearing together keeps the
+      // guard single-use: the webview blurs again when the panel is really hidden, and that
+      // one belongs to whoever asked for the hide.
+      const pressedAt = dragPressedAt.current
+      dragPressedAt.current = null
       const state = stateRef.current
       if (state === null) return
       if (!hidesOnBlur(state.settings.hideOnBlur)) {
         void api.log('frontend blur: keeping the panel open (hideOnBlur=false)')
         return
       }
+      if (pressedAt !== null && performance.now() - pressedAt <= DRAG_BLUR_WINDOW_MS) {
+        // The move loop is the likelier reading, and the two failures are not equal: a hide
+        // the user did not ask for takes the panel away mid-gesture, while staying up for a
+        // press the user meant as a click away costs one more click.
+        void api.log('frontend blur: ignoring drag startup (guard consumed)')
+        return
+      }
       void api.log('frontend blur: hiding (hideOnBlur=true)')
       requestHide()
     }
+    // Capture, so the press is on the record before Tauri's own mousedown listener asks for
+    // the drag; the system's move loop may swallow the matching mouseup, so nothing here
+    // waits for one.
+    window.addEventListener('mousedown', onPress, true)
     window.addEventListener('blur', onBlur)
-    return () => { window.removeEventListener('blur', onBlur) }
+    return () => {
+      window.removeEventListener('mousedown', onPress, true)
+      window.removeEventListener('blur', onBlur)
+    }
   }, [requestHide])
 
   return { hiding, requestHide, requestShow }
