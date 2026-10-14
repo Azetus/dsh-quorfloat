@@ -22,3 +22,4 @@ pub mod session;
 pub mod sink;
 pub mod window_settings;
 pub mod workspace;
+pub mod web_content;

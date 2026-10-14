@@ -13,6 +13,7 @@ dsh-quorfloat 的原生悬浮窗，由 **Rust + Tauri 2** 实现，通过系统 
 | 依赖 | 用途 |
 |---|---|
 | `tauri` 2 | 原生窗口、WebView、前端命令与事件、菜单栏或系统托盘 |
+| `tauri-plugin-opener` | 将经过校验的网页链接交给系统默认浏览器 |
 | `global-hotkey` | 注册和监听系统全局快捷键 |
 | `serde`、`serde_json` | 协议、配置与状态的 JSON 序列化和解析 |
 | `tauri-build` | 构建时处理 Tauri 配置与资源 |

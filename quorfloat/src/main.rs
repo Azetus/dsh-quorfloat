@@ -49,6 +49,7 @@ use dsh_quorfloat::app::session::{
 };
 use dsh_quorfloat::app::sink::{Reader, SharedSink, Wake};
 use dsh_quorfloat::app::window_settings::WindowSettings;
+use dsh_quorfloat::app::web_content;
 use dsh_quorfloat::ipc::rpc;
 use dsh_quorfloat::ipc::transport::StdioSink;
 use dsh_quorfloat::app::session::follow::PanelLifecycle;
@@ -336,7 +337,20 @@ fn run() -> Result<SessionExit, String> {
                 },
                 _ => tauri::WebviewUrl::App("index.html".into()),
             };
+            let dev_url = match &url {
+                tauri::WebviewUrl::External(url) => Some(url.clone()),
+                _ => None,
+            };
+            let navigation_marker = shell_marker.clone();
             let window = tauri::WebviewWindowBuilder::new(app, "main", url)
+                .on_navigation(move |url| {
+                    let allowed = web_content::allows_navigation(url, dev_url.as_ref());
+                    if !allowed {
+                        navigation_marker.write("webview navigation blocked");
+                    }
+                    allowed
+                })
+                .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
                 .title("quorfloat")
                 .inner_size(f64::from(settings.width), PLACEHOLDER_HEIGHT)
                 // `frontend/index.html` ships `lang="zh-CN"` because the panel's copy defaults
@@ -428,6 +442,7 @@ fn run() -> Result<SessionExit, String> {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            open_external_url,
             submit,
             cancel,
             answer_approval,
@@ -586,6 +601,16 @@ fn submit(
 ) -> Value {
     with_session(&state, |session, sink| {
         bridge::submit(session, sink, &text, workspace_id.as_deref())
+    })
+}
+
+/// Open a validated web address without navigating the conversation WebView.
+#[tauri::command]
+fn open_external_url(state: tauri::State<'_, ShellRuntime>, url: String) -> Result<(), String> {
+    let url = web_content::external_url(&url)?;
+    tauri_plugin_opener::open_url(url.as_str(), None::<&str>).map_err(|error| {
+        state.marker.write("external URL could not be opened");
+        format!("could not open the system browser: {error}")
     })
 }
 

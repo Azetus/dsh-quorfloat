@@ -6,6 +6,7 @@ import { invoke } from '@tauri-apps/api/core'
 import type { QuestionAnswer } from './logic/questions'
 
 export const api = {
+  openExternalUrl: (url: string) => invoke<void>('open_external_url', { url }),
   submit: (text: string, workspaceId: string | null) => invoke('submit', { text, workspaceId }),
   cancel: () => invoke('cancel'),
   answerApproval: (interactionId: string, allow: boolean) => invoke('answer_approval', { interactionId, allow }),

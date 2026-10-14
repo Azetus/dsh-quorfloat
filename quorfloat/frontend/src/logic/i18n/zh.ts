@@ -135,6 +135,13 @@ export const zh: Record<MessageKey, string> = {
   'answer.copied': '已复制',
   'answer.copyManually': '请手动选择复制',
 
+  // 会话 Markdown 引用的资源。
+  'markdown.image': '图片',
+  'markdown.imageUnsupported': '暂不支持此图片地址',
+  'markdown.viewImage': '在浏览器查看图片',
+  'markdown.linkUnsupported': '暂不支持此链接地址',
+  'markdown.openFailed': '无法打开浏览器，请复制链接后手动打开。',
+
   // Turn fold and thread.
   'disclosure.working': '正在工作',
   'disclosure.done': '已完成',

@@ -143,6 +143,13 @@ export const en = {
   'answer.copied': 'Copied',
   'answer.copyManually': 'Select and copy manually',
 
+  // Resources referenced by conversation Markdown.
+  'markdown.image': 'Image',
+  'markdown.imageUnsupported': 'This image address is not supported yet.',
+  'markdown.viewImage': 'View image in browser',
+  'markdown.linkUnsupported': 'This link address is not supported.',
+  'markdown.openFailed': 'Could not open your browser. Copy the link and open it manually.',
+
   // Turn fold and thread.
   'disclosure.working': 'Working',
   'disclosure.done': 'Done',

@@ -13,6 +13,7 @@ Release builds embed frontend assets in the binary, so no separate frontend serv
 | Dependency | Purpose |
 |---|---|
 | `tauri` 2 | Native windows, WebView, frontend commands and events, menu bar or system tray |
+| `tauri-plugin-opener` | Open validated web links in the system default browser |
 | `global-hotkey` | Register and listen for system-wide keyboard shortcuts |
 | `serde`, `serde_json` | JSON serialization and parsing for the protocol, configuration, and state |
 | `tauri-build` | Process Tauri configuration and resources at build time |

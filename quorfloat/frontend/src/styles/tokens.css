@@ -379,6 +379,8 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
 .q-answer table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; margin: 8px 0; }
 .q-answer th, .q-answer td { border: 1px solid var(--q-line); padding: 4px 9px; font-size: 12px; text-align: left; }
 .q-answer a { color: var(--q-accent); }
+.q-image-reference, .q-markdown-note { color: var(--q-muted); }
+.q-markdown-note { margin: 8px 0; font-size: 12px; }
 
 .q-answerbar { display: flex; align-items: center; gap: 10px; color: var(--q-muted); font-size: 12px; margin-top: 16px; }
 .q-answerbar button { margin-left: auto; display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 6px; }
