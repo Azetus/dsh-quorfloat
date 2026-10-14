@@ -146,10 +146,16 @@ export const en = {
   // Resources referenced by conversation Markdown.
   'markdown.image': 'Image',
   'markdown.imageUnsupported': 'This image address is not supported yet.',
-  'markdown.loadImage': 'Load image',
   'markdown.imageLoading': 'Loading image…',
   'markdown.imageFailed': 'Could not load image',
   'markdown.retryImage': 'Retry',
+  'markdown.imageMissing': 'Image file not found',
+  'markdown.imageTooLarge': 'Image exceeds the size limit',
+  'markdown.imageFormat': 'This image format is not supported yet',
+  'markdown.imageNoCwd': 'This session has no working directory to resolve the relative path',
+  'markdown.imageSessionGone': 'The session changed or no longer exists. Reopen it to load the image.',
+  'markdown.imageBusy': 'Other images are loading. Please try again shortly.',
+  'markdown.imageUnavailable': 'This host cannot read local images',
   'markdown.linkUnsupported': 'This link address is not supported.',
   'markdown.openFailed': 'Could not open your browser. Copy the link and open it manually.',
 

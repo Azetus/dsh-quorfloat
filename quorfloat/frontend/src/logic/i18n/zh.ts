@@ -138,10 +138,16 @@ export const zh: Record<MessageKey, string> = {
   // 会话 Markdown 引用的资源。
   'markdown.image': '图片',
   'markdown.imageUnsupported': '暂不支持此图片地址',
-  'markdown.loadImage': '加载图片',
   'markdown.imageLoading': '图片加载中…',
   'markdown.imageFailed': '图片加载失败',
   'markdown.retryImage': '重试',
+  'markdown.imageMissing': '图片文件不存在',
+  'markdown.imageTooLarge': '图片超过大小限制',
+  'markdown.imageFormat': '暂不支持此图片格式',
+  'markdown.imageNoCwd': '会话没有工作目录，无法解析相对路径',
+  'markdown.imageSessionGone': '会话已切换或不存在，请重新打开后加载',
+  'markdown.imageBusy': '正在加载其他图片，请稍后重试',
+  'markdown.imageUnavailable': '当前宿主不支持读取本地图片',
   'markdown.linkUnsupported': '暂不支持此链接地址',
   'markdown.openFailed': '无法打开浏览器，请复制链接后手动打开。',
 

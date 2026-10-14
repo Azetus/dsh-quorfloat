@@ -305,6 +305,8 @@ pub struct Session {
     cancel: Delivery,
     /// Requests awaiting a verdict, so a response can be attributed to what asked.
     sends_in_flight: BTreeMap<i64, Sending>,
+    /// Image replies have their own bounded waiters, independent of follow/prompt state.
+    image_requests: BTreeMap<i64, std::sync::mpsc::Sender<Result<Value, Value>>>,
     /// A prompt that cannot be sent until the conversation it needs exists.
     ///
     /// Held here rather than in the panel because only this layer knows when the creation has
@@ -492,6 +494,7 @@ impl Session {
             prompt: Delivery::Idle,
             cancel: Delivery::Idle,
             sends_in_flight: BTreeMap::new(),
+            image_requests: BTreeMap::new(),
             pending_prompt: None,
             follow_request: None,
             history_request: None,
@@ -933,6 +936,13 @@ impl Session {
 
     /// Record what the handshake produced, or the host's verdict on an answer.
     fn on_response(&mut self, id: &Value, outcome: Result<Value, RpcError>, sink: &mut dyn FrameSink) {
+        if let Some(sender) = id.as_i64().and_then(|id| self.image_requests.remove(&id)) {
+            let _ = sender.send(outcome.map_err(|error| {
+                json!({ "reason": error.data.as_ref().and_then(|data| data.get("reason"))
+                    .and_then(Value::as_str).unwrap_or("readFailed") })
+            }));
+            return;
+        }
         // Prompts and stops first, for the same reason the answers below are: a response
         // attributed to the wrong request leaves the composer claiming "sending…" forever.
         if let Some(value) = id.as_i64() {
@@ -1150,6 +1160,32 @@ impl Session {
         }
         let Some(outgoing) = self.follow.next(now) else { return };
         self.send_follow(outgoing, now, sink);
+    }
+
+    /// Send one image chunk request without borrowing the follow request slot.
+    pub fn request_image(
+        &mut self, params: Value, sink: &mut dyn FrameSink,
+    ) -> Result<(i64, std::sync::mpsc::Receiver<Result<Value, Value>>), Value> {
+        if self.image_requests.len() >= 4 {
+            return Err(json!({ "reason": "busy" }));
+        }
+        if params.get("release").and_then(Value::as_bool) != Some(true)
+            && params.get("sessionId").and_then(Value::as_str) != self.follow.session_id() {
+            return Err(json!({ "reason": "session" }));
+        }
+        let id = self.take_request_id();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        self.image_requests.insert(id, sender);
+        if sink.send(&rpc::request(id, "session/image", params)).is_err() {
+            self.image_requests.remove(&id);
+            return Err(json!({ "reason": "readFailed" }));
+        }
+        Ok((id, receiver))
+    }
+
+    /// Remove a timed-out waiter; a late response cannot retain image data.
+    pub fn forget_image_request(&mut self, id: i64) {
+        self.image_requests.remove(&id);
     }
 
     /// The conversations the host last listed, newest first.

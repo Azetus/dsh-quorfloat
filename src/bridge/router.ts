@@ -10,6 +10,7 @@
 import { ChannelError } from './errors.js'
 import { PROTOCOL_VERSION } from '../protocol.js'
 import type { QuorfloatConfig } from '../config.js'
+import { ImageChunks, type LocalImage } from './images.js'
 
 /** What the quorfloat process reports about itself in `hello`. */
 export interface HelloParams {
@@ -129,6 +130,8 @@ export interface RouterHost {
    * read.
    */
   readHistory(sessionId: string, beforeSeq?: number): Promise<HistoryPageView>
+  /** Read one bounded image through the Harness filesystem when available. */
+  readImage?(sessionId: string, path: string, signal: AbortSignal): Promise<LocalImage>
   /** Read the model and permission choices for a session. */
   readOptions(sessionId?: string): Promise<unknown>
   /** Switch a session's model and reasoning effort together. */
@@ -185,6 +188,7 @@ export const METHODS = [
   // field name the Harness uses on `SessionPageRequest`; the answer adds `cursor` (where
   // paging continues) beside the page's `records` and `hasMore`.
   'session/history',
+  'session/image',
   'session/prompt',
   'session/cancel',
   'session/options',
@@ -248,6 +252,7 @@ function readLifecycleAction(params: unknown): PanelLifecycleAction {
  */
 export class HostRouter {
   readonly #host: RouterHost
+  readonly #images = new ImageChunks()
   #handshake: HandshakeFacts | undefined
 
   /**
@@ -308,6 +313,11 @@ export class HostRouter {
           requireString(params, 'sessionId', 'session/history'),
           optionalInt(params, 'beforeSeq', 'session/history'),
         )
+      case 'session/image':
+        return await this.#images.read(params, async (sessionId, path, signal) => {
+          if (!this.#host.readImage) throw new ChannelError('unavailable', 'image reader unavailable', { reason: 'unavailable' })
+          return await this.#host.readImage(sessionId, path, signal)
+        })
       case 'session/prompt':
         return await this.#host.prompt(
           requireString(params, 'sessionId', 'session/prompt'),

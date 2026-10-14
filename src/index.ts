@@ -319,6 +319,10 @@ export function createPlugin(overrides: PluginOverrides = {}) {
             attachSession: async sessionId => await sessionLayer.attach(sessionId),
             requestSnapshot: async sessionId => await sessionLayer.requestSnapshot(sessionId),
             readHistory: async (sessionId, beforeSeq) => await sessionLayer.readHistory(sessionId, beforeSeq),
+            readImage: async (sessionId, path, signal) => {
+              if (!harness.readImage) throw new HarnessError('unavailable', 'image reader unavailable')
+              return await harness.readImage(sessionId, path, signal)
+            },
             readOptions: async sessionId => await sessionLayer.readOptions(sessionId),
             selectModel: async (sessionId, selection) =>
               await sessionLayer.selectModel(sessionId, selection as ModelChoiceView),

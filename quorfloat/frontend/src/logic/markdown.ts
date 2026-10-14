@@ -6,7 +6,7 @@
 import DOMPurify from 'dompurify'
 import MarkdownIt from 'markdown-it'
 import { translate, type Language } from './i18n'
-import { externalWebUrl } from './links'
+import { externalWebUrl, localImagePath } from './links'
 
 const markdown = new MarkdownIt({
   html: false,
@@ -14,8 +14,8 @@ const markdown = new MarkdownIt({
   breaks: false,
 })
 
-// Only emit inert placeholders. React creates a remote img after an explicit click;
-// URLs in data attributes do not fetch resources while Markdown is being rendered.
+// Only emit inert placeholders. React owns image loading and failure handling;
+// URLs in data attributes do not fetch resources while Markdown is being parsed.
 markdown.renderer.rules.image = (tokens, index, options, env, renderer) => {
   const token = tokens[index]!
   const language: Language = env.language === 'en' ? 'en' : 'zh'
@@ -24,6 +24,8 @@ markdown.renderer.rules.image = (tokens, index, options, env, renderer) => {
     || translate(language, 'markdown.image')
   const address = externalWebUrl(token.attrGet('src') ?? '')
   if (address === null) {
+    const path = localImagePath(token.attrGet('src') ?? '')
+    if (path !== null) return `<span class="q-image-preview" data-image-path="${escape(path)}" data-image-alt="${escape(description)}"></span>`
     return `<span class="q-image-reference">${escape(description)} · ${escape(translate(language, 'markdown.imageUnsupported'))}</span>`
   }
   return `<span class="q-image-preview" data-image-src="${escape(address)}" data-image-alt="${escape(description)}"></span>`

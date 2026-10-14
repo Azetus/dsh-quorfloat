@@ -368,6 +368,7 @@ export function Thread({ state, folds, onToggleFold }: ThreadProps) {
                     ? <div className="q-question">{row.text}</div>
                     : (
                       <Turn
+                        sessionId={state.transcript.sessionId}
                         turn={row.turn}
                         sep={row.sep}
                         open={folds.get(row.turn.id) ?? false}

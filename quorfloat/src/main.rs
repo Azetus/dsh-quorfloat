@@ -443,6 +443,7 @@ fn run() -> Result<SessionExit, String> {
         })
         .invoke_handler(tauri::generate_handler![
             open_external_url,
+            read_local_image,
             submit,
             cancel,
             answer_approval,
@@ -612,6 +613,27 @@ fn open_external_url(state: tauri::State<'_, ShellRuntime>, url: String) -> Resu
         state.marker.write("external URL could not be opened");
         format!("could not open the system browser: {error}")
     })
+}
+
+/// Relay a bounded image chunk asynchronously; never hold session locks while waiting.
+#[tauri::command]
+async fn read_local_image(
+    state: tauri::State<'_, ShellRuntime>, session_id: String, path: String,
+    token: Option<String>, offset: Option<u64>, release: Option<bool>,
+) -> Result<Value, Value> {
+    let params = serde_json::json!({ "sessionId": session_id, "path": path,
+        "token": token, "offset": offset.unwrap_or(0), "release": release.unwrap_or(false) });
+    let (id, receiver) = {
+        let mut session = lock(&state.session);
+        state.sink.with(|sink| session.request_image(params, sink))?
+    };
+    let session = Arc::clone(&state.session);
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        receiver.recv_timeout(std::time::Duration::from_secs(12))
+            .unwrap_or_else(|_| Err(serde_json::json!({ "reason": "readFailed" })))
+    }).await.unwrap_or_else(|_| Err(serde_json::json!({ "reason": "readFailed" })));
+    lock(&session).forget_image_request(id);
+    result
 }
 
 /// `cancel` — stop the turn being generated.

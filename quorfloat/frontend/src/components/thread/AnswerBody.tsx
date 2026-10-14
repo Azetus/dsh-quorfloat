@@ -12,6 +12,7 @@ import { MarkdownImage } from './MarkdownImage'
 export interface AnswerBodyProps {
   /** The answer's raw Markdown (also what "复制回答" copies). */
   readonly markdown: string
+  readonly sessionId: string | null
 }
 
 /**
@@ -23,20 +24,22 @@ export interface AnswerBodyProps {
  * @param props - the raw Markdown.
  * @returns the answer block.
  */
-export function AnswerBody({ markdown }: AnswerBodyProps) {
+export function AnswerBody({ markdown, sessionId }: AnswerBodyProps) {
   const language = useLanguage()
   const t = useT()
   const [note, setNote] = useState<string | null>(null)
   const body = useRef<HTMLDivElement>(null)
-  const requestedImages = useRef(new Set<string>())
   const html = useMemo(() => renderMarkdown(markdown, language), [markdown, language])
-  const [images, setImages] = useState<readonly { target: HTMLElement; src: string; alt: string }[]>([])
+  const [images, setImages] = useState<readonly { target: HTMLElement; src: string; alt: string; local: boolean }[]>([])
   useEffect(() => { setNote(null) }, [markdown, language])
   useLayoutEffect(() => {
-    const targets = body.current?.querySelectorAll<HTMLElement>('[data-image-src]') ?? []
+    const targets = body.current?.querySelectorAll<HTMLElement>('[data-image-src], [data-image-path]') ?? []
     setImages(Array.from(targets).flatMap(target => {
-      const src = externalWebUrl(target.dataset.imageSrc ?? '')
-      return src === null ? [] : [{ target, src, alt: target.dataset.imageAlt ?? '' }]
+      const local = target.dataset.imagePath !== undefined
+      // Local attributes already carry a decoded path, including literal %/#/?
+      // in filenames; do not decode them a second time.
+      const src = local ? target.dataset.imagePath! : externalWebUrl(target.dataset.imageSrc ?? '')
+      return src === null ? [] : [{ target, src, alt: target.dataset.imageAlt ?? '', local }]
     }))
   }, [html])
 
@@ -44,7 +47,7 @@ export function AnswerBody({ markdown }: AnswerBodyProps) {
     if (event.type === 'auxclick' && event.button !== 1) return
     // A Markdown image may be wrapped in an authored link. Neither loading it
     // nor clicking the displayed image should activate that enclosing anchor.
-    if (event.target instanceof Element && event.target.closest('[data-image-src]') !== null) {
+    if (event.target instanceof Element && event.target.closest('[data-image-src], [data-image-path]') !== null) {
       event.preventDefault()
       return
     }
@@ -70,10 +73,10 @@ export function AnswerBody({ markdown }: AnswerBodyProps) {
       onAuxClick={openLink}
       dangerouslySetInnerHTML={{ __html: html }}
     />
-    {images.map(({ target, src, alt }, index) => createPortal(
-      <MarkdownImage src={src} alt={alt} requested={requestedImages.current} />,
+    {images.map(({ target, src, alt, local }, index) => createPortal(
+      <MarkdownImage src={src} alt={alt} local={local} sessionId={sessionId} />,
       target,
-      `${index}:${src}`,
+      `${sessionId}:${index}:${local}:${src}`,
     ))}
     {note !== null && <p className="q-markdown-note" role="status">{note}</p>}
   </>

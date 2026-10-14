@@ -11,6 +11,7 @@ import { WorkingLine } from './WorkingLine'
 export interface TurnProps {
   /** The shaped turn. */
   readonly turn: TurnModel
+  readonly sessionId: string | null
   /** Whether the folded part is open. */
   readonly open: boolean
   /** Whether this turn follows another turn (the design's separator). */
@@ -29,7 +30,7 @@ export interface TurnProps {
  * @param props - the turn and its fold state.
  * @returns the turn article.
  */
-export function Turn({ turn, open, onToggle, sep = false }: TurnProps) {
+export function Turn({ turn, sessionId, open, onToggle, sep = false }: TurnProps) {
   const t = useT()
   const raw = turn.answer?.blocks.flatMap(block => (block.kind === 'text' ? [block.text] : [])).join('\n\n') ?? ''
   return (
@@ -47,7 +48,7 @@ export function Turn({ turn, open, onToggle, sep = false }: TurnProps) {
       )}
       {turn.answer !== null && (
         <>
-          <AnswerBody markdown={raw} />
+          <AnswerBody markdown={raw} sessionId={sessionId} />
           {/* No bar while the answer streams: a row that grows under
               the streaming text jitters — and "正在生成" is something the turn's own fold row
               already says. The completion line appears with the answer's end, where it states a

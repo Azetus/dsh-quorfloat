@@ -20,6 +20,9 @@
 
 import type { ChannelErrorCode } from '../bridge/errors.js'
 import type { SessionProjectionsView } from '../bridge/router.js'
+import type { LocalImage } from '../bridge/images.js'
+import { readLocalImage } from './images.js'
+import { ChannelError } from '../bridge/errors.js'
 
 /**
  * Failure raised by a Harness-facing operation.
@@ -226,6 +229,8 @@ export interface QuorfloatHarness {
   createSession(workspaceId: string): Promise<{ sessionId: string }>
   /** List sessions visible in the Harness session list. */
   listSessions(): Promise<readonly SessionSummaryView[]>
+  /** Optional filesystem capability; image bytes never enter conversation history. */
+  readImage?(sessionId: string, path: string, signal: AbortSignal): Promise<LocalImage>
   /**
    * Read the session's current durable cursor, without activating its Agent.
    *
@@ -615,7 +620,7 @@ export function createHarnessFromContext(
   // consulted for the two writes that need one (a permission switch, a model switch);
   // the reads that answer pickers never need it.
   const sessions = get('sessions') as SessionsLike | undefined
-  return { harness: new CordisHarness(controller, registry, workspaceController, presets, sessions, log), probe }
+  return { harness: new CordisHarness(controller, registry, workspaceController, presets, sessions, log, get), probe }
 }
 
 /**
@@ -629,6 +634,7 @@ class CordisHarness implements QuorfloatHarness {
   readonly #presets: PermissionPresetsLike | undefined
   readonly #sessions: SessionsLike | undefined
   readonly #log: AdapterLogger
+  readonly #get: (name: string) => unknown
   /** Counters that make upstream translation problems visible in diagnostics. */
   readonly #counters = {
     listCalls: 0,
@@ -664,6 +670,7 @@ class CordisHarness implements QuorfloatHarness {
     presets: PermissionPresetsLike | undefined,
     sessions: SessionsLike | undefined,
     log: AdapterLogger,
+    get: (name: string) => unknown,
   ) {
     this.#controller = controller
     this.#registry = registry
@@ -671,6 +678,16 @@ class CordisHarness implements QuorfloatHarness {
     this.#presets = presets
     this.#sessions = sessions
     this.#log = log
+    this.#get = get
+  }
+
+  /** Read the cwd from authoritative session metadata, without title/history repair. */
+  async readImage(sessionId: string, path: string, signal: AbortSignal): Promise<LocalImage> {
+    const list = await this.#controller.list({}, signal)
+    const row = list.items?.find(item => item['sessionId'] === sessionId && item['origin'] !== 'subagent')
+    if (!row) throw new ChannelError('stale', 'image session no longer exists', { reason: 'session' })
+    const cwd = typeof row['cwd'] === 'string' ? row['cwd'] : undefined
+    return await readLocalImage(this.#get, path, cwd, signal)
   }
 
   /** {@inheritDoc QuorfloatHarness.describe} */
