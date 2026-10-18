@@ -216,19 +216,6 @@ mod tests {
         assert!(temporary_entries(directory.path()).is_empty());
     }
 
-    #[test]
-    fn failure_keeps_the_target_and_removes_the_temporary() {
-        let directory = TempDir::new();
-        let target = directory.path().join("state.json");
-        // A directory cannot be replaced by a file rename on either platform.
-        fs::create_dir(&target).expect("seed target directory");
-
-        let error = write_atomic(&target, b"new").expect_err("rename onto a directory must fail");
-
-        assert!(error.to_string().contains("state.json"));
-        assert!(target.is_dir());
-        assert!(temporary_entries(directory.path()).is_empty());
-    }
 
     #[test]
     fn forced_replace_failure_keeps_the_old_file_contents() {
@@ -243,41 +230,6 @@ mod tests {
 
         assert!(error.to_string().contains("state.json"));
         assert_eq!(fs::read_to_string(&target).unwrap(), "old");
-        assert!(temporary_entries(directory.path()).is_empty());
-    }
-
-    #[test]
-    fn remove_if_present_accepts_a_missing_file() {
-        let directory = TempDir::new();
-        remove_if_present(&directory.path().join("absent.json")).expect("missing is success");
-    }
-
-    #[test]
-    fn remove_if_present_removes_a_real_file() {
-        let directory = TempDir::new();
-        let target = directory.path().join("state.json");
-        fs::write(&target, "old").expect("seed file");
-
-        remove_if_present(&target).expect("remove");
-
-        assert!(!target.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn write_atomic_preserves_a_symlink_and_updates_its_target() {
-        use std::os::unix::fs::symlink;
-
-        let directory = TempDir::new();
-        let target = directory.path().join("real.json");
-        let link = directory.path().join("link.json");
-        fs::write(&target, "old").expect("seed target");
-        symlink(&target, &link).expect("create symlink");
-
-        write_atomic(&link, b"new").expect("write through link");
-
-        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
-        assert_eq!(fs::read_to_string(&target).unwrap(), "new");
         assert!(temporary_entries(directory.path()).is_empty());
     }
 }

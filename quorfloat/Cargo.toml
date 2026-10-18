@@ -28,7 +28,7 @@ serde_json = "1"
 
 # The shell. Pinned at >=2.12.1 because `macOSPrivateApi` is a no-op there (the
 # transparent-background API is always enabled), which this panel needs for its
-# rounded corners — see docs/tauri-shell-spike.md §1. The frontend is embedded at
+# rounded corners. The frontend is embedded at
 # compile time through `tauri::generate_context!`, so the staged binary stays a
 # single self-contained executable for the host supervisor.
 # `tray-icon` puts the panel in the menu bar (the accessory application has no Dock icon on
