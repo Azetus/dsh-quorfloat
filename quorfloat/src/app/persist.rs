@@ -34,6 +34,25 @@ static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// @returns `Ok(())` when the target now contains `bytes`; an error with the path in its
 ///   message otherwise.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_with(path, bytes, |from, to| fs::rename(from, to))
+}
+
+/// The body of [`write_atomic`], with the replace step injectable for tests.
+///
+/// Production always passes [`fs::rename`]. The test seam exists so a test can force the
+/// replace to fail after the complete temporary file and the old target both exist — the one
+/// state that is otherwise hard to create portably without permissions or platform tricks.
+///
+/// @param path - the file to replace or create.
+/// @param bytes - the complete new contents.
+/// @param replace - the operation that installs the temporary file at the target.
+/// @returns `Ok(())` when the target now contains `bytes`; an error with the path in its
+///   message otherwise.
+fn write_atomic_with(
+    path: &Path,
+    bytes: &[u8],
+    replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
     let target = resolve_target(path);
     let parent = target
         .parent()
@@ -42,7 +61,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     fs::create_dir_all(parent).map_err(|error| with_path(&target, error))?;
 
     let (temporary, file) = create_temporary(parent, &target)?;
-    let result = write_and_replace(&temporary, &target, bytes, file);
+    let result = write_and_replace(&temporary, &target, bytes, file, replace);
     if result.is_err() {
         // The target is untouched; the temp file is the only thing to clean up.
         let _ = fs::remove_file(&temporary);
@@ -114,6 +133,7 @@ fn write_and_replace(
     target: &Path,
     bytes: &[u8],
     mut file: File,
+    replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
 ) -> io::Result<()> {
     file.write_all(bytes)?;
     file.sync_all()?;
@@ -125,7 +145,7 @@ fn write_and_replace(
     if let Ok(metadata) = fs::metadata(target) {
         let _ = fs::set_permissions(temporary, metadata.permissions());
     }
-    fs::rename(temporary, target)
+    replace(temporary, target)
 }
 
 /// Add the path to an I/O error so a marker line says which save failed.
@@ -207,6 +227,22 @@ mod tests {
 
         assert!(error.to_string().contains("state.json"));
         assert!(target.is_dir());
+        assert!(temporary_entries(directory.path()).is_empty());
+    }
+
+    #[test]
+    fn forced_replace_failure_keeps_the_old_file_contents() {
+        let directory = TempDir::new();
+        let target = directory.path().join("state.json");
+        fs::write(&target, "old").expect("seed old file");
+
+        let error = write_atomic_with(&target, b"new", |_, _| {
+            Err(io::Error::other("forced replace failure"))
+        })
+        .expect_err("the injected replace must fail");
+
+        assert!(error.to_string().contains("state.json"));
+        assert_eq!(fs::read_to_string(&target).unwrap(), "old");
         assert!(temporary_entries(directory.path()).is_empty());
     }
 
