@@ -112,7 +112,7 @@ jobs:
           retention-days: 14
 
       - name: Install dependencies for existing upstream tests
-        run: npm install --prefix .tooling/ci --no-save --package-lock=false --ignore-scripts --legacy-peer-deps --no-audit --no-fund @deepseek-ai/cordis@4.0.5-alpha.1 yaml@2.9.1 @deepseek-ai/dsh-api-session-controller@0.2.1-alpha.1
+        run: npm run ci:install
       # Real Tauri/WebView desktop integration runs locally via test:desktop/test.
       - name: Run protocol, upstream and unit tests (no desktop integration)
         timeout-minutes: 20

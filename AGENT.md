@@ -79,6 +79,7 @@ npm run test:desktop                    # 完整 debug 构建后，跑真实侧�
 npm run test                            # 完整 debug 构建后跑以上两组
 
 # 云端门槛（不启动真实桌面侧车）
+npm run ci:install                      # 先装 .tooling/ci 的上游契约依赖
 npm run ci:test
 
 # 前端：单测与类型检查
@@ -92,7 +93,7 @@ npm run dev -- --release                # 用 release 侧车做体感验证
 npm run dev -- --empty-workspaces       # 零工作区首启；默认工作区建到 .dev-home/
 ```
 
-构建入口：
+构建与 CI 入口：
 
 | 命令 | 产物 |
 |---|---|
@@ -102,6 +103,8 @@ npm run dev -- --empty-workspaces       # 零工作区首启；默认工作区�
 | `npm run build:plugin` | 宿主 TS → `lib/` |
 | `npm run build:frontend` | Vite 前端 → `quorfloat/frontend/dist/` |
 | `npm run build:sidecar` | 先构建前端，再编译侧车 |
+| `npm run ci:install` | 按 CI 固定版本安装 `.tooling/ci` 的上游契约依赖；`ci:test` 的前置 |
+| `npm run ci:test` | 不启动桌面侧车的云端门槛：Rust/前端/JS 契约与单测 |
 
 `scripts/cargo.mjs` 是本地与发布共用的 cargo 构建层；新脚本必须复用它，不要各写一遍。
 **改了前端就必须重建侧车**：前端资源在编译期嵌入侧车二进制，只跑 `build:frontend` 不会更新二进制。
@@ -289,6 +292,7 @@ transcript skipped: … internal / N unrecognised (kind, …)  被藏起来的�
 - `tests/desktop/rust-peer.test.mjs`：启动真实 Rust/Tauri 侧车的桌面集成，需要本地窗口服务与 WebView。
 - `scripts/test.mjs unit|desktop|all` 用明确文件路径选择套件，不依赖 shell glob；空套件报错。
 - `ci:test` 只跑 Rust/前端既有单测、前端 typecheck 与 JS 协议/上游/健壮性测试，不执行桌面集成。
+  先运行 `npm run ci:install` 安装 `.tooling/ci` 的上游契约依赖；缺少时 `ci:test` 会直接报错并给出这条命令。
   这是明确缩小云端范围，不把桌面测试计成通过或静默 skip；发布前的桌面集成与 UI 实机验收在本地完成。
 
 ### 7.3 UI 验收

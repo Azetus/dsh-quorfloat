@@ -667,7 +667,8 @@ bundle 内的 `cordis.patch.yml` 把 `quorfloatPath` 指向自带的 `./bin/dsh-
 - `.github/workflows/publish-npm.yml` 支持手动运行与正式 Release 触发。
 - 手动运行构建 macOS universal 与 Windows x64，执行测试并保存离线/平台/主包 tgz，不发布 npm。
 - Release 触发时，两平台构建与测试都成功后，依次发布两个平台包与主包，使用 npm OIDC，无 `NPM_TOKEN`。
-- 云端测试命令是 `npm run ci:test`：Rust 测试、前端测试与 typecheck、JS 协议/上游/健壮性测试；
+- 云端测试先运行 `npm run ci:install` 安装 `.tooling/ci` 的上游契约依赖，再运行
+  `npm run ci:test`：Rust 测试、前端测试与 typecheck、JS 协议/上游/健壮性测试；
   **不启动真实桌面侧车**。桌面集成与 UI 实机验收在本地完成。
 
 ## 10. 平台支持与已知限制

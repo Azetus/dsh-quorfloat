@@ -37,7 +37,9 @@ const DEFAULT_ASAR = process.platform === 'darwin'
   ? '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar'
   : undefined
 const APP = process.env['DSH_APP_ASAR'] ?? DEFAULT_ASAR
-const TARGET = join('dsh', 'node_modules', '@deepseek-ai', 'dsh-api-session-controller', 'lib', 'typert.host.js')
+/** The archive entry, as path parts: `join` is for display only. */
+const TARGET_PARTS = ['dsh', 'node_modules', '@deepseek-ai', 'dsh-api-session-controller', 'lib', 'typert.host.js']
+const TARGET = join(...TARGET_PARTS)
 const OUT_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '.tooling', 'conformance')
 
 /** Read the asar directory for the installed app. */
@@ -98,7 +100,7 @@ function main() {
   }
   const { fd, directory, dataStart } = readArchive(APP)
   try {
-    const entry = lookup(directory, TARGET.split('/'))
+    const entry = lookup(directory, TARGET_PARTS)
     if (entry === undefined) {
       console.error(`not found in the archive: ${TARGET}`)
       process.exit(1)

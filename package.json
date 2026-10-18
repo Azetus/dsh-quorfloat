@@ -44,6 +44,7 @@
     "frontend:install": "npm --prefix quorfloat/frontend install --no-audit --no-fund",
     "build": "node scripts/release.mjs",
     "build:npm": "node scripts/release-npm.mjs",
+    "ci:install": "node scripts/ci.mjs install",
     "ci:test": "node scripts/ci.mjs test",
     "release:publish": "node scripts/publish-npm.mjs",
     "build:local": "npm run build:plugin && npm run build:sidecar",
