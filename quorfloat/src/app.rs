@@ -5,7 +5,8 @@
 //! shape
 //! plus the commands the page can issue), the native-height coordination ([`height`]),
 //! and the small local files the process manages — [`preferences`], [`pinned`],
-//! [`workspace`], [`geometry`] and [`window_settings`].
+//! [`workspace`], [`geometry`] and [`window_settings`]; [`persist`] is the shared
+//! atomic-write path they all use.
 //!
 //! The drawing itself lives in the web frontend; the Tauri shell in `main.rs` feeds it
 //! state and applies its intents to the session.
@@ -16,6 +17,7 @@ pub mod language;
 pub mod theme;
 
 pub mod geometry;
+pub mod persist;
 pub mod pinned;
 pub mod preferences;
 pub mod session;

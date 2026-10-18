@@ -139,6 +139,9 @@ snapshot part missing; requesting resend  缺片，已请求重发
 snapshot dropped: <reason>           分块快照被丢弃（超时/被新 begin 取代/打开过多）
 frames decoded=D garbage=G oversized=X  退出时统计：解码/垃圾/超限帧
 settings initial / preferences set / window config applied  设置与实际窗口配置的真值面包屑
+preferences save failed: <path>: <error>  偏好写入失败（内存值仍生效）
+pins save failed: <path>: <error>         固定项写入失败（内存值仍生效）
+window position save failed: <path>: <error>  窗口位置写入失败（窗口仍可用）
 workspaces changed: baseline <n>     工作区推送流基线
 workspaces changed: upsert <id>      工作区新增/改名
 workspaces changed: removed <id>     工作区删除

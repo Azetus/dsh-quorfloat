@@ -509,7 +509,7 @@ pub fn load_earlier(session: &mut Session, sink: &mut dyn FrameSink) -> Value {
 #[must_use]
 pub fn start_new(session: &mut Session, sink: &mut dyn FrameSink, pinned_path: Option<&std::path::Path>) -> Value {
     session.start_new_conversation(sink);
-    save_pins(session, pinned_path);
+    save_pins(session, pinned_path, sink);
     json!({})
 }
 
@@ -531,7 +531,7 @@ pub fn pin(
     pinned_path: Option<&std::path::Path>,
 ) -> Value {
     let accepted = session.pin_conversation(session_id.map(str::to_owned), sink);
-    save_pins(session, pinned_path);
+    save_pins(session, pinned_path, sink);
     json!({
         "accepted": accepted,
         "pinned": session.pinned_conversation(),
@@ -552,12 +552,12 @@ pub fn pin(
 #[must_use]
 pub fn pin_workspace(
     session: &mut Session,
-    _sink: &mut dyn FrameSink,
+    sink: &mut dyn FrameSink,
     workspace_id: Option<&str>,
     pinned_path: Option<&std::path::Path>,
 ) -> Value {
     session.pin_workspace(workspace_id.map(str::to_owned));
-    save_pins(session, pinned_path);
+    save_pins(session, pinned_path, sink);
     json!({
         "pinned": session.pinned_conversation(),
         "pinnedWorkspace": session.pinned_workspace(),
@@ -573,19 +573,22 @@ pub fn pin_workspace(
 ///
 /// @param session - the session that owns the pins.
 /// @param path - where the pin is remembered; `None` is "nowhere to write".
-fn save_pins(session: &mut Session, path: Option<&std::path::Path>) {
+/// @param sink - where a failed save is recorded.
+fn save_pins(session: &mut Session, path: Option<&std::path::Path>, sink: &mut dyn FrameSink) {
     session.take_pins_changed();
-    write_pins(session, path);
+    if let Err(error) = write_pins(session, path) {
+        sink.mark(&format!("pins save failed: {error}"));
+    }
 }
 
 /// Write the pin file, without touching the changed flag.
-fn write_pins(session: &Session, path: Option<&std::path::Path>) {
-    let Some(path) = path else { return };
+fn write_pins(session: &Session, path: Option<&std::path::Path>) -> std::io::Result<()> {
+    let Some(path) = path else { return Ok(()) };
     let pins = crate::app::pinned::Pinned {
         session: session.pinned_conversation().map(str::to_owned),
         workspace: session.pinned_workspace().map(str::to_owned),
     };
-    pins.save(path);
+    pins.save(path)
 }
 
 /// Write the pin file when the reconciliation layer forgot a half of it.
@@ -596,12 +599,19 @@ fn write_pins(session: &Session, path: Option<&std::path::Path>) {
 ///
 /// @param session - the session that owns the pins.
 /// @param path - where the pin is remembered; `None` is "nowhere to write".
+/// @param sink - where a failed save is recorded.
 /// @returns whether a write happened, so the caller can tell the frontend to re-render.
-pub fn persist_pins(session: &mut Session, path: Option<&std::path::Path>) -> bool {
+pub fn persist_pins(
+    session: &mut Session,
+    path: Option<&std::path::Path>,
+    sink: &mut dyn FrameSink,
+) -> bool {
     if !session.take_pins_changed() {
         return false;
     }
-    write_pins(session, path);
+    if let Err(error) = write_pins(session, path) {
+        sink.mark(&format!("pins save failed: {error}"));
+    }
     true
 }
 

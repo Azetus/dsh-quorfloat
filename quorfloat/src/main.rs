@@ -114,6 +114,24 @@ fn install_panic_hook() {
     }));
 }
 
+/// Persist the panel's preferences, keeping a failed save out of the command's result.
+///
+/// The in-memory value has already been applied. Failing to write it is worth a marker line,
+/// not a failed settings command: the panel must stay usable on a read-only or full disk.
+fn save_preferences(preferences: &Preferences, path: Option<&std::path::Path>, marker: &Marker) {
+    let Some(path) = path else { return };
+    if let Err(error) = preferences.save(path) {
+        marker.write(&format!("preferences save failed: {error}"));
+    }
+}
+
+/// Report a window-position save failure at most once per failure episode.
+fn report_window_save_error(state: &mut WindowState, marker: &Marker) {
+    if let Some(error) = state.take_save_error() {
+        marker.write(&format!("window position save failed: {error}"));
+    }
+}
+
 /// Run one session to completion.
 ///
 /// @returns why the session ended, or a message describing a startup failure.
@@ -150,9 +168,7 @@ fn run() -> Result<SessionExit, String> {
     );
     if seeded {
         preferences.language = Some(language);
-        if let Some(path) = preferences_path.as_deref() {
-            preferences.save(path);
-        }
+        save_preferences(&preferences, preferences_path.as_deref(), &marker);
         marker.write(&format!("language seeded: {}", language.as_str()));
     }
     // What the file holds, on the record, before the window exists: whether that position can
@@ -801,9 +817,7 @@ fn set_preferences(
         .map(Preferences::load)
         .unwrap_or_default();
     preferences = bridge::apply_preferences(preferences, &incoming)?;
-    if let Some(path) = state.preferences_path.as_deref() {
-        preferences.save(path);
-    }
+    save_preferences(&preferences, state.preferences_path.as_deref(), &state.marker);
     if let Some(spec) = preferences.hotkey.clone() {
         let mut slot = lock(&state.hotkey);
         let rebound = slot
@@ -971,9 +985,7 @@ fn report_languages(
         return json!({});
     }
     preferences.language = Some(adopted);
-    if let Some(path) = state.preferences_path.as_deref() {
-        preferences.save(path);
-    }
+    save_preferences(&preferences, state.preferences_path.as_deref(), &state.marker);
     {
         // The same overlay as everywhere else: the webview's answer is now the panel's own
         // choice, sitting on top of the host's baseline rather than beside it.
@@ -1161,6 +1173,7 @@ fn spawn_dispatcher(
                             let mut state = lock(&window_state);
                             state.observe((position.x as f32, position.y as f32), &displays, now);
                             state.flush(&displays, now);
+                            report_window_save_error(&mut state, &marker);
                         }
                         record_end(&session, &sink, &marker, &exit);
                         handle.exit(0);
@@ -1188,6 +1201,7 @@ fn spawn_dispatcher(
                                 &displays,
                                 rpc::now_millis(),
                             );
+                            report_window_save_error(&mut state, &marker);
                         }
                     }
                     Err(RecvTimeoutError::Disconnected) => {
@@ -1442,12 +1456,14 @@ fn spawn_clock(
             }
             let wrote_pin = {
                 let mut session = lock(&session);
-                sink.with(|sink| session.pump_follow(sink));
-                // A pin the follow layer forgot (an absent conversation, a gone workspace, a
-                // definitive refusal) has to stop being remembered across runs, and only this
-                // side knows where the file is. Written here so the decision and the record
-                // are the same tick.
-                bridge::persist_pins(&mut session, pinned_path.as_deref())
+                sink.with(|sink| {
+                    session.pump_follow(sink);
+                    // A pin the follow layer forgot (an absent conversation, a gone workspace, a
+                    // definitive refusal) has to stop being remembered across runs, and only this
+                    // side knows where the file is. Written here so the decision and the record
+                    // are the same tick.
+                    bridge::persist_pins(&mut session, pinned_path.as_deref(), sink)
+                })
             };
             if wrote_pin {
                 // The panel's status line explains the loss; without this nudge it would keep

@@ -77,19 +77,20 @@ impl Geometry {
         Self { position }
     }
 
-    /// Write the remembered position, if there is one.
+    /// Write the remembered position atomically, if there is one.
     ///
-    /// Failure is ignored: not being able to remember where the user put the panel is a
-    /// smaller problem than refusing to run because of it.
+    /// Failure is returned rather than swallowed: the window keeps its current position and
+    /// the shell records a marker. A missing position writes nothing.
     ///
     /// @param path - where to write. Its directory is created when needed.
-    pub fn save(&self, path: &std::path::Path) {
-        let Some((x, y)) = self.position else { return };
-        if let Some(directory) = path.parent() {
-            let _ = std::fs::create_dir_all(directory);
-        }
+    /// @returns `Ok(())` when there is no position to write, or when the file now holds it;
+    ///   an error with the path in its message otherwise.
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let Some((x, y)) = self.position else {
+            return Ok(());
+        };
         let body = serde_json::json!({ "x": x, "y": y });
-        let _ = std::fs::write(path, body.to_string());
+        crate::app::persist::write_atomic(path, body.to_string().as_bytes())
     }
 }
 
@@ -402,6 +403,13 @@ pub struct WindowState {
     /// `None` rather than `0` because zero is a real millisecond value: treating "never
     /// written" as "written at the epoch" makes the very first observation look settled.
     written_at: Option<i64>,
+    /// The most recent failed save, kept until it has been reported or a save succeeds.
+    save_error: Option<String>,
+    /// Whether the current error has already been handed to the shell for a marker line.
+    ///
+    /// A save is retried on later ticks when it failed; repeating the same marker every
+    /// second would turn a transient disk problem into log spam.
+    error_reported: bool,
 }
 
 impl WindowState {
@@ -410,7 +418,14 @@ impl WindowState {
     pub fn load() -> Self {
         let path = path_from_env();
         let geometry = path.as_deref().map(Geometry::load).unwrap_or_default();
-        Self { geometry, path, written: None, written_at: None }
+        Self {
+            geometry,
+            path,
+            written: None,
+            written_at: None,
+            save_error: None,
+            error_reported: false,
+        }
     }
 
     /// The position to open at, if one was remembered.
@@ -478,14 +493,48 @@ impl WindowState {
 
     /// Write what is remembered.
     ///
+    /// A failed save leaves `written` at its previous value so the next settled observation
+    /// retries; `written_at` still moves forward so a failing disk does not turn every tick
+    /// into a write attempt. The error is kept for [`Self::take_save_error`] and reported
+    /// once per failure episode.
+    ///
     /// @returns whether anything was written: "nowhere to write" is not a write, and a
     ///   caller that logs one would be logging a file that does not exist.
     fn write(&mut self, now: i64) -> bool {
         let Some(path) = &self.path else { return false };
-        self.geometry.save(path);
-        self.written = self.geometry.position();
-        self.written_at = Some(now);
-        true
+        let position = self.geometry.position();
+        match self.geometry.save(path) {
+            Ok(()) => {
+                self.written = position;
+                self.written_at = Some(now);
+                self.save_error = None;
+                self.error_reported = false;
+                true
+            }
+            Err(error) => {
+                self.written_at = Some(now);
+                if self.save_error.is_none() {
+                    self.save_error = Some(error.to_string());
+                }
+                false
+            }
+        }
+    }
+
+    /// Take the most recent save error for a marker line.
+    ///
+    /// The error is returned once per failure episode. A later successful save resets the
+    /// episode, so a new failure after recovery is reported again.
+    ///
+    /// @returns the error message, or `None` when there is nothing new to report.
+    #[must_use]
+    pub fn take_save_error(&mut self) -> Option<String> {
+        if self.error_reported {
+            return None;
+        }
+        let error = self.save_error.clone()?;
+        self.error_reported = true;
+        Some(error)
     }
 }
 
@@ -500,4 +549,71 @@ impl WindowState {
 fn plausible((x, y): (f32, f32)) -> bool {
     const LIMIT: f32 = 32_000.0;
     x.is_finite() && y.is_finite() && x.abs() < LIMIT && y.abs() < LIMIT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::persist::test_support::TempDir;
+
+    fn window_state(path: PathBuf) -> WindowState {
+        WindowState {
+            geometry: Geometry { position: Some((120.0, 340.0)) },
+            path: Some(path),
+            written: None,
+            written_at: None,
+            save_error: None,
+            error_reported: false,
+        }
+    }
+
+    #[test]
+    fn save_and_load_round_trip_the_position() {
+        let directory = TempDir::new();
+        let path = directory.path().join("window.json");
+        let geometry = Geometry { position: Some((120.0, 340.0)) };
+
+        geometry.save(&path).expect("save");
+
+        assert_eq!(Geometry::load(&path).position(), Some((120.0, 340.0)));
+    }
+
+    #[test]
+    fn saving_without_a_position_writes_nothing() {
+        let directory = TempDir::new();
+        let path = directory.path().join("window.json");
+
+        Geometry::default().save(&path).expect("nothing to write");
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_successful_write_records_the_position_and_clears_errors() {
+        let directory = TempDir::new();
+        let path = directory.path().join("window.json");
+        let mut state = window_state(path.clone());
+
+        assert!(state.write(10));
+        assert_eq!(state.take_save_error(), None);
+        assert_eq!(Geometry::load(&path).position(), Some((120.0, 340.0)));
+    }
+
+    #[test]
+    fn a_failed_write_is_reported_once_per_episode() {
+        let directory = TempDir::new();
+        let blocker = directory.path().join("blocker");
+        std::fs::write(&blocker, "not a directory").expect("seed blocker");
+        let path = blocker.join("window.json");
+        let mut state = window_state(path);
+
+        assert!(!state.write(10));
+        let first = state.take_save_error().expect("first error is reported");
+        assert!(first.contains("window.json"));
+        assert_eq!(state.take_save_error(), None);
+
+        // The same failure is retried but not reported again until a save succeeds.
+        assert!(!state.write(1_010));
+        assert_eq!(state.take_save_error(), None);
+    }
 }

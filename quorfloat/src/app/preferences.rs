@@ -107,20 +107,18 @@ impl Preferences {
         Self { theme, keep_open, hotkey, language }
     }
 
-    /// Write the preferences. Failure is ignored: not being able to remember a preference is a
-    /// smaller problem than refusing to run because of it.
+    /// Write the preferences atomically.
     ///
-    /// A file with nothing in it is removed rather than written as `{}`, so that "the user has
-    /// chosen nothing" is one state and not two.
+    /// Failure is returned rather than swallowed: the caller keeps the in-memory value and
+    /// records a marker. A file with nothing in it is removed rather than written as `{}`, so
+    /// that "the user has chosen nothing" is one state and not two.
     ///
     /// @param path - where to write.
-    pub fn save(&self, path: &std::path::Path) {
+    /// @returns `Ok(())` when the file now holds the preferences, or when the empty case
+    ///   removed it; an error with the path in its message otherwise.
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
         if self.is_empty() {
-            let _ = std::fs::remove_file(path);
-            return;
-        }
-        if let Some(directory) = path.parent() {
-            let _ = std::fs::create_dir_all(directory);
+            return crate::app::persist::remove_if_present(path);
         }
         let theme = self.theme.map(|preference| match preference {
             Preference::System => "system",
@@ -133,7 +131,7 @@ impl Preferences {
             "hotkey": self.hotkey,
             "language": self.language.map(Language::as_str),
         });
-        let _ = std::fs::write(path, body.to_string());
+        crate::app::persist::write_atomic(path, body.to_string().as_bytes())
     }
 }
 
@@ -234,4 +232,53 @@ pub fn path_from_env() -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty());
     named.or_else(default_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::persist::test_support::TempDir;
+
+    #[test]
+    fn save_and_load_round_trip_all_fields() {
+        let directory = TempDir::new();
+        let path = directory.path().join("preferences.json");
+        let preferences = Preferences {
+            theme: Some(Preference::Dark),
+            keep_open: Some(true),
+            hotkey: Some("Alt+Space".to_owned()),
+            language: Some(Language::En),
+        };
+
+        preferences.save(&path).expect("save");
+        assert_eq!(Preferences::load(&path), preferences);
+    }
+
+    #[test]
+    fn saving_nothing_removes_the_file() {
+        let directory = TempDir::new();
+        let path = directory.path().join("preferences.json");
+        std::fs::write(&path, "old").expect("seed file");
+
+        Preferences::default().save(&path).expect("remove");
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn unrecognised_values_remain_absent_after_a_round_trip() {
+        let directory = TempDir::new();
+        let path = directory.path().join("preferences.json");
+        std::fs::write(
+            &path,
+            r#"{"theme":"purple","keepOpen":true,"hotkey":"NotAKey","language":"fr"}"#,
+        )
+        .expect("seed file");
+
+        let loaded = Preferences::load(&path);
+        assert_eq!(loaded.theme, None);
+        assert_eq!(loaded.keep_open, Some(true));
+        assert_eq!(loaded.hotkey, None);
+        assert_eq!(loaded.language, None);
+    }
 }

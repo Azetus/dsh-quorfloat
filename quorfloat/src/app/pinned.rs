@@ -66,23 +66,22 @@ impl Pinned {
         Self { session: string("session"), workspace: string("workspace") }
     }
 
-    /// Write the pinned pair. Failure is ignored: not being able to remember a preference is
-    /// a smaller problem than refusing to run because of it.
+    /// Write the pinned pair atomically.
     ///
-    /// An empty pin removes the file rather than writing `{}`: "nothing is pinned" and "the
-    /// file says nothing is pinned" should not be two different states to reason about.
+    /// Failure is returned rather than swallowed: the caller keeps the in-memory pins and
+    /// records a marker. An empty pin removes the file rather than writing `{}`: "nothing is
+    /// pinned" and "the file says nothing is pinned" should not be two different states to
+    /// reason about.
     ///
     /// @param path - where to write.
-    pub fn save(&self, path: &std::path::Path) {
+    /// @returns `Ok(())` when the file now holds the pins, or when the empty case removed it;
+    ///   an error with the path in its message otherwise.
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
         if self.is_empty() {
-            let _ = std::fs::remove_file(path);
-            return;
-        }
-        if let Some(directory) = path.parent() {
-            let _ = std::fs::create_dir_all(directory);
+            return crate::app::persist::remove_if_present(path);
         }
         let body = serde_json::json!({ "session": self.session, "workspace": self.workspace });
-        let _ = std::fs::write(path, body.to_string());
+        crate::app::persist::write_atomic(path, body.to_string().as_bytes())
     }
 }
 
@@ -110,4 +109,43 @@ pub fn path_from_env() -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty());
     named.or_else(default_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::persist::test_support::TempDir;
+
+    #[test]
+    fn save_and_load_round_trip_both_halves() {
+        let directory = TempDir::new();
+        let path = directory.path().join("pinned.json");
+        let pinned = Pinned {
+            session: Some("session-1".to_owned()),
+            workspace: Some("workspace-1".to_owned()),
+        };
+
+        pinned.save(&path).expect("save");
+        assert_eq!(Pinned::load(&path), pinned);
+    }
+
+    #[test]
+    fn empty_pin_removes_the_file() {
+        let directory = TempDir::new();
+        let path = directory.path().join("pinned.json");
+        std::fs::write(&path, "old").expect("seed file");
+
+        Pinned::default().save(&path).expect("remove");
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn empty_strings_load_as_absent() {
+        let directory = TempDir::new();
+        let path = directory.path().join("pinned.json");
+        std::fs::write(&path, r#"{"session":"  ","workspace":""}"#).expect("seed file");
+
+        assert_eq!(Pinned::load(&path), Pinned::default());
+    }
 }
