@@ -57,3 +57,6 @@ pnpm-debug.log*
 .dev.vars
 .env
 .env.*
+
+# TODO
+/TODO.md
