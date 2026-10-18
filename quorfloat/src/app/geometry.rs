@@ -209,6 +209,42 @@ pub fn on_a_display(point: (f32, f32), displays: &[ScreenRect]) -> bool {
     displays.iter().any(|display| display.contains(point))
 }
 
+/// Whether a rectangle has at least the requested visible extent on one display.
+///
+/// The show guard uses this on the window's drag strip, not on the whole window: a panel with
+/// only a few pixels of its top bar visible is technically on screen but cannot be grabbed, and
+/// treating that as usable is how a window becomes stranded at a corner. Requiring a minimum
+/// width and height keeps a partially off-screen window where the user put it, while bringing
+/// back one whose handle is effectively gone.
+///
+/// The intersection is measured against one display at a time. A drag strip that straddles two
+/// displays with a gap can be split into two smaller pieces; the conservative result is
+/// "unusable" unless one piece alone is large enough.
+///
+/// An empty display list reports `false`; callers must not use that as a reason to move the
+/// window, because there is nowhere to move it to.
+///
+/// @param rect - the rectangle to test, usually the top drag strip.
+/// @param displays - every display the platform reports.
+/// @param min_width - required visible width in the rectangle's units.
+/// @param min_height - required visible height in the rectangle's units.
+/// @returns whether one display contains at least that much of the rectangle.
+#[must_use]
+pub fn visible_at_least(
+    rect: ScreenRect,
+    displays: &[ScreenRect],
+    min_width: f32,
+    min_height: f32,
+) -> bool {
+    displays.iter().any(|display| {
+        let left = rect.x.max(display.x);
+        let right = (rect.x + rect.width).min(display.x + display.width);
+        let top = rect.y.max(display.y);
+        let bottom = (rect.y + rect.height).min(display.y + display.height);
+        right - left >= min_width && bottom - top >= min_height
+    })
+}
+
 /// Where a window of `size` opens on `display` under `anchor`.
 ///
 /// The caller passes a display's **work area**, not its raw rectangle: the top edge of a screen

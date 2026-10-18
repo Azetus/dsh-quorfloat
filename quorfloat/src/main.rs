@@ -64,6 +64,15 @@ const CLOCK_INTERVAL_MS: u64 = 1000;
 /// How often the dispatcher checks whether the platform made room for a height request.
 const HEIGHT_TICK_MS: u64 = 50;
 
+/// Minimum visible drag area, in logical pixels, below which the panel counts as stranded.
+///
+/// The window's drag region is its top bar (about 40 logical pixels high). These are not that
+/// height: they are the part of it a user must still be able to click. Keeping the threshold
+/// below the real bar means a layout change does not silently disable the guard, while a panel
+/// with only a sliver of its top edge on screen is still brought back.
+const MIN_DRAG_WIDTH_LOGICAL: f32 = 64.0;
+const MIN_DRAG_HEIGHT_LOGICAL: f32 = 24.0;
+
 /// Height of the placeholder window until the frontend reports content heights.
 const PLACEHOLDER_HEIGHT: f64 = 400.0;
 
@@ -392,6 +401,10 @@ fn run() -> Result<SessionExit, String> {
             // been unplugged, which is exactly how a panel ends up created where nobody can see
             // it and the hotkey looks broken). Both facts are on the record either way.
             place_window(&window, &settings, &shell_state, &shell_sink, &shell_marker);
+            // A saved position can be on-screen yet leave only a sliver of the drag bar visible.
+            // The startup rule above checks the remembered corner; this checks whether the panel
+            // can actually be grabbed before it is ever shown.
+            ensure_window_usable(&window, &settings, &shell_sink, &shell_marker);
 
             app.manage(ShellRuntime {
                 session: Arc::clone(&shell_session),
@@ -423,6 +436,7 @@ fn run() -> Result<SessionExit, String> {
                 shell_marker,
                 handle,
                 Arc::clone(&shell_view),
+                settings.clone(),
                 settings.start_visible,
                 hotkey_active,
                 Arc::clone(&shell_state),
@@ -571,6 +585,35 @@ fn displays_now(window: &WebviewWindow) -> Vec<ScreenRect> {
         .unwrap_or_default()
 }
 
+/// The usable work areas the platform reports, in physical pixels.
+///
+/// Unlike [`displays_now`], these exclude the macOS menu bar and Dock and the Windows taskbar.
+/// That is exactly the rectangle a click can reach, so the drag-area guard uses these rather
+/// than the full frames: a panel tucked under the Dock is still inside the frame but its top bar
+/// is not clickable.
+///
+/// @param window - any window of this application, used as the handle to the platform.
+/// @returns every display's work area, or an empty list when the platform cannot answer.
+fn work_areas_now(window: &WebviewWindow) -> Vec<ScreenRect> {
+    window
+        .available_monitors()
+        .map(|monitors| {
+            monitors
+                .iter()
+                .map(|monitor| {
+                    let area = monitor.work_area();
+                    ScreenRect::new(
+                        area.position.x as f32,
+                        area.position.y as f32,
+                        area.size.width as f32,
+                        area.size.height as f32,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The primary display's usable rectangle, which is what the anchor is measured against.
 ///
 /// The **work area** rather than the frame: its top edge is below the macOS menu bar and the
@@ -590,6 +633,132 @@ fn primary_display(window: &WebviewWindow) -> Option<ScreenRect> {
             area.size.height as f32,
         )
     })
+}
+
+/// The window's whole rectangle, in the same physical coordinates as the displays.
+///
+/// `outer_position`/`outer_size` are both physical pixels, so no scale-factor conversion belongs
+/// here: mixing logical and physical coordinates is how a window that is clearly on screen gets
+/// moved. A failed query is `None` rather than a guessed rectangle; the caller must then leave
+/// the window alone.
+///
+/// @param window - the panel's window.
+/// @returns the window rectangle, or `None` when the platform cannot answer.
+fn window_rect(window: &WebviewWindow) -> Option<ScreenRect> {
+    let position = window.outer_position().ok()?;
+    let size = window.outer_size().ok()?;
+    Some(ScreenRect::new(
+        position.x as f32,
+        position.y as f32,
+        size.width as f32,
+        size.height as f32,
+    ))
+}
+
+/// The top strip of the window that carries the native drag gesture.
+///
+/// The frontend's top bar is about 40 logical pixels high; the guard only requires the lower
+/// `MIN_DRAG_HEIGHT_LOGICAL` part of that strip to be visible. Using a minimum rather than the
+/// exact measured bar height keeps this decision stable across font and layout changes while
+/// still refusing a barely-visible sliver.
+///
+/// @param rect - the whole window rectangle.
+/// @param scale - the window's scale factor.
+/// @returns the drag strip, no taller than the window itself.
+fn drag_strip(rect: ScreenRect, scale: f32) -> ScreenRect {
+    let height = (MIN_DRAG_HEIGHT_LOGICAL * scale).min(rect.height);
+    ScreenRect::new(rect.x, rect.y, rect.width, height)
+}
+
+/// The window's scale factor, or `1` when the platform cannot answer.
+fn window_scale(window: &WebviewWindow) -> f32 {
+    window
+        .scale_factor()
+        .ok()
+        .filter(|scale| scale.is_finite() && *scale > 0.0)
+        .map_or(1.0, |scale| scale as f32)
+}
+
+/// Whether enough of the window's drag area is visible to grab the panel.
+///
+/// This is deliberately stricter than "some pixel is visible": a window stranded at a corner can
+/// still intersect a display by a few pixels while its top bar is effectively unreachable. A
+/// platform that cannot report the window or its displays is treated as usable, so a failed query
+/// never moves a panel the user can see.
+///
+/// @param window - the panel's window.
+/// @returns whether the drag strip is reachable, or visibility cannot be determined.
+fn window_drag_usable(window: &WebviewWindow) -> bool {
+    let Some(rect) = window_rect(window) else { return true };
+    let areas = work_areas_now(window);
+    if areas.is_empty() {
+        return true;
+    }
+    let scale = window_scale(window);
+    let strip = drag_strip(rect, scale);
+    geometry::visible_at_least(
+        strip,
+        &areas,
+        MIN_DRAG_WIDTH_LOGICAL * scale,
+        MIN_DRAG_HEIGHT_LOGICAL * scale,
+    )
+}
+
+/// Bring a window whose drag area is unreachable back to the primary display's anchor.
+///
+/// This is the show-time half of the hot-plug protection, extended to the everyday case of a
+/// window dragged into a corner until only a sliver remains visible. The window is moved only
+/// when its drag strip is too small to grab; a partially visible panel whose handle is still
+/// usable is deliberately left where the user put it. The decision uses the same primary work
+/// area and anchor as startup placement, so the recovery position has one definition.
+///
+/// @param window - the panel's window, typically still hidden.
+/// @param settings - the effective settings; `anchor` is the recovery placement.
+/// @param sink - for a platform error that is worth a log line.
+/// @param marker - the record of what happened.
+/// @returns whether the window was moved.
+fn ensure_window_usable(
+    window: &WebviewWindow,
+    settings: &WindowSettings,
+    sink: &SharedSink,
+    marker: &Marker,
+) -> bool {
+    let Some(rect) = window_rect(window) else { return false };
+    let areas = work_areas_now(window);
+    if areas.is_empty() {
+        return false;
+    }
+    let scale = window_scale(window);
+    let strip = drag_strip(rect, scale);
+    if geometry::visible_at_least(
+        strip,
+        &areas,
+        MIN_DRAG_WIDTH_LOGICAL * scale,
+        MIN_DRAG_HEIGHT_LOGICAL * scale,
+    ) {
+        return false;
+    }
+    let Some(primary) = primary_display(window) else {
+        marker.write(&format!(
+            "window position rejected: drag area at {:.0},{:.0} is unreachable; no display to anchor on",
+            rect.x, rect.y,
+        ));
+        return false;
+    };
+    let (x, y) = geometry::anchored(primary, (rect.width, rect.height), settings.anchor);
+    if let Err(error) = window.set_position(tauri::Position::Physical(
+        tauri::PhysicalPosition::new(x as i32, y as i32),
+    )) {
+        sink.log(&format!("could not restore an unreachable window: {error}"));
+        return false;
+    }
+    marker.write(&format!(
+        "window position rejected: drag area at {:.0},{:.0} is unreachable; moved to {x:.0},{y:.0} ({})",
+        rect.x,
+        rect.y,
+        settings.anchor.name(),
+    ));
+    true
 }
 
 // ── Tauri commands ───────────────────────────────────────────────────────────
@@ -1018,6 +1187,7 @@ fn spawn_dispatcher(
     marker: Marker,
     handle: AppHandle,
     view: Arc<Mutex<ShellView>>,
+    settings: WindowSettings,
     start_visible: bool,
     hotkey_active: bool,
     window_state: Arc<Mutex<WindowState>>,
@@ -1063,7 +1233,7 @@ fn spawn_dispatcher(
                         let mut changed = false;
                         for command in commands {
                             changed = true;
-                            apply_window_command(&window, command, &mut visible, &marker);
+                            apply_window_command(&window, command, &mut visible, &settings, &sink, &marker);
                         }
                         if changed {
                             set_view_visible(&view, visible);
@@ -1085,15 +1255,23 @@ fn spawn_dispatcher(
                                 // The hotkey's path, for the hotkey's reason: a panel that is up
                                 // plays its own exit transition and asks to hide when it ends,
                                 // so hiding the native window here would cut the fade short.
-                                if visible {
+                                // A panel reported visible but on no display cannot be hidden by
+                                // a user who cannot see it; the same toggle brings it back.
+                                if visible && window_drag_usable(&window) {
                                     marker.write("tray menu: hide");
                                     let _ = handle.emit("quorfloat/hotkey-hide", ());
                                 } else {
-                                    marker.write("tray menu: show");
+                                    marker.write(if visible {
+                                        "tray menu: panel drag area unavailable; showing again"
+                                    } else {
+                                        "tray menu: show"
+                                    });
                                     apply_window_command(
                                         &window,
                                         WindowCommand::Show,
                                         &mut visible,
+                                        &settings,
+                                        &sink,
                                         &marker,
                                     );
                                     set_view_visible(&view, visible);
@@ -1128,20 +1306,35 @@ fn spawn_dispatcher(
                         }
                     }
                     Ok(Wake::Hotkey) => {
-                        if visible {
+                        // A visible but unreachable panel is not something the user can hide:
+                        // treat the hotkey as a rescue and let the show guard bring it back.
+                        // It is not a fresh summon, so the conversation on screen is kept.
+                        let was_visible = visible;
+                        if was_visible && window_drag_usable(&window) {
                             // The frontend plays the exit transition and asks to
                             // hide when it finishes: hiding the native window here
                             // would cut the 180ms fade short. The host can still
                             // force-hide through `window/visibility` on Frames.
                             let _ = handle.emit("quorfloat/hotkey-hide", ());
                         } else {
-                            apply_window_command(&window, WindowCommand::Show, &mut visible, &marker);
+                            if was_visible {
+                                marker.write("hotkey: panel drag area unavailable; showing again");
+                            }
+                            apply_window_command(
+                                &window,
+                                WindowCommand::Show,
+                                &mut visible,
+                                &settings,
+                                &sink,
+                                &marker,
+                            );
                             set_view_visible(&view, visible);
-                            // A summon means a fresh conversation, unless the pin
-                            // says "continue this one".
-                            // The host's own shows (`window/visibility` on Frames)
-                            // do not reset — that is the host's intent, not a summon.
-                            {
+                            // A hidden-panel summon means a fresh conversation, unless the pin
+                            // says "continue this one". The off-screen rescue above keeps the
+                            // conversation, because the panel was already showing it.
+                            // The host's own shows (`window/visibility` on Frames) do not reset —
+                            // that is the host's intent, not a summon.
+                            if !was_visible {
                                 let mut session = lock(&session);
                                 // The shell's facts are locked second, the same order `emit`
                                 // takes them in: session, then view.
@@ -1156,7 +1349,7 @@ fn spawn_dispatcher(
                         apply_height(&window, &view, &marker, &emit, panel_height);
                     }
                     Ok(Wake::Visibility(command)) => {
-                        apply_window_command(&window, command, &mut visible, &marker);
+                        apply_window_command(&window, command, &mut visible, &settings, &sink, &marker);
                         set_view_visible(&view, visible);
                         report_visibility(&session, &sink, visible, &capabilities);
                         emit();
@@ -1229,14 +1422,19 @@ fn set_view_visible(view: &Arc<Mutex<ShellView>>, visible: bool) {
 /// @param window - the panel's window.
 /// @param command - what the host or the hotkey asked for.
 /// @param visible - the dispatcher's record of the current state.
+/// @param settings - the effective settings; `anchor` is the off-screen recovery placement.
+/// @param sink - for a platform error that is worth a log line.
 fn apply_window_command(
     window: &WebviewWindow,
     command: WindowCommand,
     visible: &mut bool,
+    settings: &WindowSettings,
+    sink: &SharedSink,
     marker: &Marker,
 ) {
     match command {
         WindowCommand::Show => {
+            ensure_window_usable(window, settings, sink, marker);
             resume_activation(window);
             let _ = window.show();
             let _ = window.set_focus();
@@ -1248,14 +1446,18 @@ fn apply_window_command(
             *visible = false;
         }
         WindowCommand::Toggle => {
-            *visible = !*visible;
-            if *visible {
+            // A visible but unreachable panel cannot be hidden by a user who cannot grab it:
+            // treat the toggle as a rescue and show it at the anchor instead.
+            if *visible && window_drag_usable(window) {
+                let _ = window.hide();
+                yield_activation(window, marker);
+                *visible = false;
+            } else {
+                ensure_window_usable(window, settings, sink, marker);
                 resume_activation(window);
                 let _ = window.show();
                 let _ = window.set_focus();
-            } else {
-                let _ = window.hide();
-                yield_activation(window, marker);
+                *visible = true;
             }
         }
     }
