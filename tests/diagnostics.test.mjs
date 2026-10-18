@@ -61,7 +61,7 @@ function input() {
   return {
     generatedAt: '2026-10-18T06:30:00.000Z',
     protocolVersion: 'quorfloat/1',
-    dshVersion: '0.2.0-rc.2',
+    dshVersion: 'test-dsh',
     platform: 'darwin',
     arch: 'arm64',
     home: '/Users/alice',
@@ -81,7 +81,7 @@ function input() {
         binaryPath: '/Users/alice/.dsh/quorfloat/dsh-quorfloat',
         binarySource: 'platform-package',
         peerCapabilities: ['window', 'hotkey'],
-        peerVersion: '0.1.6',
+        peerVersion: 'test-peer',
         peerPlatform: 'darwin',
         peerArch: 'arm64',
         restarts: 0,
