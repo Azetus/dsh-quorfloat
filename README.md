@@ -2,7 +2,7 @@
 
 简体中文 | [English](README_EN.md) | [npm](https://www.npmjs.com/package/dsh-quorfloat)
 
-DeepSeek Harness 的桌面悬浮会话插件。通过全局快捷键呼出面板，在使用其他应用时也能向 Harness 提问、继续已有会话、查看回答和处理审批。
+DeepSeek Harness 的桌面悬浮窗会话插件。通过全局快捷键呼出面板，在使用其他应用时也能向 Harness 提问、继续已有会话、查看回答和处理审批。
 
 面板使用 Harness 的工作区、会话、模型和权限设置，对话执行与历史记录仍由 Harness 管理。离线发布包自带宿主插件和面板程序；通过 npm 安装时，包管理器会自动获取当前平台的面板程序。两种方式均无需自行编译。
 
