@@ -386,6 +386,7 @@ export class QuorfloatSupervisor {
         env: quorfloatEnvironment(config),
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
+        shell: false,
       }) as ChildProcessWithoutNullStreams
     } catch (error) {
       const failure = new ChannelError('spawn-failed', error instanceof Error ? error.message : String(error))
