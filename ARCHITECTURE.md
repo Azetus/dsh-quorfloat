@@ -234,6 +234,7 @@ macOS 菜单栏 / Windows 通知区提供：显示、隐藏、重启、退出。
 | `quorfloat/status` | 只读监督状态：state、pid、restarts、restartExhausted、seen、visible、lastError |
 | `quorfloat/panel` | 写：`{action:"start"\|"stop"\|"restart"}`；与 `panel/lifecycle` 共用同一执行路径 |
 | `quorfloat/reportPresence` | `{surface,visible,focused,seq,at?}`；浏览器半边的 presence 上报 |
+| `quorfloat/diagnostics` | 零参数；把当前状态快照写成 `.log`，回答 `{path,filename}` |
 
 ### 4.4 请求语义
 
@@ -470,7 +471,8 @@ patch 整体替换 `config`，未知字段报错而不是静默取默认值。
 
 - `window.json`：窗口位置；启动时若记忆位置不在任何已连接屏幕内，回退到锚点。
 - `pinned.json`：会话 pin 与工作区 pin；失效清理必须能解释，且只清失效的那一半。
-- 三个文件都只由侧车读写；测试必须重定向到临时目录。
+- `logs/`：手动导出的诊断 `.log`；每次导出一个文件，不自动清理。
+- 三个状态文件只由侧车读写；诊断日志由宿主写入；测试必须重定向到临时目录。
 
 ### 7.4 多语言
 
@@ -585,6 +587,11 @@ patch 整体替换 `config`，未知字段报错而不是静默取默认值。
 | 界面语言 | 中文/英文；立即生效并持久化 |
 | 呼出快捷键 | 设计稿的框本身就是控件：点一下开始录制；Esc/Enter 在录制期间让位；裸字母/数字/标点被拒，功能键例外 |
 | 失焦时保持展开 | 开关；与 `hideOnBlur` 在边界处换算一次 |
+| 导出诊断 | 把当前状态快照写到 `~/.dsh-quorfloat/logs/`，成功后显示绝对路径；每次手动导出一个文件，不自动清理 |
+
+导出是当前状态快照，不是历史日志：包含 supervisor、配置、服务探测、会话/交互摘要与审批归属；
+会话/交互 ID 截短、home 路径替换为 `~`，不包含对话正文或凭证。目录可用 `DSH_QUORFLOAT_LOG_DIR`
+覆盖；在 `dev` 下随 `.dev-home/` 隔离。
 
 设置页没有“附带剪贴板”行，也不会再有；该功能已取消。
 
@@ -679,7 +686,8 @@ Rust target。普通安装用户不需要本地编译。
 ### 10.2 已知限制
 
 - Windows 上状态文件的符号链接行为未专门验证；普通文件路径已跨平台覆盖。
-- `diag/snapshot` 只有宿主侧，没有面向用户的诊断导出入口。
+- 悬浮窗是宿主本机窗口；通过远程 WebUI 访问时只能使用插件状态/设置页，不能显示或操作悬浮窗。
+- 诊断导出写到 DSH 主机上的 `~/.dsh-quorfloat/logs/`；远程 WebUI 用户拿到的是远端路径，不是浏览器所在机器。
 - 显示器热插拔后的位置回退未专门验证；窗口位置不在任何屏幕内时回退到锚点。
 - 会话列表靠 3 秒轮询；事件化优化已延后。
 - 长会话只保留 4 MiB 转录窗口；更早内容通过分页加载，超出窗口的旧行会被回收并写 marker。

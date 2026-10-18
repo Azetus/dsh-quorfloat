@@ -24,6 +24,7 @@ The panel uses Harness's workspaces, sessions, models, and permission settings. 
 - **Control sessions**: Send messages, stop generation, select models, reasoning levels, and permission presets provided by Harness, and view available session statistics.
 - **Approvals and follow-up questions**: Handle tool approvals and questions for the current session directly in the panel, without switching back to the main Harness window.
 - **Appearance and language**: Light, dark, and system themes; Chinese and English interfaces; customizable global shortcut. Settings are saved automatically.
+- **Diagnostics export**: From the settings page, write a current-state snapshot to `~/.dsh-quorfloat/logs/` and show the file path.
 
 ## Installation
 
@@ -43,6 +44,8 @@ In the examples below, `<version>` is a placeholder. Replace it with the actual 
 ### Browser WebUI
 
 First, stop the running `dsh web` service. The commands below install into the `web` profile. If you use a custom profile, replace `web` with your profile name and start Harness with the same profile.
+
+When accessed remotely, the WebUI can install the plugin and show its status, but the floating window runs on the DSH host and does not appear on the browser's machine.
 
 #### npm installation
 
@@ -107,6 +110,8 @@ Click the workspace or session name at the top to open its selector:
 - **Browse ungrouped sessions**: Select “Ungrouped” to view existing sessions that do not belong to a workspace. This entry cannot be pinned and does not offer a “New session” option.
 
 Click the gear icon to adjust the theme, interface language, shortcut, and “Keep open when unfocused” setting. If the default shortcut conflicts with another application, open the panel from the menu bar or system tray and change it in Settings.
+
+In Harness, open “Settings → Built-in plugins → dsh-quorfloat” and click “Export diagnostics”. The current-state snapshot is written to `~/.dsh-quorfloat/logs/` on the DSH host, and the page shows the file path.
 
 ## Building from Source
 

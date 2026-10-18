@@ -264,6 +264,9 @@ const STATUS_ENDPOINT = 'quorfloat/status'
 /** Endpoint: the start/stop transition this half offers. */
 const PANEL_ENDPOINT = 'quorfloat/panel'
 
+/** Endpoint: writes one diagnostics file on the host and answers its path. */
+const DIAGNOSTICS_ENDPOINT = 'quorfloat/diagnostics'
+
 /** Dictionary namespace owning the page half's copy. */
 const LOCALE_NS = 'quorfloat.sidecar'
 
@@ -607,30 +610,54 @@ export function startStatusPolling(
   }
 }
 
-/** The two gateway calls the page half makes. */
+/** One successful diagnostics export: where the host wrote the file. */
+export interface DiagnosticsExport {
+  /** Absolute path on the DSH host. */
+  readonly path: string
+  readonly filename: string
+}
+
+/** The gateway calls the page half makes. */
 interface SidecarFace {
   /** The current snapshot, or null when the call could not be answered. */
   read(): Promise<SidecarStatus | null>
   /** Ask for one transition; the snapshot answered, or null on failure. */
   control(action: 'start' | 'stop'): Promise<SidecarStatus | null>
+  /** Write one diagnostics file on the host; null when the export failed. */
+  diagnostics(): Promise<DiagnosticsExport | null>
 }
 
 /** The logger shape this half uses; named so the face's signature stays readable. */
 type ClientLogger = ReturnType<ClientContext['logger']>
 
 /**
- * Build the two gateway calls over one connection.
+ * Read one diagnostics answer from the host.
  *
- * A failed call is a null snapshot, never an exception into React: the caller's
- * only sane response to "the host did not answer" is to say so, and the badge
- * has a word for exactly that.
+ * @param value - the `value` of a successful `quorfloat/diagnostics` answer.
+ * @returns the saved path, or null when the answer is not the expected shape.
+ */
+export function parseDiagnosticsExport(value: unknown): DiagnosticsExport | null {
+  if (typeof value !== 'object' || value === null) return null
+  const record = value as Record<string, unknown>
+  const path = record['path']
+  const filename = record['filename']
+  if (typeof path !== 'string' || path === '') return null
+  if (typeof filename !== 'string' || filename === '') return null
+  return { path, filename }
+}
+
+/**
+ * Build the gateway calls over one connection.
+ *
+ * A failed call is a null answer, never an exception into React: the caller's
+ * only sane response to "the host did not answer" is to say so.
  *
  * @param connection - the browser connection service.
  * @param log - this half's logger.
- * @returns the read and control calls.
+ * @returns the read, control and diagnostics calls.
  */
 function createSidecarFace(connection: ClientConnection, log: ClientLogger): SidecarFace {
-  const ask = async (endpoint: string, args: Record<string, unknown>): Promise<SidecarStatus | null> => {
+  const call = async (endpoint: string, args: Record<string, unknown>): Promise<unknown> => {
     try {
       // The arguments are spread: the gateway matches `args` keys against the
       // host method's parameter names one for one, and requires the envelope to
@@ -640,15 +667,16 @@ function createSidecarFace(connection: ClientConnection, log: ClientLogger): Sid
         log.debug('sidecar call was refused', { endpoint, error: result.error })
         return null
       }
-      return parseStatus(result.value)
+      return result.value
     } catch (error) {
       log.warn('could not reach the sidecar gateway', error)
       return null
     }
   }
   return {
-    read: () => ask(STATUS_ENDPOINT, {}),
-    control: action => ask(PANEL_ENDPOINT, { action }),
+    read: async () => parseStatus(await call(STATUS_ENDPOINT, {})),
+    control: async action => parseStatus(await call(PANEL_ENDPOINT, { action })),
+    diagnostics: async () => parseDiagnosticsExport(await call(DIAGNOSTICS_ENDPOINT, {})),
   }
 }
 
@@ -708,6 +736,39 @@ function useSidecarControl(sidecar: SidecarFace): {
   return { status, action, pending, onClick }
 }
 
+/** The export button's state; `done` carries the path the host reports. */
+type DiagnosticsState =
+  | { readonly status: 'idle' }
+  | { readonly status: 'busy' }
+  | { readonly status: 'done'; readonly path: string }
+  | { readonly status: 'error' }
+
+/**
+ * The settings page's export button.
+ *
+ * The host writes the file and answers the absolute path; this half never
+ * touches the filesystem and never offers a clipboard fallback. A failed call
+ * becomes a visible error, not a rejected promise in the React tree.
+ *
+ * @param sidecar - the gateway calls.
+ * @returns the export state and its click handler.
+ */
+function useDiagnosticsExport(sidecar: SidecarFace): {
+  state: DiagnosticsState
+  onClick: () => void
+} {
+  const [state, setState] = React.useState<DiagnosticsState>({ status: 'idle' })
+  const onClick = (): void => {
+    if (state.status === 'busy') return
+    setState({ status: 'busy' })
+    void sidecar.diagnostics().then(
+      result => setState(result === null ? { status: 'error' } : { status: 'done', path: result.path }),
+      () => setState({ status: 'error' }),
+    )
+  }
+  return { state, onClick }
+}
+
 /**
  * Compose the state indicator's text from one decision.
  *
@@ -745,6 +806,28 @@ const TAB_ROW_STYLE = {
   gap: '24px',
 } as const
 
+/** The tab body: the status/action row, then an optional export result line. */
+const TAB_BODY_STYLE = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '8px',
+} as const
+
+/** The trailing controls: export and start/stop share one aligned group. */
+const TAB_ACTIONS_STYLE = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '8px',
+  flex: 'none',
+} as const
+
+/** The export result: a path can be long, so it wraps instead of widening the tab. */
+const TAB_MESSAGE_STYLE = {
+  opacity: 0.75,
+  fontSize: '12px',
+  overflowWrap: 'anywhere',
+} as const
+
 /**
  * Build the tab entry: this plugin's page inside Settings → Built-in plugins.
  *
@@ -753,12 +836,11 @@ const TAB_ROW_STYLE = {
  * number the user is reading does not blink out of existence when they glance at
  * the inventory.
  *
- * The body is exactly one row, in every state: the state indicator at the start,
- * the action at the end, vertically centred. The indicator leads because it is
- * the answer to the question the user opened the page with, and it carries the
- * supervisor's own reason on its tooltip — the reason is a sentence, and a
- * tooltip is where this page keeps one. The action trails, offering `start` when
- * there is nothing to stop and nothing at all while no snapshot has been read.
+ * The top row is the state indicator at the start and the controls at the end.
+ * Export is always offered, even when nothing is running: a snapshot of the
+ * stopped state is often the most useful one to send. The start/stop control is
+ * offered only when the current state has a direction. A successful export adds
+ * one line below the row with the absolute path on the DSH host.
  *
  * @param sidecar - the gateway calls.
  * @returns the slot component.
@@ -766,20 +848,22 @@ const TAB_ROW_STYLE = {
 function createSidecarTab(sidecar: SidecarFace): SlotComponent {
   return function SidecarTab({ t }: TabProps): unknown {
     const { status, action, pending, onClick } = useSidecarControl(sidecar)
+    const diagnostics = useDiagnosticsExport(sidecar)
     const description = describeStatus(status)
-    const nodes: unknown[] = [
-      // `undefined` leaves the attribute off entirely rather than claiming an empty
-      // reason; a state with no tracked failure has nothing to explain.
+    const controls: unknown[] = [
       h(
-        'span',
-        { title: description.title ?? undefined },
-        h(primitives.Tag, { tone: description.tone }, statusText(description, t)),
+        primitives.Button,
+        {
+          variant: 'outline',
+          size: 'md',
+          disabled: diagnostics.state.status === 'busy',
+          onClick: diagnostics.onClick,
+        },
+        t(diagnostics.state.status === 'busy' ? 'exporting' : 'export'),
       ),
     ]
-    // The action is the row's last cell. A state nobody has answered offers none,
-    // and the row is then the indicator alone.
     if (action !== null) {
-      nodes.push(h(
+      controls.push(h(
         primitives.Button,
         {
           // Start is the page's reason to exist — after a quit from the tray menu
@@ -793,7 +877,27 @@ function createSidecarTab(sidecar: SidecarFace): SlotComponent {
         t(action),
       ))
     }
-    return h('div', { style: TAB_ROW_STYLE }, ...nodes)
+    const message = diagnostics.state.status === 'done'
+      ? t('exported', { path: diagnostics.state.path })
+      : diagnostics.state.status === 'error'
+        ? t('exportFailed')
+        : null
+    const children: unknown[] = [
+      h(
+        'div',
+        { style: TAB_ROW_STYLE },
+        // `undefined` leaves the attribute off entirely rather than claiming an empty
+        // reason; a state with no tracked failure has nothing to explain.
+        h(
+          'span',
+          { title: description.title ?? undefined },
+          h(primitives.Tag, { tone: description.tone }, statusText(description, t)),
+        ),
+        h('div', { style: TAB_ACTIONS_STYLE }, ...controls),
+      ),
+    ]
+    if (message !== null) children.push(h('span', { style: TAB_MESSAGE_STYLE }, message))
+    return h('div', { style: TAB_BODY_STYLE }, ...children)
   }
 }
 
@@ -1011,8 +1115,17 @@ export function apply(ctx: ClientContext): void {
   })
 }
 
-/** Every word the page half renders: one per `StatusKey`, the verbs, the gave-up clause, and the tab. */
-type MessageKey = StatusKey | 'start' | 'stop' | 'gaveUp' | 'tab'
+/** Every word the page half renders: one per `StatusKey`, the verbs, the export copy, and the tab. */
+type MessageKey =
+  | StatusKey
+  | 'start'
+  | 'stop'
+  | 'gaveUp'
+  | 'export'
+  | 'exporting'
+  | 'exported'
+  | 'exportFailed'
+  | 'tab'
 
 /**
  * English copy; `other` is where an unrecognised state is interpolated.
@@ -1037,6 +1150,10 @@ const en: Record<MessageKey, string> = {
   start: 'Start floating panel',
   stop: 'Stop floating panel',
   gaveUp: ' ({restarts} failures in a row)',
+  export: 'Export diagnostics',
+  exporting: 'Exporting…',
+  exported: 'Diagnostics saved on the DSH host: {path}',
+  exportFailed: 'Could not export diagnostics. Check the DSH plugin log.',
   tab: BUNDLE_NAME,
 }
 
@@ -1053,5 +1170,9 @@ const zh: Record<MessageKey, string> = {
   start: '启动悬浮窗',
   stop: '停止悬浮窗',
   gaveUp: '（连续 {restarts} 次失败）',
+  export: '导出诊断',
+  exporting: '导出中…',
+  exported: '导出日志位于 DSH 主机：{path}',
+  exportFailed: '导出失败，请查看 DSH 插件日志。',
   tab: BUNDLE_NAME,
 }

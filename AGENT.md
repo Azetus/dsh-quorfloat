@@ -169,7 +169,9 @@ transcript skipped: … internal / N unrecognised (kind, …)  被藏起来的�
 ### 5.2 诊断入口
 
 - 安装态：DSH 的插件日志（宿主半边）、supervisor 捕获并限流转发的侧车 stderr、上面的 marker。
-- 宿主 `diag/snapshot`：配置、握手与监督状态；只有宿主侧注册，正常 UI 不调用，用户没有导出入口。
+- 宿主 `diag/snapshot`：配置、握手与监督状态；宿主侧协议入口，正常 UI 不调用。
+- 用户导出：设置页“导出诊断”调用 `quorfloat/diagnostics`，宿主把当前状态快照写到
+  `~/.dsh-quorfloat/logs/` 并返回绝对路径。
 - 不要依赖旧的帧缓冲截图、图元 dump 或动画抓帧工具；这些方法已退役，当前栈不再产出那些开关。
 
 常用环境变量：
@@ -178,6 +180,7 @@ transcript skipped: … internal / N unrecognised (kind, …)  被藏起来的�
 |---|---|
 | `DSH_QUORFLOAT_PATH` | 覆盖侧车可执行文件路径；开发与 CI 用 |
 | `DSH_QUORFLOAT_PREFERENCES` / `_PINNED` / `_WINDOW_STATE` | 覆盖三个状态文件路径；测试必须指向临时目录 |
+| `DSH_QUORFLOAT_LOG_DIR` | 覆盖诊断日志目录；默认随 preferences 的父目录，dev 下落在 `.dev-home/logs/` |
 | `DSH_QUORFLOAT_RUST_MARKER` | 打开侧车 marker；唯一可靠的运行时记录 |
 | `DSH_QUORFLOAT_DEV_URL` | 指向 Vite dev server；WebView 只允许同一文档 |
 | `DSH_QUORFLOAT_WINDOW_*` / `_THEME` / `_HOTKEY` | 宿主 spawn 时下发的启动基线；`ready` 会再下发一次有效配置 |

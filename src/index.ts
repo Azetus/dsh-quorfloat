@@ -16,6 +16,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { homedir } from 'node:os'
 
 import { Config, DEFAULT_CONFIG, type QuorfloatConfig } from './config.js'
 import type { ChannelError } from './bridge/errors.js'
@@ -25,6 +26,9 @@ import { resolveQuorfloatBinary, type ResolvedBinary } from './host/binary.js'
 import { readHarnessLocalePreference, resolvePanelLanguageDecision } from './host/language.js'
 import { registerPresenceGateway, type InboundPresenceReport } from './host/presence-gateway.js'
 import { applyLifecycle, registerControlGateway } from './host/control-gateway.js'
+import { formatDiagnostics, saveDiagnostics } from './host/diagnostics.js'
+import { registerDiagnosticsGateway } from './host/diagnostics-gateway.js'
+import { PROTOCOL_VERSION } from './protocol.js'
 import {
   createHarnessFromContext,
   HarnessError,
@@ -81,6 +85,8 @@ interface Activation {
   presenceGateway?: Disposer | undefined
   /** Disposer for the browser-facing control service. */
   controlGateway?: Disposer | undefined
+  /** Disposer for the browser-facing diagnostics service. */
+  diagnosticsGateway?: Disposer | undefined
   stopped: boolean
 }
 
@@ -403,6 +409,33 @@ export function createPlugin(overrides: PluginOverrides = {}) {
         // still owns the process: report rather than fail activation.
         log.warn('could not register the panel control gateway; the browser half cannot read or change supervision state', error)
       }
+      try {
+        // Registered before the first spawn: a diagnostics request during startup
+        // should say "starting", not "unavailable".
+        activation.diagnosticsGateway = registerDiagnosticsGateway({
+          ctx,
+          log,
+          run: () => {
+            const current = state()
+            const now = new Date()
+            return saveDiagnostics(formatDiagnostics({
+              generatedAt: now.toISOString(),
+              protocolVersion: PROTOCOL_VERSION,
+              dshVersion: hostVersion(),
+              platform: process.platform,
+              arch: process.arch,
+              config,
+              state: current,
+              authority: authority(),
+              home: homedir(),
+            }), { now })
+          },
+        })
+      } catch (error) {
+        // Diagnostics are useful but not load-bearing: keep the panel running and
+        // report the one surface that became unavailable.
+        log.warn('could not register the diagnostics gateway; the settings page cannot export a snapshot', error)
+      }
       void supervisor
         .start()
         .then(snapshot => {
@@ -594,6 +627,12 @@ async function deactivate(activation: Activation, log: Logger): Promise<void> {
     // Unregistering the browser-facing control service must not block the rest of teardown.
   }
   activation.controlGateway = undefined
+  try {
+    activation.diagnosticsGateway?.()
+  } catch {
+    // Unregistering the browser-facing diagnostics service must not block teardown.
+  }
+  activation.diagnosticsGateway = undefined
   try {
     activation.injection?.()
   } catch {

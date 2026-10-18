@@ -72,6 +72,10 @@ export interface SupervisorSnapshot {
    * Empty before the handshake, which defers everything — the safe direction.
    */
   readonly peerCapabilities: readonly string[]
+  /** What the peer reported about its own build in `hello`, before any window exists. */
+  readonly peerVersion: string | undefined
+  readonly peerPlatform: string | undefined
+  readonly peerArch: string | undefined
 }
 
 /** Event delivered to listeners on every meaningful supervision change. */
@@ -175,6 +179,9 @@ export class QuorfloatSupervisor {
       panelVisible: this.#panelVisible,
       panelCapabilities: this.#panelCapabilities,
       peerCapabilities: this.#router?.handshake?.capabilities ?? [],
+      peerVersion: this.#router?.handshake?.quorfloatVersion,
+      peerPlatform: this.#router?.handshake?.platform,
+      peerArch: this.#router?.handshake?.arch,
     }
   }
 
