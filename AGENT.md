@@ -195,8 +195,6 @@ transcript skipped: … internal / N unrecognised (kind, …)  被藏起来的�
 | `DSH_QUORFLOAT_CARGO_LOCKED` | CI 中强制 `cargo --locked` |
 | `DSH_QUORFLOAT_PEER_*` | 测试/脚本化 peer 的行为开关，不用于正常安装 |
 
-`DSH_QUORFLOAT_PERF` 仍由 `scripts/dev.mjs` 设置，但侧车已无人读取；清理前不要把它当作性能开关。
-
 ## 6. 代码约定
 
 ### 6.1 通用

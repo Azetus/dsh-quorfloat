@@ -140,7 +140,6 @@ export function parseArgs(argv) {
     port: '0',
     build: true,
     rustProfile: 'debug',
-    perf: false,
     open: false,
     emptyWorkspaces: false,
     dshHome: undefined,
@@ -161,9 +160,6 @@ export function parseArgs(argv) {
         break
       case '--release':
         options.rustProfile = 'release'
-        break
-      case '--perf':
-        options.perf = true
         break
       case '--no-build':
         options.build = false
@@ -196,7 +192,6 @@ Options:
   --dsh-home <path>  where to read model credentials from
                      (default: ${join(homedir(), '.dsh')})
   --release          build and run the release Rust sidecar (default: debug)
-  --perf             record CPU/active-frame timing; disable screenshot capture
   --no-build         skip both JS and Rust builds; require the chosen Rust binary
   --open             let dsh open a browser (default: do not)
   --empty-workspaces start with no workspace registry and no carried-over session
@@ -605,9 +600,6 @@ function start(options, home, sidecar, staged) {
     // shows it nowhere, so without this file "did the approval reach the panel, and
     // did the click leave it" has no answer after the fact.
     DSH_QUORFLOAT_RUST_MARKER: MARKER_PATH,
-    ...(options.perf ? {
-      DSH_QUORFLOAT_PERF: '1',
-    } : {}),
     // Where the panel remembers where the user put it. Pointed at the throwaway home so
     // that developing never edits the real user's remembered position.
     DSH_QUORFLOAT_WINDOW_STATE: WINDOW_STATE_PATH,
@@ -634,7 +626,7 @@ function start(options, home, sidecar, staged) {
     + `     DSH_HOME=${home}\n`
     + `     staged=${staged.destination} (${countFiles(staged.destination)} files,`
     + ` entry points checked: ${staged.entryPoints.join(', ')})\n`
-    + `     Rust profile=${options.rustProfile} source=${sidecarSource(ROOT, options.rustProfile)} perf=${options.perf}\n`
+    + `     Rust profile=${options.rustProfile} source=${sidecarSource(ROOT, options.rustProfile)}\n`
     + `     sidecar=${sidecar ?? '(not built — no panel)'}\n`
     + `     panel log=${sidecar === undefined ? '(no panel)' : MARKER_PATH}\n`
     + `     window state=${sidecar === undefined ? '(no panel)' : WINDOW_STATE_PATH}\n`
