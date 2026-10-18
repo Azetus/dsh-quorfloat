@@ -14,7 +14,8 @@
 
 | Version | Date | Theme |
 |---|---|---|
-| 0.1.6 | 2026-10-14 | Automatic image display, built-in home-page navigation fix, README version placeholders; published to npm |
+| 0.1.7 | 2026-10-18 | Diagnostics log export, atomic state writes, Windows build/CI fixes |
+| 0.1.6 | 2026-10-14 | Automatic image display, built-in home-page navigation fix, README version placeholders |
 | 0.1.5 | 2026-10-14 | Three phases of Markdown external content (links, remote images, local images) |
 | 0.1.4 | 2026-10-13 | npm platform packages and GitHub Actions, Windows startup/heartbeat fixes, test grouping |
 | 0.1.3 | 2026-10-12 | npm package build entry, npm 12 compatibility, release metadata |
@@ -22,6 +23,40 @@
 | 0.1.1 | 2026-10-12 | Chunked snapshots for long sessions, load earlier, button height, bundle filtering |
 | 0.1.0 | 2026-10-12 | Version consistency guard, workspace push, automatic bundle/tgz assembly |
 | pre-0.1.0 | 2026-10-07 – 10-11 | Host/sidecar/protocol, approvals and questions, Tauri + React migration, tray, pin |
+
+> Versions before 0.1.3 were not published to npm and had no GitHub Release; they are local/offline build records.
+
+## 0.1.7 (2026-10-18)
+
+### Atomic state writes
+- **Root cause**: `preferences.json`, `pinned.json`, and `window.json` were rewritten in place; an interruption,
+  disk error, or Windows sharing conflict could leave a half-written file and lose settings, pins, or the window
+  position on the next start.
+- **Fix**: A temporary file in the same directory, `sync_all`, then rename; Unix preserves the symlink target and
+  permissions, while Windows uses `MoveFileExW` with replacement. On failure the old file is kept and the
+  `preferences save failed`, `pins save failed`, or `window position save failed` marker is written.
+- **Tests**: Only two invariants remain: a normal replacement, and a forced rename failure that keeps the old file.
+
+### Diagnostics log export
+- **Behavior**: "Export diagnostics log" in the settings page writes the current state, recent host supervisor
+  events, and sidecar stderr as a `.log` under `~/.dsh-quorfloat/logs/` and shows the absolute path.
+  `DSH_QUORFLOAT_LOG_DIR` overrides the directory; dev runs are isolated under `.dev-home/logs/`.
+- **Limits**: 100 host events/64 KiB, 200 stderr lines/32 KiB, 2 KiB per line, and a 256 KiB export; the oldest
+  entry is dropped first. Snapshot IDs are shortened and home paths become `~`; conversation text and
+  credentials are excluded.
+- **Boundaries**: DSH's own logs and the dev/CI-only marker are not read; there is no clipboard or browser
+  download; each manual export leaves one file, and files are not cleaned up automatically.
+
+### Windows build and CI tooling
+- The frontend build points `TEMP` inside the workspace, avoiding dsh/esbuild conflicts with Windows directory
+  integrity constraints.
+- Added `npm run ci:install` to install the upstream contract dependencies under `.tooling/ci`; the workflow calls
+  it, and `ci:test` now gives an actionable error when those dependencies are missing.
+- `contract:extract` walks path segments when looking up the asar entry, fixing Windows backslash paths being
+  treated as one filename.
+
+### Version
+- `package.json` and `quorfloat/Cargo.toml` are synchronized to **0.1.7**; `Cargo.lock` was updated by the build.
 
 ## 0.1.6 (2026-10-14)
 
@@ -47,7 +82,6 @@
 - `package.json` and `quorfloat/Cargo.toml` were synchronized to **0.1.6**; `Cargo.lock` was updated by the build.
 - The Chinese and English root READMEs now use `<version>` in tgz filenames, npm version examples, and build
   directory examples, with a note to replace it with the actual version.
-- 0.1.6 was published to npm.
 
 ## 0.1.5 (2026-10-14)
 
