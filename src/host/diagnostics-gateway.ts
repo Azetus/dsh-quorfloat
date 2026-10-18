@@ -3,9 +3,9 @@
  *
  * The settings page cannot read the host's filesystem or its in-memory state, so
  * one zero-argument Remote method asks the host to build the current snapshot
- * and write it next to the plugin's state files. The answer is the absolute path
- * the page shows to the user; no conversation content or credentials cross the
- * endpoint.
+ * plus the bounded recent supervisor/stderr history and write it next to the
+ * plugin's state files. The answer is the absolute path the page shows to the
+ * user; no conversation content or credentials cross the endpoint.
  */
 
 import type { Logger, PluginContext } from '../cordis-types.js'

@@ -1150,10 +1150,10 @@ const en: Record<MessageKey, string> = {
   start: 'Start floating panel',
   stop: 'Stop floating panel',
   gaveUp: ' ({restarts} failures in a row)',
-  export: 'Export diagnostics',
+  export: 'Export diagnostics log',
   exporting: 'Exporting…',
-  exported: 'Diagnostics saved on the DSH host: {path}',
-  exportFailed: 'Could not export diagnostics. Check the DSH plugin log.',
+  exported: 'Diagnostics log saved on the DSH host: {path}',
+  exportFailed: 'Could not export the diagnostics log. Check the DSH plugin log.',
   tab: BUNDLE_NAME,
 }
 
@@ -1170,9 +1170,9 @@ const zh: Record<MessageKey, string> = {
   start: '启动悬浮窗',
   stop: '停止悬浮窗',
   gaveUp: '（连续 {restarts} 次失败）',
-  export: '导出诊断',
+  export: '导出诊断日志',
   exporting: '导出中…',
-  exported: '导出日志位于 DSH 主机：{path}',
-  exportFailed: '导出失败，请查看 DSH 插件日志。',
+  exported: '诊断日志已保存到 DSH 主机：{path}',
+  exportFailed: '导出诊断日志失败，请查看 DSH 插件日志。',
   tab: BUNDLE_NAME,
 }

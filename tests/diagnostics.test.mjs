@@ -3,10 +3,10 @@
 /**
  * Diagnostics export tests.
  *
- * The snapshot is current state, not a log tail. These tests pin the interface
- * the browser half depends on: one zero-argument endpoint that writes a text
- * file and answers its path, plus the redaction rules that keep home paths and
- * long identifiers out of the exported document.
+ * The file contains a current-state snapshot plus bounded recent supervisor and
+ * sidecar-stderr history. These tests pin the interface the browser half depends
+ * on: one zero-argument endpoint that writes a text file and answers its path,
+ * plus the redaction and size rules that keep the export useful and bounded.
  */
 
 import assert from 'node:assert/strict'
@@ -24,6 +24,13 @@ const {
   saveDiagnostics,
   shortId,
 } = await loadModule('host/diagnostics.js')
+const {
+  DiagnosticBuffers,
+  EVENT_LIMIT,
+  STDERR_LIMIT,
+  STDERR_BYTE_LIMIT,
+  STDERR_LINE_BYTE_LIMIT,
+} = await loadModule('host/diagnostic-buffer.js')
 const {
   registerDiagnosticsGateway,
   DIAGNOSTICS_ENDPOINT_METHOD,
@@ -110,6 +117,14 @@ function input() {
       stopped: false,
     },
     authority: { authority: 'panel', reason: 'harness-not-visible', fresh: ['web'] },
+    logs: {
+      supervisor: [],
+      stderr: [],
+      supervisorDropped: 0,
+      stderrDropped: 0,
+      supervisorTruncated: false,
+      stderrTruncated: false,
+    },
   }
 }
 
@@ -137,12 +152,24 @@ test('the endpoint registers under its key and answers a path from the host call
   )
 })
 
-test('the text has the current-state sections and no log tail', () => {
+test('the text has the current-state and bounded log sections', () => {
   const text = formatDiagnostics(input())
-  for (const section of ['[supervisor]', '[config]', '[services]', '[sessions]', '[interactions]', '[authority]']) {
+  for (const section of [
+    '[supervisor]',
+    '[config]',
+    '[services]',
+    '[sessions]',
+    '[interactions]',
+    '[authority]',
+    '[logs]',
+    '[logs.supervisor]',
+    '[logs.stderr]',
+  ]) {
     assert.ok(text.includes(section), `${section} is present`)
   }
-  assert.ok(!text.includes('[logs]'), 'the first version has no log-tail section')
+  assert.ok(text.includes('supervisorEvents: 0'), 'the empty supervisor ring is reported')
+  assert.ok(text.includes('stderrLines: 0'), 'the empty stderr ring is reported')
+  assert.ok(!text.includes('marker'), 'the dev-only marker is absent')
   assert.ok(!text.includes('SECRET-CONVERSATION'), 'session text is not projected')
   assert.ok(!text.includes('SECRET-PROMPT'), 'prompt text is not projected')
   assert.ok(!text.includes('SECRET-QUESTION'), 'question text is not projected')
@@ -180,6 +207,88 @@ test('the log directory follows the explicit override, then preferences, then ho
     logDirectory({}, '/home/alice'),
     join('/home/alice', '.dsh-quorfloat', 'logs'),
   )
+})
+
+test('log lines are rendered and home-redacted', () => {
+  const withLogs = input()
+  withLogs.logs = {
+    supervisor: [
+      {
+        at: Date.parse('2026-10-18T06:30:01.000Z'),
+        kind: 'state',
+        state: 'starting',
+        pid: null,
+        startedAt: null,
+        restarts: 0,
+        detail: null,
+      },
+      {
+        at: Date.parse('2026-10-18T06:30:02.000Z'),
+        kind: 'exit',
+        state: 'running',
+        pid: 4242,
+        startedAt: 1,
+        restarts: 1,
+        detail: 'code=1 path=/Users/alice/tmp',
+      },
+    ],
+    stderr: [{
+      at: Date.parse('2026-10-18T06:30:03.000Z'),
+      pid: 4242,
+      startedAt: 1,
+      state: 'running',
+      line: 'first line\nsecond line /Users/alice/tmp',
+    }],
+    supervisorDropped: 2,
+    stderrDropped: 3,
+    supervisorTruncated: false,
+    stderrTruncated: false,
+  }
+  const text = formatDiagnostics(withLogs)
+  assert.ok(text.includes('[logs.supervisor]'), 'the supervisor section is present')
+  assert.ok(text.includes('state=starting'), 'a state entry is rendered')
+  assert.ok(text.includes('exit pid=4242'), 'an exit entry is rendered')
+  assert.ok(text.includes('code=1 path=~/tmp'), 'event detail is home-redacted')
+  assert.ok(text.includes('[logs.stderr]'), 'the stderr section is present')
+  assert.ok(text.includes('first line\\nsecond line ~/tmp'), 'stderr is flattened and home-redacted')
+  assert.ok(text.includes('dropped 2'), 'supervisor drops are reported')
+  assert.ok(text.includes('dropped 3'), 'stderr drops are reported')
+  assert.ok(!text.includes('/Users/alice'), 'no absolute home path survives in logs')
+})
+
+test('the diagnostic rings stay inside their count and byte caps', () => {
+  const buffers = new DiagnosticBuffers()
+  const longLine = 'x'.repeat(3000)
+  for (let index = 0; index < 500; index += 1) {
+    buffers.record({
+      kind: 'stderr',
+      snapshot: { state: 'running', pid: 42, startedAt: 1, restarts: 0 },
+      detail: longLine,
+    })
+  }
+  const logs = buffers.snapshot()
+  assert.ok(logs.stderr.length <= STDERR_LIMIT, 'stderr stays under its line cap')
+  assert.ok(
+    logs.stderr.reduce((total, entry) => total + Buffer.byteLength(entry.line, 'utf8'), 0) <= STDERR_BYTE_LIMIT,
+    'stderr text stays under its byte cap',
+  )
+  assert.ok(
+    logs.stderr.every(entry => Buffer.byteLength(entry.line, 'utf8') <= STDERR_LINE_BYTE_LIMIT),
+    'each stderr line is truncated to its own cap',
+  )
+  assert.ok(logs.stderrDropped > 0, 'old stderr lines are dropped')
+  assert.equal(logs.stderrTruncated, true, 'truncation is recorded')
+
+  for (let index = 0; index < 500; index += 1) {
+    buffers.record({
+      kind: 'state',
+      snapshot: { state: 'running', pid: 42, startedAt: 1, restarts: 0 },
+      detail: undefined,
+    })
+  }
+  const events = buffers.snapshot()
+  assert.ok(events.supervisor.length <= EVENT_LIMIT, 'events stay under their count cap')
+  assert.ok(events.supervisorDropped > 0, 'old events are dropped')
 })
 
 test('saving writes one new file with the expected name and contents', () => {

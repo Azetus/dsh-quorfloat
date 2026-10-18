@@ -1,11 +1,11 @@
 /**
- * Text diagnostics for the settings page's "Export diagnostics" action.
+ * Text diagnostics for the settings page's "Export diagnostics log" action.
  *
- * The output is a current-state snapshot, not a log tail: it contains the
- * supervisor, configuration, service probe, session/interaction summaries and
- * the current approval authority. It deliberately contains no conversation
- * text and no credentials; IDs are shortened and the user's home prefix is
- * replaced with `~` before the text is written.
+ * The file contains a current-state snapshot plus the bounded recent history the
+ * host already observed: supervisor lifecycle events and sidecar stderr. It does
+ * not read DSH's own logs, and it does not read the sidecar marker (which exists
+ * only in dev/CI). IDs are shortened in the snapshot and the user's home prefix
+ * is replaced with `~` in both the snapshot and the log lines.
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs'
@@ -16,6 +16,14 @@ import type { QuorfloatConfig } from '../config.js'
 import type { AuthorityVerdict } from '../harness/presence.js'
 import type { PluginState } from '../index.js'
 import type { SupervisorSnapshot } from './supervisor.js'
+import {
+  EMPTY_LOGS,
+  EVENT_LIMIT,
+  EXPORT_BYTE_LIMIT,
+  STDERR_LIMIT,
+  truncateUtf8,
+  type DiagnosticLogs,
+} from './diagnostic-buffer.js'
 
 /** Everything the formatter reads; `state` is the activation's own projection. */
 export interface DiagnosticsInput {
@@ -28,6 +36,8 @@ export interface DiagnosticsInput {
   readonly state: PluginState
   readonly authority: AuthorityVerdict
   readonly home: string
+  /** Bounded recent history; absent means empty for older callers/tests. */
+  readonly logs?: DiagnosticLogs
 }
 
 /** One saved diagnostics file. */
@@ -176,11 +186,12 @@ function interactionProjection(value: unknown): unknown {
 /**
  * Build the complete `.log` text.
  *
- * @param input - current state and version facts.
+ * @param input - current state, bounded recent logs and version facts.
  * @returns a UTF-8 text document ending with one newline.
  */
 export function formatDiagnostics(input: DiagnosticsInput): string {
   const { state, config, authority, home } = input
+  const logs = input.logs ?? EMPTY_LOGS
   const snapshot: SupervisorSnapshot | null = state.supervisor
   const lines = [
     'dsh-quorfloat diagnostics',
@@ -208,8 +219,53 @@ export function formatDiagnostics(input: DiagnosticsInput): string {
     '[authority]',
     section(authority, home),
     '',
+    '[logs]',
+    `supervisorEvents: ${logs.supervisor.length} (limit ${EVENT_LIMIT}, dropped ${logs.supervisorDropped}, truncated: ${logs.supervisorTruncated})`,
+    `stderrLines: ${logs.stderr.length} (limit ${STDERR_LIMIT}, dropped ${logs.stderrDropped}, truncated: ${logs.stderrTruncated})`,
+    '',
+    '[logs.supervisor]',
+    supervisorLogText(logs.supervisor, home),
+    '',
+    '[logs.stderr]',
+    stderrLogText(logs.stderr, home),
+    '',
   ]
-  return `${lines.join('\n')}\n`
+  const full = `${lines.join('\n')}\n`
+  if (Buffer.byteLength(full, 'utf8') <= EXPORT_BYTE_LIMIT) return full
+  const suffix = '\n[export truncated]\n'
+  const budget = EXPORT_BYTE_LIMIT - Buffer.byteLength(suffix, 'utf8')
+  return `${truncateUtf8(full, budget)}${suffix}`
+}
+
+/** Keep one log line on one line while applying the same home redaction as the snapshot. */
+function logLine(value: string, home: string): string {
+  return redactHome(value, home).replaceAll('\r', '\\r').replaceAll('\n', '\\n')
+}
+
+/** One ISO timestamp for a stored entry. */
+function logTime(at: number): string {
+  return new Date(at).toISOString()
+}
+
+/** Render the supervisor event ring. */
+function supervisorLogText(entries: DiagnosticLogs['supervisor'], home: string): string {
+  if (entries.length === 0) return '(none)'
+  return entries.map(entry => {
+    const pid = entry.pid === null ? '-' : String(entry.pid)
+    const startedAt = entry.startedAt === null ? '-' : logTime(entry.startedAt)
+    const detail = entry.detail === null ? '' : ` | ${logLine(entry.detail, home)}`
+    return `${logTime(entry.at)} ${entry.kind} pid=${pid} startedAt=${startedAt} state=${entry.state} restarts=${entry.restarts}${detail}`
+  }).join('\n')
+}
+
+/** Render the sidecar stderr ring. */
+function stderrLogText(entries: DiagnosticLogs['stderr'], home: string): string {
+  if (entries.length === 0) return '(none)'
+  return entries.map(entry => {
+    const pid = entry.pid === null ? '-' : String(entry.pid)
+    const startedAt = entry.startedAt === null ? '-' : logTime(entry.startedAt)
+    return `${logTime(entry.at)} pid=${pid} startedAt=${startedAt} state=${entry.state} | ${logLine(entry.line, home)}`
+  }).join('\n')
 }
 
 /**

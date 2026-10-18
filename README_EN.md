@@ -24,7 +24,7 @@ The panel uses Harness's workspaces, sessions, models, and permission settings. 
 - **Control sessions**: Send messages, stop generation, select models, reasoning levels, and permission presets provided by Harness, and view available session statistics.
 - **Approvals and follow-up questions**: Handle tool approvals and questions for the current session directly in the panel, without switching back to the main Harness window.
 - **Appearance and language**: Light, dark, and system themes; Chinese and English interfaces; customizable global shortcut. Settings are saved automatically.
-- **Diagnostics export**: From the settings page, write a current-state snapshot to `~/.dsh-quorfloat/logs/` and show the file path.
+- **Diagnostics log**: From the settings page, write the current state, recent host events, and sidecar stderr to `~/.dsh-quorfloat/logs/` and show the file path.
 
 ## Installation
 
@@ -111,7 +111,7 @@ Click the workspace or session name at the top to open its selector:
 
 Click the gear icon to adjust the theme, interface language, shortcut, and “Keep open when unfocused” setting. If the default shortcut conflicts with another application, open the panel from the menu bar or system tray and change it in Settings.
 
-In Harness, open “Settings → Built-in plugins → dsh-quorfloat” and click “Export diagnostics”. The current-state snapshot is written to `~/.dsh-quorfloat/logs/` on the DSH host, and the page shows the file path.
+In Harness, open “Settings → Built-in plugins → dsh-quorfloat” and click “Export diagnostics log”. The current state, recent host events, and sidecar stderr are written to `~/.dsh-quorfloat/logs/` on the DSH host, and the page shows the file path.
 
 ## Building from Source
 

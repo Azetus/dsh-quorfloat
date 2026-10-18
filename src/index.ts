@@ -26,6 +26,7 @@ import { resolveQuorfloatBinary, type ResolvedBinary } from './host/binary.js'
 import { readHarnessLocalePreference, resolvePanelLanguageDecision } from './host/language.js'
 import { registerPresenceGateway, type InboundPresenceReport } from './host/presence-gateway.js'
 import { applyLifecycle, registerControlGateway } from './host/control-gateway.js'
+import { DiagnosticBuffers } from './host/diagnostic-buffer.js'
 import { formatDiagnostics, saveDiagnostics } from './host/diagnostics.js'
 import { registerDiagnosticsGateway } from './host/diagnostics-gateway.js'
 import { PROTOCOL_VERSION } from './protocol.js'
@@ -307,6 +308,7 @@ export function createPlugin(overrides: PluginOverrides = {}) {
         })
       }
 
+      const diagnosticLogs = new DiagnosticBuffers()
       const supervisor = new QuorfloatSupervisor({
         config: () => effectiveConfig,
         resolveBinary: () =>
@@ -371,6 +373,7 @@ export function createPlugin(overrides: PluginOverrides = {}) {
         // lifecycle of the process it owns is exactly what an operator needs, and
         // failures are escalated so no log level can hide them.
         onEvent: event => {
+          diagnosticLogs.record(event)
           reportSupervisorEvent(event, log)
           // A completed handshake is the one moment a started channel exists, so it is the
           // moment the workspace stream can actually reach the peer — and a fresh subscription
@@ -428,6 +431,7 @@ export function createPlugin(overrides: PluginOverrides = {}) {
               state: current,
               authority: authority(),
               home: homedir(),
+              logs: diagnosticLogs.snapshot(),
             }), { now })
           },
         })
