@@ -16,9 +16,10 @@ import { assertVersionsAgree } from './version.mjs'
  * drift; the workflow calls `npm run ci:install`.
  */
 const CI_DEPENDENCIES = [
-  '@deepseek-ai/cordis@4.0.5-alpha.1',
+  '@deepseek-ai/cordis@4.0.5',
   'yaml@2.9.1',
-  '@deepseek-ai/dsh-api-session-controller@0.2.1-alpha.1',
+  '@deepseek-ai/dsh-api-session-controller@0.2.1-rc.2',
+  '@deepseek-ai/dsh-typert-protocol@0.2.1-rc.2',
 ]
 
 function version() {

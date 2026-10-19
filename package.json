@@ -2,6 +2,9 @@
   "name": "dsh-quorfloat",
   "version": "0.1.7",
   "private": true,
+  "engines": {
+    "dsh": ">=0.2.0-rc.2"
+  },
   "description": "System-level floating conversation window for DeepSeek Harness (host plugin half)",
   "keywords": [
     "deepseek-harness",

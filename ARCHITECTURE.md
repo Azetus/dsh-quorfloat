@@ -665,6 +665,9 @@ bundle 内的 `cordis.patch.yml` 把 `quorfloatPath` 指向自带的 `./bin/dsh-
 - 侧车经 `env!("CARGO_PKG_VERSION")` 上报；`hello.quorfloatVersion` 即此值。
 - `PROTOCOL_VERSION` 是接口契约号，与产品版本刻意独立，不随发版变动。
 - 测试不得硬编码版本号，从真值来源推导。
+- 插件在 `package.json` 通过 `engines.dsh: ">=0.2.0-rc.2"` 声明宿主范围；只写下限。DSH 0.2.1-alpha.3 之后该字段优先于 peerDependencies。
+- 诊断导出的 `dshVersion` 读 `@deepseek-ai/dsh-app-boot/package.json` 的 version — 与 DSH 自己的
+  `getDshRuntimeVersion()` 同源；`DSH_VERSION` 只作回退，仍不可用则 `unknown`。
 
 ### 9.5 CI 与发布
 

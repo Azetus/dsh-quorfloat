@@ -27,6 +27,7 @@ import { readHarnessLocalePreference, resolvePanelLanguageDecision } from './hos
 import { registerPresenceGateway, type InboundPresenceReport } from './host/presence-gateway.js'
 import { applyLifecycle, registerControlGateway } from './host/control-gateway.js'
 import { DiagnosticBuffers } from './host/diagnostic-buffer.js'
+import { dshRuntimeVersion } from './host/dsh-version.js'
 import { formatDiagnostics, saveDiagnostics } from './host/diagnostics.js'
 import { registerDiagnosticsGateway } from './host/diagnostics-gateway.js'
 import { PROTOCOL_VERSION } from './protocol.js'
@@ -701,14 +702,14 @@ function wrapLogger(logger: Logger, level: QuorfloatConfig['logLevel']): Logger 
 /**
  * Read the running Harness version for diagnostics.
  *
- * Deliberately best-effort: the version is reported, never enforced, because
- * the compatibility that matters is service behaviour, which is probed directly.
+ * The source is the runtime package DSH itself uses for compatibility checks; see
+ * {@link dshRuntimeVersion}. The value is reported, never enforced: service behaviour is still
+ * probed directly.
  *
  * @returns a version string, or `unknown`.
  */
 function hostVersion(): string {
-  const version = process.env['DSH_VERSION']
-  return typeof version === 'string' && version !== '' ? version : 'unknown'
+  return dshRuntimeVersion()
 }
 
 /**

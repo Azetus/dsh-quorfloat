@@ -180,6 +180,8 @@ transcript skipped: … internal / N unrecognised (kind, …)  被藏起来的�
   supervisor 事件环和侧车 stderr 环写到 `~/.dsh-quorfloat/logs/` 并返回绝对路径。日志环固定
   上限（100 事件/64 KiB、200 行/32 KiB、单行 2 KiB），导出最多 256 KiB；不读取 DSH 自身日志，
   也不读取 marker。
+- 诊断的 `dshVersion` 从 `@deepseek-ai/dsh-app-boot/package.json` 读取（与 DSH 的
+  `getDshRuntimeVersion()` 同源），`DSH_VERSION` 只作回退；解析失败才是 `unknown`。
 - 不要依赖旧的帧缓冲截图、图元 dump 或动画抓帧工具；这些方法已退役，当前栈不再产出那些开关。
 
 常用环境变量：
@@ -196,6 +198,7 @@ transcript skipped: … internal / N unrecognised (kind, …)  被藏起来的�
 | `DSH_QUORFLOAT_PARENT_PID` | 宿主进程身份，供侧车做父进程存活检测 |
 | `DSH_QUORFLOAT_CARGO_LOCKED` | CI 中强制 `cargo --locked` |
 | `DSH_QUORFLOAT_PEER_*` | 测试/脚本化 peer 的行为开关，不用于正常安装 |
+| `DSH_VERSION` | 仅作为 `dshVersion` 的第二来源；正常 DSH 运行以 app-boot runtime 为准 |
 
 ## 6. 代码约定
 
