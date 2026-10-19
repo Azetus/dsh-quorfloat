@@ -109,9 +109,105 @@ function sanitize(value: unknown, home: string): unknown {
   return value
 }
 
-/** Pretty-print a sanitized section, using `null` for values JSON cannot express. */
+/** Placeholder for an absent or empty value in the flattened snapshot. */
+const EMPTY = '(none)'
+
+/** Separator between the `key=value` fields of one object-array item. */
+const ITEM_SEPARATOR = '\uFF5C'
+
+/**
+ * Render one sanitized snapshot section as flat, human-readable text.
+ *
+ * Plain objects become one `key: value` line per field, with nested fields using
+ * dotted paths. Arrays of objects become one `- key=value...` line per item,
+ * separated by a full-width vertical bar. Scalar arrays stay on one comma-separated
+ * line. There is deliberately no width-based fallback: the format is stable, and
+ * support reads this file as a whole rather than parsing fixed columns.
+ *
+ * @param value - section value from the plugin state.
+ * @param home - home directory to redact.
+ * @returns the section body without a trailing newline.
+ */
 function section(value: unknown, home: string): string {
-  return JSON.stringify(sanitize(value, home), null, 2) ?? 'null'
+  const sanitized = sanitize(value, home)
+  const record = asRecord(sanitized)
+  if (record === null) return formatScalar(sanitized)
+  return renderObject(record).join('\n')
+}
+
+/** Render object fields, recursing into nested objects with dotted paths. */
+function renderObject(record: Record<string, unknown>, prefix = ''): string[] {
+  const lines: string[] = []
+  for (const [name, value] of Object.entries(record)) {
+    if (value === undefined) continue
+    const key = prefix === '' ? name : `${prefix}.${name}`
+    if (value === null) {
+      lines.push(`${key}: ${EMPTY}`)
+    } else if (Array.isArray(value)) {
+      lines.push(...renderArray(key, value))
+    } else if (asRecord(value) !== null) {
+      const nestedRecord = asRecord(value) as Record<string, unknown>
+      const nested = Object.entries(nestedRecord)
+      if (nested.length === 0) lines.push(`${key}: ${EMPTY}`)
+      else lines.push(...renderObject(nestedRecord, key))
+    } else {
+      lines.push(`${key}: ${formatScalar(value)}`)
+    }
+  }
+  return lines
+}
+
+/** Render one array on one or more lines, depending on whether it holds objects. */
+function renderArray(key: string, values: readonly unknown[]): string[] {
+  if (values.length === 0) return [`${key}: ${EMPTY}`]
+  if (values.every(isScalar)) {
+    return [`${key}: ${values.map(formatScalar).join(', ')}`]
+  }
+  const lines = [`${key} (${values.length}):`]
+  for (const value of values) {
+    const item = asRecord(value)
+    if (item === null) {
+      lines.push(`  - ${formatScalar(value)}`)
+      continue
+    }
+    const pairs = renderPairs(item)
+    lines.push(`  - ${pairs === '' ? EMPTY : pairs}`)
+  }
+  return lines
+}
+
+/** Render one object-array item as `key=value` fields joined by the item separator. */
+function renderPairs(record: Record<string, unknown>, prefix = ''): string {
+  const pairs: string[] = []
+  for (const [name, value] of Object.entries(record)) {
+    if (value === undefined) continue
+    const key = prefix === '' ? name : `${prefix}.${name}`
+    if (value === null) {
+      pairs.push(`${key}=${EMPTY}`)
+    } else if (Array.isArray(value)) {
+      pairs.push(`${key}=${value.length === 0 ? EMPTY : value.map(formatScalar).join(',')}`)
+    } else if (asRecord(value) !== null) {
+      const nestedRecord = asRecord(value) as Record<string, unknown>
+      const nested = Object.entries(nestedRecord)
+      if (nested.length === 0) pairs.push(`${key}=${EMPTY}`)
+      else pairs.push(renderPairs(nestedRecord, key))
+    } else {
+      pairs.push(`${key}=${formatScalar(value)}`)
+    }
+  }
+  return pairs.join(ITEM_SEPARATOR)
+}
+
+/** Whether an array entry can be printed as a plain scalar. */
+function isScalar(value: unknown): boolean {
+  return !Array.isArray(value) && asRecord(value) === null
+}
+
+/** Print one scalar without JSON quoting. */
+function formatScalar(value: unknown): string {
+  if (value === null || value === undefined) return EMPTY
+  if (typeof value === 'string') return value === '' ? EMPTY : value
+  return String(value)
 }
 
 /** Read a record-shaped value without trusting the wire. */
@@ -208,7 +304,9 @@ export function formatDiagnostics(input: DiagnosticsInput): string {
     section(config, home),
     '',
     '[services]',
-    section({ services: state.services, missing: state.missingServices }, home),
+    section(state.services === null
+      ? { probed: false, missing: state.missingServices }
+      : { ...state.services, missing: state.missingServices }, home),
     '',
     '[sessions]',
     section(sessionProjection(state.sessions), home),

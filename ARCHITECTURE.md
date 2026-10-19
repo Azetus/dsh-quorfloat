@@ -593,7 +593,9 @@ patch 整体替换 `config`，未知字段报错而不是静默取默认值。
 
 导出包含当前状态与最近日志：supervisor、配置、服务探测、会话/交互摘要、审批归属，以及
 宿主 supervisor 事件环和侧车 stderr 环。会话/交互 ID 截短、home 路径替换为 `~`；不包含
-对话正文、凭证、DSH 自身日志或仅 dev/CI 才有的 marker。日志环是固定上限：宿主事件最多
+对话正文、凭证、DSH 自身日志或仅 dev/CI 才有的 marker。快照区使用扁平文本，不使用 JSON：
+普通对象一行一个 `key: value`，对象数组写成 `name (count):` 后每项一行
+`- key=value｜...`，标量数组一行逗号分隔，空值写 `(none)`。日志环是固定上限：宿主事件最多
 100 条/64 KiB，stderr 最多 200 行/32 KiB，单行 2 KiB，导出文件最多 256 KiB；超出丢最旧。
 目录可用 `DSH_QUORFLOAT_LOG_DIR` 覆盖；在 `dev` 下随 `.dev-home/` 隔离。
 

@@ -182,6 +182,8 @@ transcript skipped: … internal / N unrecognised (kind, …)  被藏起来的�
   也不读取 marker。
 - 诊断的 `dshVersion` 从 `@deepseek-ai/dsh-app-boot/package.json` 读取（与 DSH 的
   `getDshRuntimeVersion()` 同源），`DSH_VERSION` 只作回退；解析失败才是 `unknown`。
+- 诊断快照为扁平文本，不使用 JSON：普通对象一行一个 `key: value`；对象数组写成
+  `name (count):` 后每项一行 `- key=value｜...`；标量数组一行逗号分隔；空值写 `(none)`。
 - 不要依赖旧的帧缓冲截图、图元 dump 或动画抓帧工具；这些方法已退役，当前栈不再产出那些开关。
 
 常用环境变量：
