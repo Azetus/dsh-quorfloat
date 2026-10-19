@@ -695,7 +695,7 @@ Rust target。普通安装用户不需要本地编译。
 - 诊断日志写到 DSH 主机上的 `~/.dsh-quorfloat/logs/`；远程 WebUI 用户拿到的是远端路径，不是浏览器所在机器。
 - 诊断日志只含宿主最近事件与侧车 stderr，不含 DSH 自身日志；marker 仅 dev/CI 或手动设置
   `DSH_QUORFLOAT_RUST_MARKER` 时存在，用户导出不读取 marker。
-- 显示器热插拔与边缘拖动：macOS 已实测“可见时拔屏”和“隐藏后拔屏再呼出”两种路径；Windows 尚无第二台显示器实机验证。
+- 显示器热插拔与边缘拖动：macOS 与 Windows 均已实测通过。
   显示前守卫检查窗口顶部拖动条与显示器 **work area** 的可见面积，至少 **64×24 logical px** 才保持原位；
   不足或完全离屏时回退到主屏 `work_area` 的锚点。work area 已排除 macOS 菜单栏/程序坞和 Windows
   任务栏，不需要应用层计算这些区域。可见但拖动条仍可用的窗口保持原位；可见窗口拔屏后若系统不自动挪窗，
