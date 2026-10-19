@@ -13,6 +13,7 @@
 
 | Version | Date | Theme |
 |---|---|---|
+| 0.1.9 | 2026-10-19 | Diagnostics readability |
 | 0.1.8 | 2026-10-19 | Host version range, window drag-area guard, development script cleanup |
 | 0.1.7 | 2026-10-18 | Diagnostics log export, atomic state writes, Windows build/CI fixes |
 | 0.1.6 | 2026-10-14 | Automatic image display, built-in home-page navigation fix, README version placeholders |
@@ -25,6 +26,12 @@
 | pre-0.1.0 | 2026-10-07 – 10-11 | Host/sidecar/protocol, approvals and questions, Tauri + React migration, tray, pin |
 
 > Versions before 0.1.3 were not published to npm and had no GitHub Release; they are local/offline build records.
+
+## 0.1.9 (2026-10-19)
+
+### Diagnostics readability
+- Exported snapshot sections changed from JSON fragments to flat text.
+- Data sources, redaction, size limits, and file writing are unchanged; a JSON export is not provided.
 
 ## 0.1.8 (2026-10-19)
 
