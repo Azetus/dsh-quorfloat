@@ -5,11 +5,13 @@
 >
 > 新条目加在最上面；每条尽量控制在 8 行以内。只记录改变行为、协议或发布的事；日常小修并入
 > 相邻条目。测试数量只在能说明发布状态时保留，且写明“当时”。
+> 三级标题按主题分组，正文直接说明改动；原因简短带过。
 
 ## 版本索引
 
 | 版本 | 时间 | 主题 |
 |---|---|---|
+| 0.1.8 | 2026-10-19 | 宿主版本范围、窗口拖动区守卫、开发脚本清理 |
 | 0.1.7 | 2026-10-18 | 诊断日志导出、状态文件原子写入、Windows 构建/CI 修复 |
 | 0.1.6 | 2026-10-14 | 图片自动显示、内置首页导航修正、README 版本占位符 |
 | 0.1.5 | 2026-10-14 | Markdown 外部内容三阶段（链接、远程图片、本地图片） |
@@ -22,23 +24,41 @@
 
 > 0.1.3 之前没有发布到 npm，也没有 GitHub Release；这些版本只作为本地/离线构建记录。
 
+## 0.1.8（2026-10-19）
+
+### 宿主版本与 DSH 0.2.1-rc.2
+- `package.json` 增加 `engines.dsh: ">=0.2.0-rc.2"`，只写下限；DSH 0.2.1-alpha.3 之后该范围优先于 peerDependencies。
+- 诊断 `dshVersion` 改为读取运行中的 `@deepseek-ai/dsh-app-boot/package.json`，与 DSH 的 `getDshRuntimeVersion()` 同源；`DSH_VERSION` 仅作回退，仍不可用则为 `unknown`。
+
+### 窗口拖动区守卫
+- 旧规则只要有正面积交集就认为可见；窗口可被拖到只剩一条边，或被程序坞、菜单栏、任务栏挡住，
+  顶部拖动条几乎不可点击。
+- 启动、显示、热键/托盘前检查窗口顶部拖动条与显示器 **work area** 的交集，至少
+  64×24 logical px 可见才保持原位；不足则回退到主屏锚点。可见但拖动条仍可用时保持原位。
+- 热键/托盘在 visible 但拖动条不可用时执行救援而不隐藏；没有显示器轮询，也没有新增托盘
+  重置项；可见窗口拔屏后若系统不自动挪窗，需要一次呼出触发。
+
+### 开发脚本清理
+- 删除失效的 `--perf` 与 `DSH_QUORFLOAT_PERF`；该变量来自 egui 时代，Tauri/React 侧车已无消费者。
+- 测试中的产品版本与 DSH 版本占位改为中性值，避免随发版过期。
+
 ## 0.1.7（2026-10-18）
 
 ### 状态文件原子写入
-- **根因**：`preferences.json`、`pinned.json`、`window.json` 原先直接覆盖写入；中断、磁盘错误或
+- `preferences.json`、`pinned.json`、`window.json` 原先直接覆盖写入；中断、磁盘错误或
   Windows 共享冲突可能留下半截文件，让下一次启动丢掉设置、pin 或窗口位置。
-- **修复**：同目录临时文件 + `sync_all` + rename；Unix 保留符号链接目标与权限，Windows 用
+- 保存改为同目录临时文件 + `sync_all` + rename；Unix 保留符号链接目标与权限，Windows 用
   `MoveFileExW` 替换式写入。失败保留旧文件，并写 `preferences save failed`、`pins save failed`、
   `window position save failed` marker。
-- **测试**：只保留两条不变量——正常替换、强制 rename 失败不破坏旧文件。
+- 测试只保留两条不变量——正常替换、强制 rename 失败不破坏旧文件。
 
 ### 诊断日志导出
-- **行为**：设置页“导出诊断日志”把当前状态、最近宿主 supervisor 事件与侧车 stderr 写成 `.log`，
+- 设置页“导出诊断日志”把当前状态、最近宿主 supervisor 事件与侧车 stderr 写成 `.log`，
   写到 `~/.dsh-quorfloat/logs/` 并显示绝对路径；`DSH_QUORFLOAT_LOG_DIR` 可覆盖，dev 下隔离到
   `.dev-home/logs/`。
-- **上限**：宿主事件 100 条/64 KiB、stderr 200 行/32 KiB、单行 2 KiB、导出文件 256 KiB；超出丢最旧。
+- 日志上限为宿主事件 100 条/64 KiB、stderr 200 行/32 KiB、单行 2 KiB、导出文件 256 KiB；超出丢最旧。
   快照 ID 截短、home 路径替换为 `~`，不含对话正文或凭证。
-- **边界**：不读取 DSH 自身日志，也不读取仅 dev/CI 才有的 marker；不做剪贴板/浏览器下载；
+- 不读取 DSH 自身日志，也不读取仅 dev/CI 才有的 marker；不做剪贴板/浏览器下载；
   每次手动导出保留一个文件，不自动清理。
 
 ### Windows 构建与 CI 工具链
@@ -47,26 +67,22 @@
   `ci:test` 缺少依赖时给出可行动错误。
 - `contract:extract` 按路径段查找 asar 条目，修复 Windows 下反斜杠路径被当作一个文件名的问题。
 
-### 版本
-- `package.json` 与 `quorfloat/Cargo.toml` 同步为 **0.1.7**；`Cargo.lock` 由构建更新。
-
 ## 0.1.6（2026-10-14）
 
 ### 图片自动显示
-- **行为**：本地与远程 Markdown 图片不再需要“加载图片”确认；组件挂载即进入 loading，失败可重试。
-- **约束**：远程图片 `lazy`/`async`/`no-referrer`；本地图片按会话 cwd 解析、绝对路径允许在 cwd 外；
+- 本地与远程 Markdown 图片不再需要“加载图片”确认；组件挂载即进入 loading，失败可重试。
+- 远程图片使用 `lazy`/`async`/`no-referrer`；本地图片按会话 cwd 解析、绝对路径允许在 cwd 外；
   `file://`、UNC、`~` 拒绝；格式限 PNG/JPEG/WebP/GIF；上限 `min(Harness maxImageBytes, 8 MiB)`。
-- **队列**：前端全局最多 2 个活跃读取；等待项取消后不再读取；离开组件释放 Blob；
+- 前端全局最多 2 个活跃读取；等待项取消后不再读取；离开组件释放 Blob；
   `session/image` 每次 256 KiB 原始字节，30 秒过期，侧车最多 4 个在途。
 
 ### 内置首页导航修正
-- **现象**：宿主显示已启动，但面板不可见；marker 显示窗口/托盘创建后立即 `webview navigation blocked`。
-- **根因**：Tauri 把 `index.html` 简化为 `tauri://localhost`，path 是空串；白名单只允许 `/` 与
+- 宿主显示已启动，但面板不可见；marker 显示窗口/托盘创建后立即 `webview navigation blocked`。
+- Tauri 把 `index.html` 简化为 `tauri://localhost`，path 是空串；白名单只允许 `/` 与
   `/index.html`，把启动页自己拦住了。
-- **修复**：在内置协议/主机限制下接受空 path；外部导航与协议限制不变。
+- 修复为在内置协议/主机限制下接受空 path；外部导航与协议限制不变。
 
-### 版本与 README
-- `package.json` 与 `quorfloat/Cargo.toml` 同步为 **0.1.6**，`Cargo.lock` 由构建更新。
+### README 版本占位符
 - 根 README 中英文的 tgz 文件名、npm 版本与构建目录示例改为 `<version>`，并说明替换为实际版本。
 
 ## 0.1.5（2026-10-14）
@@ -153,12 +169,12 @@
 ## 0.1.1（2026-10-12）
 
 ### 长会话空白
-- **根因**：整个会话只走一帧 `session/snapshot`；两侧帧上限 1 MiB，超限帧被静默丢弃，快照不执行，
+- 整个会话只走一帧 `session/snapshot`；两侧帧上限 1 MiB，超限帧被静默丢弃，快照不执行，
   之后每个 `session/event` 都被判 stale，面板永久空白且不重试。
-- **修复**：超限帧带字节数并计数；新增 `session/snapshot/begin|part|end`（256 KiB 预算）与
+- 超限帧带字节数并计数；新增 `session/snapshot/begin|part|end`（256 KiB 预算）与
   `session/snapshot/request`；侧车按 `sessionId+generation` 装配，收齐才折叠；缺片有界重发；
   旧的单帧 `session/snapshot` 仍作为“一片”接受。
-- **不变量**：分片与事件共用通道时必须逐帧串行发送，否则事件会越过分片并被判过期。
+- 分片与事件共用通道时必须逐帧串行发送，否则事件会越过分片并被判过期。
 
 ### 加载更早
 - 初始快照此前固定约 50 条；新增 `session/history {sessionId,beforeSeq}` → `{records,hasMore,cursor}`。

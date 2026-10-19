@@ -1,19 +1,19 @@
 # CHANGELOG — Releases and engineering record
 
-> This file records the user-visible changes and protocol/engineering root causes for each release. Current behavior
-> is specified in `ARCHITECTURE.md`; read this file when investigating why something is the way it is today.
+> This file records each release's user-visible changes and protocol/engineering root causes. Current behavior is
+> specified in `ARCHITECTURE.md`; read it when investigating why something is the way it is today. The Chinese
+> version is authoritative; keep both in sync in the same commit.
 >
 > New entries go at the top; keep each entry within about 8 lines. Record only changes to behavior, protocol, or
 > releases; fold routine fixes into the adjacent entry. Keep test counts only when they explain a release state,
 > and mark them as "at the time".
->
-> This is a translation of `CHANGELOG.md`. The Chinese version is authoritative; keep both in sync in the same
-> commit.
+> Third-level headings group topics; the body states the change directly and mentions a reason briefly.
 
 ## Version index
 
 | Version | Date | Theme |
 |---|---|---|
+| 0.1.8 | 2026-10-19 | Host version range, window drag-area guard, development script cleanup |
 | 0.1.7 | 2026-10-18 | Diagnostics log export, atomic state writes, Windows build/CI fixes |
 | 0.1.6 | 2026-10-14 | Automatic image display, built-in home-page navigation fix, README version placeholders |
 | 0.1.5 | 2026-10-14 | Three phases of Markdown external content (links, remote images, local images) |
@@ -26,25 +26,53 @@
 
 > Versions before 0.1.3 were not published to npm and had no GitHub Release; they are local/offline build records.
 
+## 0.1.8 (2026-10-19)
+
+### Host range and DSH 0.2.1-rc.2
+- `package.json` now declares `engines.dsh: ">=0.2.0-rc.2"` with a lower bound only, matching
+  the most common community form. Since DSH 0.2.1-alpha.3 this range takes precedence over peerDependencies.
+- Diagnostics `dshVersion` now reads the running
+  `@deepseek-ai/dsh-app-boot/package.json`, the same source as DSH's `getDshRuntimeVersion()`.
+  `DSH_VERSION` is only a fallback; if neither resolves, the value is `unknown`.
+- The session-controller contract passes 11/11 for 0.2.0-rc.1 through 0.2.1-rc.2; the full
+  unit suite passes 95/95 on rc.2 with Cordis 4.0.5. CI pins contract 0.2.1-rc.2 and Cordis 4.0.5.
+- A lower-only range leaves future DSH versions installable but unverified; the range must be
+  updated after adaptation.
+
+### Window drag-area guard
+- The old rule treated any positive overlap as visible. A window could be dragged to a sliver at
+  the edge or behind the Dock, menu bar, or taskbar, leaving its top drag strip almost unclickable.
+- Before startup, showing, or a hotkey/tray action, the top drag strip must overlap a display's
+  **work area** by at least 64x24 logical px; otherwise the panel returns to the primary display's anchor.
+  A partially visible window whose strip is still usable stays where it is.
+- A visible window whose strip is unusable is rescued rather than hidden by the hotkey/tray.
+  There is no monitor polling and no tray reset item; if a visible window is unplugged and the platform does not
+  move it, a later summon is required. Verified on macOS and Windows.
+
+### Development script cleanup
+- Removed the dead `--perf` and `DSH_QUORFLOAT_PERF`; the variable came from the egui era and has no consumer in
+  the Tauri/React sidecar.
+- Replaced hardcoded product and DSH versions in test data with neutral values so they cannot go stale.
+
 ## 0.1.7 (2026-10-18)
 
 ### Atomic state writes
-- **Root cause**: `preferences.json`, `pinned.json`, and `window.json` were rewritten in place; an interruption,
+- `preferences.json`, `pinned.json`, and `window.json` were rewritten in place; an interruption,
   disk error, or Windows sharing conflict could leave a half-written file and lose settings, pins, or the window
   position on the next start.
-- **Fix**: A temporary file in the same directory, `sync_all`, then rename; Unix preserves the symlink target and
+- Saving now uses a temporary file in the same directory, `sync_all`, then rename; Unix preserves the symlink target and
   permissions, while Windows uses `MoveFileExW` with replacement. On failure the old file is kept and the
   `preferences save failed`, `pins save failed`, or `window position save failed` marker is written.
-- **Tests**: Only two invariants remain: a normal replacement, and a forced rename failure that keeps the old file.
+- Tests keep only two invariants: a normal replacement, and a forced rename failure that keeps the old file.
 
 ### Diagnostics log export
-- **Behavior**: "Export diagnostics log" in the settings page writes the current state, recent host supervisor
+- "Export diagnostics log" in the settings page writes the current state, recent host supervisor
   events, and sidecar stderr as a `.log` under `~/.dsh-quorfloat/logs/` and shows the absolute path.
   `DSH_QUORFLOAT_LOG_DIR` overrides the directory; dev runs are isolated under `.dev-home/logs/`.
-- **Limits**: 100 host events/64 KiB, 200 stderr lines/32 KiB, 2 KiB per line, and a 256 KiB export; the oldest
+- Log limits are 100 host events/64 KiB, 200 stderr lines/32 KiB, 2 KiB per line, and a 256 KiB export; the oldest
   entry is dropped first. Snapshot IDs are shortened and home paths become `~`; conversation text and
   credentials are excluded.
-- **Boundaries**: DSH's own logs and the dev/CI-only marker are not read; there is no clipboard or browser
+- DSH's own logs and the dev/CI-only marker are not read; there is no clipboard or browser
   download; each manual export leaves one file, and files are not cleaned up automatically.
 
 ### Windows build and CI tooling
@@ -55,31 +83,27 @@
 - `contract:extract` walks path segments when looking up the asar entry, fixing Windows backslash paths being
   treated as one filename.
 
-### Version
-- `package.json` and `quorfloat/Cargo.toml` are synchronized to **0.1.7**; `Cargo.lock` was updated by the build.
-
 ## 0.1.6 (2026-10-14)
 
 ### Automatic image display
-- **Behavior**: Local and remote Markdown images no longer require the "Load image" confirmation; the component
+- Local and remote Markdown images no longer require the "Load image" confirmation; the component
   enters loading on mount and can retry after failure.
-- **Constraints**: Remote images use `lazy`/`async`/`no-referrer`; local images resolve against the session cwd
+- Remote images use `lazy`/`async`/`no-referrer`; local images resolve against the session cwd
   and absolute paths may lie outside the cwd; `file://`, UNC, and `~` are rejected; formats are limited to
   PNG/JPEG/WebP/GIF; the limit is `min(Harness maxImageBytes, 8 MiB)`.
-- **Queue**: At most two active reads globally in the frontend; a cancelled waiter is not read; leaving the
+- At most two active reads globally in the frontend; a cancelled waiter is not read; leaving the
   component releases the Blob; `session/image` returns 256 KiB of raw bytes per request, expires after 30 seconds,
   and the sidecar allows at most four in-flight requests.
 
 ### Built-in home-page navigation fix
-- **Symptom**: The host reported that it had started, but the panel was invisible; the marker showed
+- The host reported that it had started, but the panel was invisible; the marker showed
   `webview navigation blocked` immediately after the window/tray were created.
-- **Root cause**: Tauri reduces `index.html` to `tauri://localhost`, whose path is the empty string; the allowlist
+- Tauri reduces `index.html` to `tauri://localhost`, whose path is the empty string; the allowlist
   only accepted `/` and `/index.html`, so it blocked the startup page itself.
-- **Fix**: Accept the empty path under the built-in scheme/host restriction; external navigation and scheme
+- The fix accepts the empty path under the built-in scheme/host restriction; external navigation and scheme
   restrictions are unchanged.
 
-### Version and README
-- `package.json` and `quorfloat/Cargo.toml` were synchronized to **0.1.6**; `Cargo.lock` was updated by the build.
+### README version placeholders
 - The Chinese and English root READMEs now use `<version>` in tgz filenames, npm version examples, and build
   directory examples, with a note to replace it with the actual version.
 
@@ -191,14 +215,14 @@
 ## 0.1.1 (2026-10-12)
 
 ### Blank long conversations
-- **Root cause**: The whole conversation arrived in one `session/snapshot` frame; both sides cap frames at 1 MiB,
+- The whole conversation arrived in one `session/snapshot` frame; both sides cap frames at 1 MiB,
   oversized frames were silently dropped, the snapshot never applied, every later `session/event` was treated as
   stale, and the panel stayed permanently blank without retrying.
-- **Fix**: Oversized frames now carry byte counts and are counted; added
+- Oversized frames now carry byte counts and are counted; added
   `session/snapshot/begin|part|end` (256 KiB budget) and `session/snapshot/request`; the sidecar assembles by
   `sessionId+generation`, folds only when complete, and resends missing parts within a bound; the old
   single-frame `session/snapshot` is still accepted as a one-part case.
-- **Invariant**: When parts and events share a channel, forwarding must be serialized frame by frame; otherwise
+- When parts and events share a channel, forwarding must be serialized frame by frame; otherwise
   events overtake their preceding parts and are judged stale.
 
 ### Load earlier

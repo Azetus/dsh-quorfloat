@@ -828,7 +828,7 @@ dependencies = [
 
 [[package]]
 name = "dsh-quorfloat"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "global-hotkey",
  "serde",
