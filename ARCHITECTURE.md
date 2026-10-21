@@ -144,8 +144,9 @@ Harness 的 sessionController / workspace / permission / interaction 等服务
 
 ### 3.6 托盘
 
-macOS 菜单栏 / Windows 通知区提供：显示、隐藏、重启、退出。重启/退出的真正执行在宿主侧
-（`panel/lifecycle` 或 `quorfloat/panel`），托盘只发意图。托盘创建失败不应阻止热键呼出。
+macOS 菜单栏 / Windows 通知区提供：显示/隐藏、重置窗口位置、重启、退出。重置只移动窗口到当前
+配置的 anchor，不改变显示状态或焦点；重启/退出的真正执行在宿主侧（`panel/lifecycle` 或
+`quorfloat/panel`），托盘只发意图。托盘创建失败不应阻止热键呼出。
 
 ### 3.7 面板自重启
 

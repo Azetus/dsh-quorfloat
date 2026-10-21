@@ -97,7 +97,7 @@ Launch the desktop app, open “Plugins” in the left sidebar, and click “Add
 
 ## Getting Started
 
-The default shortcut is **Alt + Space**, or **Option + Space** on macOS. Press it to open the panel, and press it again to hide it. You can also use the menu bar or system tray entry.
+The default shortcut is **Alt + Space**, or **Option + Space** on macOS. Press it to open the panel, and press it again to hide it. You can also use the menu bar or system tray entry to show, hide, or reset the panel position.
 
 Type a message in the input box and press **Enter** to send it, or **Shift + Enter** to insert a line break. You can stop generation while it is in progress. **Esc** first closes an open menu or returns to the conversation page. If you are already on the conversation page with no menu open, it hides the panel. Hiding the panel does not stop a running session.
 

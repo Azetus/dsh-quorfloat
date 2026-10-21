@@ -160,6 +160,7 @@ window anchored at X,Y               没有记忆位置，按锚点摆放
 window position rejected: …          记忆位置或拖动区在工作区内不足 → 回退锚点
 tray created                         菜单栏/通知区图标建好
 tray menu: show|hide|restart|exit    用户从托盘菜单选了什么
+tray menu: window position reset to X,Y (anchor)  托盘重置窗口位置
 tray menu: panel drag area unavailable; showing again  拖动区在工作区内不足，托盘呼出并回退
 hotkey: panel drag area unavailable; showing again     拖动区在工作区内不足，热键呼出并回退
 window hide: yielding activation to the previous app  收起时把激活交还上一个应用

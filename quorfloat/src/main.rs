@@ -704,6 +704,52 @@ fn window_drag_usable(window: &WebviewWindow) -> bool {
     )
 }
 
+/// The outcome of asking the window to move back to its configured anchor.
+enum AnchorMove {
+    /// The window moved from its old top-left corner to the anchor.
+    Moved {
+        from: (f32, f32),
+        to: (f32, f32),
+    },
+    /// The window has no readable geometry; nothing can be calculated.
+    NoWindow,
+    /// The platform reported no primary display, so there is nowhere to anchor.
+    NoPrimary {
+        from: (f32, f32),
+    },
+    /// The platform refused the position write; the sink already has the error.
+    Failed,
+}
+
+/// Move a window unconditionally to the primary work area's configured anchor.
+///
+/// Shared by the unreachable-drag-area guard and the tray's explicit reset action, so both use
+/// the same primary-display, work-area, size and anchor definition. The caller decides whether
+/// to move at all; this helper does not inspect the drag strip.
+///
+/// @param window - the panel's window.
+/// @param settings - the effective settings; `anchor` is the target placement.
+/// @param sink - for a platform error that is worth a log line.
+/// @returns what happened, including the old and new positions when moved.
+fn move_window_to_anchor(
+    window: &WebviewWindow,
+    settings: &WindowSettings,
+    sink: &SharedSink,
+) -> AnchorMove {
+    let Some(rect) = window_rect(window) else { return AnchorMove::NoWindow };
+    let Some(primary) = primary_display(window) else {
+        return AnchorMove::NoPrimary { from: (rect.x, rect.y) };
+    };
+    let (x, y) = geometry::anchored(primary, (rect.width, rect.height), settings.anchor);
+    if let Err(error) = window.set_position(tauri::Position::Physical(
+        tauri::PhysicalPosition::new(x as i32, y as i32),
+    )) {
+        sink.log(&format!("could not move the window to its anchor: {error}"));
+        return AnchorMove::Failed;
+    }
+    AnchorMove::Moved { from: (rect.x, rect.y), to: (x, y) }
+}
+
 /// Bring a window whose drag area is unreachable back to the primary display's anchor.
 ///
 /// This is the show-time half of the hot-plug protection, extended to the everyday case of a
@@ -738,27 +784,54 @@ fn ensure_window_usable(
     ) {
         return false;
     }
-    let Some(primary) = primary_display(window) else {
-        marker.write(&format!(
-            "window position rejected: drag area at {:.0},{:.0} is unreachable; no display to anchor on",
-            rect.x, rect.y,
-        ));
-        return false;
-    };
-    let (x, y) = geometry::anchored(primary, (rect.width, rect.height), settings.anchor);
-    if let Err(error) = window.set_position(tauri::Position::Physical(
-        tauri::PhysicalPosition::new(x as i32, y as i32),
-    )) {
-        sink.log(&format!("could not restore an unreachable window: {error}"));
-        return false;
+    match move_window_to_anchor(window, settings, sink) {
+        AnchorMove::Moved { from: (x, y), to: (nx, ny) } => {
+            marker.write(&format!(
+                "window position rejected: drag area at {x:.0},{y:.0} is unreachable; moved to {nx:.0},{ny:.0} ({})",
+                settings.anchor.name(),
+            ));
+            true
+        }
+        AnchorMove::NoPrimary { from: (x, y) } => {
+            marker.write(&format!(
+                "window position rejected: drag area at {x:.0},{y:.0} is unreachable; no display to anchor on",
+            ));
+            false
+        }
+        AnchorMove::NoWindow | AnchorMove::Failed => false,
     }
-    marker.write(&format!(
-        "window position rejected: drag area at {:.0},{:.0} is unreachable; moved to {x:.0},{y:.0} ({})",
-        rect.x,
-        rect.y,
-        settings.anchor.name(),
-    ));
-    true
+}
+
+/// Move the panel to its configured anchor from the tray menu.
+///
+/// This does not show, hide or focus the window: it is a position repair for a panel the user
+/// may be looking at, and a hidden panel must stay hidden. The caller only needs the marker.
+///
+/// @param window - the panel's window.
+/// @param settings - the effective settings; `anchor` is the target placement.
+/// @param sink - for a platform error that is worth a log line.
+/// @param marker - the record of what happened.
+fn reset_window_position(
+    window: &WebviewWindow,
+    settings: &WindowSettings,
+    sink: &SharedSink,
+    marker: &Marker,
+) {
+    match move_window_to_anchor(window, settings, sink) {
+        AnchorMove::Moved { to: (x, y), .. } => {
+            marker.write(&format!(
+                "tray menu: window position reset to {x:.0},{y:.0} ({})",
+                settings.anchor.name(),
+            ));
+        }
+        AnchorMove::NoPrimary { .. } => {
+            marker.write("tray menu: window position reset failed: no display to anchor on");
+        }
+        AnchorMove::NoWindow => {
+            marker.write("tray menu: window position reset failed: window geometry unavailable");
+        }
+        AnchorMove::Failed => {}
+    }
 }
 
 // ── Tauri commands ───────────────────────────────────────────────────────────
@@ -1278,6 +1351,9 @@ fn spawn_dispatcher(
                                     report_visibility(&session, &sink, visible, &capabilities);
                                     emit();
                                 }
+                            }
+                            TrayAction::ResetPosition => {
+                                reset_window_position(&window, &settings, &sink, &marker);
                             }
                             TrayAction::Restart | TrayAction::Quit => {
                                 let stop = action == TrayAction::Quit;

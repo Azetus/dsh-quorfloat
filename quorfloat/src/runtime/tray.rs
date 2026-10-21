@@ -10,7 +10,7 @@
 //! choice is delivered to the window dispatcher as a [`Wake`] and handled there, on the one
 //! thread that is allowed to touch the window (`main.rs`).
 //!
-//! **The labels are part of the panel's language.** The four strings a user can read here are
+//! **The labels are part of the panel's language.** The five strings a user can read here are
 //! the only ones this process draws itself, so they follow `config.window.language` exactly as
 //! the frontend's copy follows it. Because the icon belongs to this process and is created once,
 //! a language change re-labels the items that already exist ([`TrayMenu::relabel`]) instead of
@@ -33,20 +33,24 @@ use crate::runtime::diag::marker::Marker;
 pub enum TrayAction {
     /// Show the panel when it is hidden, hide it when it is shown.
     ToggleVisibility,
+    /// Move the panel back to the configured anchor, without changing visibility or focus.
+    ResetPosition,
     /// Replace this process: only the host's supervisor can do that, so it is asked.
     Restart,
     /// End this process on purpose, and see that it is not restarted: also the host's business.
     Quit,
 }
 
-/// The four strings the menu bar shows, for one language.
+/// The five strings the menu bar shows, for one language.
 ///
-/// A plain value rather than four accessors so the whole table can be asserted at once, which
-/// is how the two languages are kept from drifting apart: every row has to name all four.
+/// A plain value rather than five accessors so the whole table can be asserted at once, which
+/// is how the two languages are kept from drifting apart: every row has to name all five.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrayLabels {
     /// The toggle item: show the panel when hidden, hide it when shown.
     pub toggle: &'static str,
+    /// The reset-position item.
+    pub reset: &'static str,
     /// The restart item.
     pub restart: &'static str,
     /// The quit item.
@@ -57,22 +61,24 @@ pub struct TrayLabels {
 
 /// The label table for one language.
 ///
-/// Pure, and the only place these four strings exist: the tray is built from it and a language
+/// Pure, and the only place these five strings exist: the tray is built from it and a language
 /// change re-labels from it, so "what does the menu say in English" has exactly one answer.
 ///
 /// @param language - the language in force.
-/// @returns the four strings to draw.
+/// @returns the five strings to draw.
 #[must_use]
 pub fn labels(language: Language) -> TrayLabels {
     match language {
         Language::Zh => TrayLabels {
             toggle: "显示/隐藏面板",
+            reset: "重置窗口位置",
             restart: "重启悬浮窗",
             quit: "退出",
             tooltip: "Quorfloat 悬浮窗",
         },
         Language::En => TrayLabels {
             toggle: "Show/Hide Panel",
+            reset: "Reset Window Position",
             restart: "Restart Panel",
             quit: "Quit",
             tooltip: "Quorfloat Panel",
@@ -87,6 +93,7 @@ const ICON: &[u8] = include_bytes!("../../icons/tray.png");
 
 /// Menu item ids, matched back in the menu-event handler below.
 const ID_TOGGLE: &str = "quorfloat-toggle";
+const ID_RESET: &str = "quorfloat-reset-position";
 const ID_RESTART: &str = "quorfloat-restart";
 const ID_QUIT: &str = "quorfloat-quit";
 
@@ -100,6 +107,7 @@ const ID_QUIT: &str = "quorfloat-quit";
 /// re-label *without holding the lock over the platform call*.
 pub struct TrayMenu<R: Runtime> {
     toggle: MenuItem<R>,
+    reset: MenuItem<R>,
     restart: MenuItem<R>,
     quit: MenuItem<R>,
     icon: TrayIcon<R>,
@@ -113,6 +121,7 @@ impl<R: Runtime> Clone for TrayMenu<R> {
     fn clone(&self) -> Self {
         Self {
             toggle: self.toggle.clone(),
+            reset: self.reset.clone(),
             restart: self.restart.clone(),
             quit: self.quit.clone(),
             icon: self.icon.clone(),
@@ -145,7 +154,7 @@ impl<R: Runtime> TrayMenu<R> {
     /// Re-label the existing items and tooltip for a language.
     ///
     /// Every item is attempted even after one fails: a platform that refuses one label is
-    /// still better off with the other three in the right language than with the whole menu
+    /// still better off with the other four in the right language than with the whole menu
     /// in the old one. The language is remembered either way — retrying the same refusal on
     /// every tick would flood the marker file with a failure the user cannot act on.
     ///
@@ -157,6 +166,7 @@ impl<R: Runtime> TrayMenu<R> {
         let mut complete = true;
         for (item, text) in [
             (&self.toggle, table.toggle),
+            (&self.reset, table.reset),
             (&self.restart, table.restart),
             (&self.quit, table.quit),
         ] {
@@ -179,7 +189,7 @@ impl<R: Runtime> TrayMenu<R> {
 /// @param app - the application handle the icon belongs to.
 /// @param wake - the window dispatcher's queue; every choice becomes a [`Wake::Tray`].
 /// @param marker - where the fact that the icon exists is recorded.
-/// @param language - the panel's language, which decides the four labels.
+/// @param language - the panel's language, which decides the five labels.
 /// @returns the live tray, so a later language change can re-label it.
 /// @throws tauri::Error - when the icon, the menu or the tray cannot be built.
 pub fn install<R: Runtime>(
@@ -190,9 +200,10 @@ pub fn install<R: Runtime>(
 ) -> tauri::Result<TrayMenu<R>> {
     let table = labels(language);
     let toggle = MenuItem::with_id(app, ID_TOGGLE, table.toggle, true, None::<&str>)?;
+    let reset = MenuItem::with_id(app, ID_RESET, table.reset, true, None::<&str>)?;
     let restart = MenuItem::with_id(app, ID_RESTART, table.restart, true, None::<&str>)?;
     let quit = MenuItem::with_id(app, ID_QUIT, table.quit, true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&toggle, &restart, &quit])?;
+    let menu = Menu::with_items(app, &[&toggle, &reset, &restart, &quit])?;
     let icon = tauri::image::Image::from_bytes(ICON)?;
     let sender = wake;
     let tray = TrayIconBuilder::with_id("quorfloat-tray")
@@ -205,6 +216,7 @@ pub fn install<R: Runtime>(
         .on_menu_event(move |_app, event| {
             let action = match event.id().as_ref() {
                 ID_TOGGLE => TrayAction::ToggleVisibility,
+                ID_RESET => TrayAction::ResetPosition,
                 ID_RESTART => TrayAction::Restart,
                 ID_QUIT => TrayAction::Quit,
                 // A future item this build does not know about: nothing to do, and no reason
@@ -217,5 +229,5 @@ pub fn install<R: Runtime>(
         })
         .build(app)?;
     marker.write("tray created");
-    Ok(TrayMenu { toggle, restart, quit, icon: tray, language })
+    Ok(TrayMenu { toggle, reset, restart, quit, icon: tray, language })
 }
