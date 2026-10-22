@@ -6,14 +6,14 @@
 >
 > New entries go at the top; keep each entry within about 8 lines. Record only changes to behavior, protocol, or
 > releases; fold routine fixes into the adjacent entry. Keep test counts only when they explain a release state,
-> and mark them as "at the time".
+> and mark them as "at the time". Do not record verification results.
 > Third-level headings group topics; the body states the change directly and mentions a reason briefly.
 
 ## Version index
 
 | Version | Date | Theme |
 |---|---|---|
-| 0.1.9 | 2026-10-19 | Diagnostics readability |
+| 0.1.9 | 2026-10-19 | Diagnostics readability, tray window-position reset |
 | 0.1.8 | 2026-10-19 | Host version range, window drag-area guard, development script cleanup |
 | 0.1.7 | 2026-10-18 | Diagnostics log export, atomic state writes, Windows build/CI fixes |
 | 0.1.6 | 2026-10-14 | Automatic image display, built-in home-page navigation fix, README version placeholders |
@@ -32,6 +32,12 @@
 ### Diagnostics readability
 - Exported snapshot sections changed from JSON fragments to flat text.
 - Data sources, redaction, size limits, and file writing are unchanged; a JSON export is not provided.
+
+### Tray window-position reset
+- Added "Reset Window Position" to the menu bar/notification-area menu; it moves the panel to the current
+  `window.anchor` on the primary display's work area.
+- While hidden it only moves the window, without showing it or taking focus; a missing display or failed
+  move writes a marker and leaves visibility unchanged.
 
 ## 0.1.8 (2026-10-19)
 
@@ -54,7 +60,7 @@
   A partially visible window whose strip is still usable stays where it is.
 - A visible window whose strip is unusable is rescued rather than hidden by the hotkey/tray.
   There is no monitor polling and no tray reset item; if a visible window is unplugged and the platform does not
-  move it, a later summon is required. Verified on macOS and Windows.
+  move it, a later summon is required.
 
 ### Development script cleanup
 - Removed the dead `--perf` and `DSH_QUORFLOAT_PERF`; the variable came from the egui era and has no consumer in
