@@ -40,6 +40,7 @@ import {
   type QuorfloatHarness,
 } from './harness/adapter.js'
 import { SessionLayer } from './harness/session-layer.js'
+import { startSessionStream, type SessionStreamHandle } from './harness/session-stream.js'
 import { startWorkspaceStream, type WorkspaceStreamHandle } from './harness/workspace-stream.js'
 import { evaluateAuthority, PresenceTracker, type AuthorityVerdict, type PresenceSurface } from './harness/presence.js'
 import { Interactions } from './harness/interactions.js'
@@ -83,6 +84,8 @@ interface Activation {
   workspaceStream?: WorkspaceStreamHandle | undefined
   /** Ends every workspace subscription when the plugin is unloaded. */
   workspaceAbort?: AbortController | undefined
+  /** The live session-list push subscription; replaced on every channel generation. */
+  sessionStream?: SessionStreamHandle | undefined
   /** Disposer for the browser-facing presence service. */
   presenceGateway?: Disposer | undefined
   /** Disposer for the browser-facing control service. */
@@ -309,6 +312,29 @@ export function createPlugin(overrides: PluginOverrides = {}) {
         })
       }
 
+      // The Harness's own session events, forwarded as `sessions/changed`. Without them the list
+      // the picker draws is a snapshot taken at the last reconcile: a conversation started or
+      // renamed in the Harness window, and its running state, stay invisible until the sidecar
+      // asks again. Subscribed at the handshake for the same reason as the workspace stream —
+      // only a started channel can carry the frames, and each new process needs a subscription
+      // of its own. The events are the session controller's declared `emit` events (the same
+      // ones the Harness's browser client subscribes to), and they are best-effort: a dropped
+      // frame is repaired by the sidecar's slow reconcile. Titles are not among them; the
+      // projection feed carries those, and a profile without it keeps the reconcile path.
+      const subscribeSessions = (): void => {
+        if (activation.stopped) return
+        activation.sessionStream?.close()
+        activation.sessionStream = startSessionStream({
+          ctx,
+          log,
+          onFrame: async frame => {
+            const supervisor = activation.supervisor
+            if (supervisor === undefined) return
+            await supervisor.notify('sessions/changed', frame)
+          },
+        })
+      }
+
       const diagnosticLogs = new DiagnosticBuffers()
       const supervisor = new QuorfloatSupervisor({
         config: () => effectiveConfig,
@@ -377,9 +403,12 @@ export function createPlugin(overrides: PluginOverrides = {}) {
           diagnosticLogs.record(event)
           reportSupervisorEvent(event, log)
           // A completed handshake is the one moment a started channel exists, so it is the
-          // moment the workspace stream can actually reach the peer — and a fresh subscription
-          // is what seeds each new process with the stream's opening baseline.
-          if (event.kind === 'handshake') subscribeWorkspaces()
+          // moment the workspace and session streams can actually reach the peer — and a fresh
+          // subscription is what seeds each new process with the stream's opening baseline.
+          if (event.kind === 'handshake') {
+            subscribeWorkspaces()
+            subscribeSessions()
+          }
           overrides.onStateChange?.(state())
         },
         onPeerNotification: (method, params) => {
@@ -660,6 +689,15 @@ async function deactivate(activation: Activation, log: Logger): Promise<void> {
   }
   activation.workspaceAbort = undefined
   activation.workspaceStream = undefined
+  // 2c. end the session push too. It has no lifetime signal of its own: `close` releases the
+  //     event and projection subscriptions, and a frame still queued behind it is dropped
+  //     rather than written into a process that is on its way out.
+  try {
+    activation.sessionStream?.close()
+  } catch {
+    // Releasing a subscription must not block teardown.
+  }
+  activation.sessionStream = undefined
   // 3. stop the process and report what actually happened.
   const supervisor = activation.supervisor
   if (supervisor !== undefined) {

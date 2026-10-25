@@ -158,6 +158,44 @@ export interface SessionSummaryView {
   readonly blank: boolean
 }
 
+/**
+ * Project one session row into the view the panel draws.
+ *
+ * Both halves of the conversation list read rows through this one function: the `sessions/list`
+ * answer, and the host-pushed `sessions/changed` upsert. That is deliberate — the two paths
+ * describe the same row, and a second reader would be a second chance to disagree about which
+ * field carries the name.
+ *
+ * **The one place subagent conversations are dropped.** A subagent is not a conversation the
+ * user can open: it must not appear in the picker or count as a workspace member, and nothing
+ * else in this plugin filters on `origin` — a session that reaches the wire has passed here.
+ *
+ * @param row - one Harness `SessionSummary`, from a list answer or an `api-session/added` event.
+ * @returns the row as the panel sees it, or `undefined` when it is not a usable conversation.
+ */
+export function projectSessionSummary(row: unknown): SessionSummaryView | undefined {
+  if (typeof row !== 'object' || row === null) return undefined
+  const item = row as SessionListRow & Record<string, unknown>
+  if (item['origin'] === 'subagent') return undefined
+  const sessionId = typeof item['sessionId'] === 'string' ? item['sessionId'] : ''
+  if (sessionId === '') return undefined
+  const cwd = typeof item['cwd'] === 'string' ? item['cwd'] : undefined
+  // The name is a projection, not a top-level field: the row has no `title`, and
+  // `projections.values.title` is the string it was already carrying. A `null` value
+  // (registered but never named) and an absent block (no projection cache on this
+  // composition) both mean unnamed, and are left to the list's repair pass below.
+  const projected = item.projections?.values?.title
+  const title = typeof projected === 'string' && projected !== '' ? projected : undefined
+  return {
+    sessionId,
+    ...(title === undefined ? {} : { title }),
+    ...(cwd === undefined ? {} : { cwd }),
+    updatedAt: typeof item['updatedAt'] === 'number' ? item['updatedAt'] : 0,
+    running: item['running'] === true,
+    blank: item['blank'] === true,
+  }
+}
+
 /** Messages per upstream read; a capped partial turn is completed by reading further back. */
 const PAGE_MAX_MESSAGES = 200
 
@@ -752,31 +790,8 @@ class CordisHarness implements QuorfloatHarness {
     const value = await this.#controller.list({}, signal)
     const items = Array.isArray(value?.items) ? value.items : []
     const summaries = items
-      // **The one place subagent conversations are dropped**, and they are dropped *here*,
-      // before the title pass: a subagent is not a conversation the user can open, it must not
-      // appear in the picker or count as a workspace member, and reading its title would be an
-      // `inspect` — work done for a row that is about to be thrown away. Nothing else in this
-      // plugin filters on `origin`, so a session that reaches the wire has already passed it.
-      .filter(item => item['origin'] !== 'subagent')
-      .map(item => {
-        const sessionId = typeof item['sessionId'] === 'string' ? item['sessionId'] : ''
-        const cwd = typeof item['cwd'] === 'string' ? item['cwd'] : undefined
-        // The name is a projection, not a top-level field: the list's own row has no `title`,
-        // and `projections.values.title` is the string it was already carrying. A `null` value
-        // (registered but never named) and an absent block (no projection cache on this
-        // composition) both mean unnamed, and are left to the repair pass below.
-        const projected = item.projections?.values?.title
-        const title = typeof projected === 'string' && projected !== '' ? projected : undefined
-        return {
-          sessionId,
-          ...(title === undefined ? {} : { title }),
-          ...(cwd === undefined ? {} : { cwd }),
-          updatedAt: typeof item['updatedAt'] === 'number' ? item['updatedAt'] : 0,
-          running: item['running'] === true,
-          blank: item['blank'] === true,
-        }
-      })
-      .filter(item => item.sessionId !== '')
+      .map(projectSessionSummary)
+      .filter((item): item is SessionSummaryView => item !== undefined)
     return await this.#withTitles(summaries, signal)
   }
 

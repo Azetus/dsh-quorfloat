@@ -635,10 +635,27 @@ test('the panel reads the conversation list and attaches to nothing on its own',
     const marker = await readFile(markerPath, 'utf8').catch(() => '')
     assert.ok(!marker.includes('follow '), `nothing is claimed as followed: ${marker}`)
 
-    // Discovery keeps running: it is how a conversation started later is noticed.
-    await waitFor('a second look for conversations', async () => listCalls >= 2, { timeoutMs: 10000 })
+    // The list is kept by pushes, and a push that cannot be represented as a merge still asks
+    // for the authoritative answer. This is the cross-process half of that: the real sidecar
+    // reads the frame the host writes and asks again before the 30-second reconcile could.
+    await supervisor.notify('sessions/changed', { type: 'refresh', reason: 'removed' })
+    await waitFor('the pushed reconciliation to ask again', async () => listCalls >= 2, { timeoutMs: 5000 })
     assert.deepEqual(attaches, [], 'and the steady state still attaches to nothing')
-    assert.equal(supervisor.snapshot().consecutiveMissedHeartbeats, 0, 'the polling did not disturb liveness')
+
+    // A whole-row push is applied in place: it must not make the panel attach either.
+    await supervisor.notify('sessions/changed', {
+      type: 'upsert',
+      session: { sessionId: 'session-pushed', cwd: '/work/project', updatedAt: 100, running: true, blank: false },
+    })
+    // The marker is the sidecar's own record, and it is what proves the push was applied
+    // rather than merely received.
+    await waitFor('the pushed row to be applied', async () => {
+      const text = await readFile(markerPath, 'utf8').catch(() => '')
+      return text.includes('sessions changed: upsert session-pushed')
+    }, { timeoutMs: 5000 })
+    assert.deepEqual(attaches, [], 'a pushed row is not a user decision')
+
+    assert.equal(supervisor.snapshot().consecutiveMissedHeartbeats, 0, 'the push did not disturb liveness')
   } finally {
     delete process.env['DSH_QUORFLOAT_RUST_MARKER']
     delete process.env['DSH_QUORFLOAT_HOTKEY']

@@ -48,6 +48,11 @@ const observed = {
   // notification is the protocol, so a test asserts the exact frame shape the real sidecar's
   // `workspaces/changed` handler parses.
   workspaceChanges: [],
+  // The host's pushed conversation-list frames, in arrival order. Same reason as the workspace
+  // ones, with one addition: a `sessions/changed` frame has no answer, so the report is flushed
+  // as each one arrives (see `handleNotification`) and a test can observe the push while the
+  // process is still running.
+  sessionChanges: [],
   // The host's opening snapshot, as the frames it arrived in. Recorded as one entry per
   // frame with its shape (never the whole payload, which can be megabytes): the real
   // sidecar's assembly path reads exactly these fields, so a host that stopped sending
@@ -304,6 +309,14 @@ function handleNotification(message) {
       // side (the real sidecar writes a marker line per applied change).
       observed.workspaceChanges.push(message.params)
       note('workspaces/changed', JSON.stringify(message.params))
+      return
+    case 'sessions/changed':
+      // The conversation-list push. A notification has no answer to wait for, so the report is
+      // rewritten as each frame lands: that write is what lets a test observe the host→peer
+      // path without stopping the peer first.
+      observed.sessionChanges.push(message.params)
+      note('sessions/changed', JSON.stringify(message.params))
+      writeReport()
       return
     case 'session/snapshot':
     case 'session/snapshot/begin':

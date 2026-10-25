@@ -317,15 +317,16 @@ pub struct Session {
     /// The page request in flight, if any.
     ///
     /// Its own slot rather than the `follow_request` one: a page is asked for by the reader,
-    /// mid-poll or not, and the two answers carry different payloads. One at a time is still
-    /// the discipline — the panel disables the control while this is set, and a second answer
-    /// for the same slot is ignored — so the busy state the page sees is this field.
+    /// between two list requests or not, and the two answers carry different payloads. One at a
+    /// time is still the discipline — the panel disables the control while this is set, and a
+    /// second answer for the same slot is ignored — so the busy state the page sees is this field.
     history_request: Option<PendingHistory>,
     /// Requests the *user* caused, by their id: options, model changes, permission changes.
     ///
-    /// Deliberately not the `follow_request` slot: that one belongs to the polling loop, where one
-    /// request outstanding at a time is the discipline. These are a person clicking, and a click
-    /// while the loop happens to be mid-poll must not be lost or answer for the wrong request.
+    /// Deliberately not the `follow_request` slot: that one belongs to the request pump, where
+    /// one request outstanding at a time is the discipline. These are a person clicking, and a
+    /// click while the pump happens to be waiting must not be lost or answer for the wrong
+    /// request.
     setting_requests: BTreeMap<i64, SettingRequest>,
     /// What the host last said may be chosen, and what is chosen now.
     options: Option<SessionOptions>,
@@ -680,6 +681,14 @@ impl Session {
                 Some(params) => self.follow.apply_workspace_frame(params, sink),
                 None => sink.log("workspaces/changed carried no params"),
             },
+            // The host's push of the Harness's session events. A conversation created, renamed,
+            // started or finished in the Harness window reaches the list the picker draws here,
+            // instead of waiting for the next reconcile. See `Follow::apply_session_frame` for
+            // what each frame means and which merge direction each field takes.
+            "sessions/changed" => match params.as_ref() {
+                Some(params) => self.follow.apply_session_frame(params, sink),
+                None => sink.log("sessions/changed carried no params"),
+            },
             "interaction/open" => self.admit_interaction(params.as_ref(), sink),
             "window/visibility" => match WindowCommand::parse(params.as_ref()) {
                 Some(command) => self.commands.push(command),
@@ -975,7 +984,7 @@ impl Session {
                 return;
             }
         }
-        // A history page, before the settings and the polling loop: it is the one request the
+        // A history page, before the settings and the follow pump: it is the one request the
         // *reader* is waiting on, and its answer carries a payload none of the others do.
         if self.history_request.as_ref().is_some_and(|pending| Some(pending.id) == request_id) {
             if let Some(pending) = self.history_request.take() {
@@ -983,8 +992,8 @@ impl Session {
             }
             return;
         }
-        // The user's own requests, before the polling loop's: they are answered once and a person is
-        // waiting on them, while the loop simply asks again.
+        // The user's own requests, before the follow pump's: they are answered once and a person
+        // is waiting on them, while the pump simply asks again.
         if let Some(request) = request_id.and_then(|value| self.setting_requests.remove(&value)) {
             self.resolve_setting(request, outcome, sink);
             return;
@@ -2504,6 +2513,7 @@ pub fn parse_options(result: &Value) -> SessionOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::session::follow::{RECONCILE_INTERVAL_MS, RETRY_INTERVAL_MS};
     use crate::app::session::test_support::*;
 
     #[test]
@@ -3196,5 +3206,244 @@ mod tests {
         sink.frames.clear();
         assert!(!session.request_history(&mut sink), "nothing older is left to ask for");
         assert!(sink.frames.is_empty(), "and no request was written: {:?}", sink.frames);
+    }
+
+    /// Category 1: one pushed session change updates the list the picker draws.
+    ///
+    /// The host follows the Harness session events and forwards each as `sessions/changed`. The
+    /// frames asserted here are the cross-process contract: an upsert carries a whole row,
+    /// while status, activity and title carry one increment each.
+    #[test]
+    fn a_pushed_session_upsert_updates_the_list_and_leaves_a_marker() {
+        let (mut session, mut sink) = followed();
+        session.on_frame(
+            notification(
+                "sessions/changed",
+                json!({"type": "upsert", "session": {
+                    "sessionId": "newer", "title": "新会话", "cwd": "/work/newer",
+                    "updatedAt": 20, "running": true, "blank": false,
+                }}),
+            ),
+            &mut sink,
+        );
+
+        let ids: Vec<&str> = session.conversations().iter().map(|entry| entry.session_id.as_str()).collect();
+        assert_eq!(ids, ["newer", "session-1", "older"], "newest first, by the row's own time");
+        assert_eq!(session.conversations()[0].title.as_deref(), Some("新会话"));
+        assert_eq!(session.conversations()[0].label.as_deref(), Some("newer"), "the label is the directory name");
+        assert!(
+            sink.marks.iter().any(|line| line == "sessions changed: upsert newer"),
+            "one marker per applied change: {:?}",
+            sink.marks,
+        );
+    }
+
+    /// Category 1: a status push changes running and lowers `blank`, and never invents a row.
+    ///
+    /// `blank` only ever lowers, the same rule the Harness client applies: a conversation that
+    /// was hidden from the picker as empty must not come back as empty after its first turn.
+    #[test]
+    fn a_pushed_status_lowers_blank_without_inventing_a_row() {
+        let (mut session, mut sink) = followed();
+        session.on_frame(
+            notification(
+                "sessions/changed",
+                json!({"type": "upsert", "session": {
+                    "sessionId": "blank-one", "updatedAt": 5, "running": false, "blank": true, "cwd": "/work/blank",
+                }}),
+            ),
+            &mut sink,
+        );
+        session.on_frame(
+            notification("sessions/changed", json!({"type": "status", "sessionId": "blank-one", "running": true})),
+            &mut sink,
+        );
+
+        let row = session
+            .conversations()
+            .iter()
+            .find(|entry| entry.session_id == "blank-one")
+            .expect("the row that was pushed");
+        assert!(row.running);
+        assert!(!row.blank, "a running turn is not a blank conversation");
+
+        session.on_frame(
+            notification("sessions/changed", json!({"type": "status", "sessionId": "missing", "running": true})),
+            &mut sink,
+        );
+        assert!(
+            session.conversations().iter().all(|entry| entry.session_id != "missing"),
+            "an increment for an unknown identity changes nothing",
+        );
+        assert!(
+            sink.marks.iter().any(|line| line == "sessions changed: status blank-one running"),
+            "{:?}",
+            sink.marks,
+        );
+    }
+
+    /// Category 1: activity moves the row to the front, but only forwards.
+    #[test]
+    fn a_pushed_activity_moves_the_row_and_never_moves_it_backwards() {
+        let (mut session, mut sink) = followed();
+        session.on_frame(
+            notification("sessions/changed", json!({"type": "activity", "sessionId": "older", "updatedAt": 99})),
+            &mut sink,
+        );
+        let ids: Vec<&str> = session.conversations().iter().map(|entry| entry.session_id.as_str()).collect();
+        assert_eq!(ids, ["older", "session-1"]);
+
+        session.on_frame(
+            notification("sessions/changed", json!({"type": "activity", "sessionId": "older", "updatedAt": 2})),
+            &mut sink,
+        );
+        let moved = session
+            .conversations()
+            .iter()
+            .find(|entry| entry.session_id == "older")
+            .expect("the row");
+        assert_eq!(moved.updated_at, 99, "an older timestamp is not news");
+    }
+
+    /// Category 1: a title push renames a known row, clears to unnamed, and ignores strangers.
+    #[test]
+    fn a_pushed_title_renames_a_known_row_and_ignores_an_unknown_one() {
+        let (mut session, mut sink) = followed();
+        session.on_frame(
+            notification("sessions/changed", json!({"type": "title", "sessionId": "session-1", "title": "改名了"})),
+            &mut sink,
+        );
+        let title = |session: &Session| -> Option<String> {
+            session
+                .conversations()
+                .iter()
+                .find(|entry| entry.session_id == "session-1")
+                .and_then(|entry| entry.title.clone())
+        };
+        assert_eq!(title(&session).as_deref(), Some("改名了"));
+
+        session.on_frame(
+            notification("sessions/changed", json!({"type": "title", "sessionId": "session-1", "title": null})),
+            &mut sink,
+        );
+        assert_eq!(title(&session), None, "a null projection is 'unnamed', not 'keep the old name'");
+
+        session.on_frame(
+            notification("sessions/changed", json!({"type": "title", "sessionId": "missing", "title": "x"})),
+            &mut sink,
+        );
+        assert!(session.conversations().iter().all(|entry| entry.session_id != "missing"));
+    }
+
+    /// Category 1: a push that lands while a list is in flight is replayed over its answer.
+    ///
+    /// The answer was produced before the push arrived, so replacing the list with it and
+    /// dropping the push would leave the panel showing a state the host already corrected.
+    #[test]
+    fn a_push_that_lands_while_the_list_is_in_flight_is_replayed_over_the_answer() {
+        let (mut session, mut sink) = followed();
+        sink.frames.clear();
+        let due = rpc::now_millis() + RECONCILE_INTERVAL_MS + 1;
+        session.pump_follow_at(due, &mut sink);
+        let list = sink.frames.last().expect("a reconcile list request")["id"].clone();
+
+        session.on_frame(
+            notification("sessions/changed", json!({"type": "status", "sessionId": "session-1", "running": true})),
+            &mut sink,
+        );
+        session.on_frame(
+            Inbound::Response {
+                id: list,
+                outcome: Ok(json!({"items": [
+                    {"sessionId": "session-1", "updatedAt": 9, "cwd": "/work/project", "running": false, "blank": false},
+                    {"sessionId": "older", "updatedAt": 1, "cwd": "/work/project"},
+                ]})),
+            },
+            &mut sink,
+        );
+
+        let row = session
+            .conversations()
+            .iter()
+            .find(|entry| entry.session_id == "session-1")
+            .expect("the row from the answer");
+        assert!(row.running, "the push that arrived after the request outranks the answer");
+    }
+
+    /// Category 1: a removal push asks for an authoritative list instead of deleting a row.
+    ///
+    /// `api-session/removed` means "left the live registry"; the panel's list is the persisted
+    /// one, so the row may still exist. Deleting locally would let a pin be cleared by a fact
+    /// the host never reported.
+    #[test]
+    fn a_removal_push_asks_for_an_authoritative_list() {
+        let (mut session, mut sink) = followed();
+        sink.frames.clear();
+        session.on_frame(
+            notification("sessions/changed", json!({"type": "refresh", "reason": "removed"})),
+            &mut sink,
+        );
+        assert!(
+            session.conversations().iter().any(|entry| entry.session_id == "session-1"),
+            "a removal push does not delete rows by itself",
+        );
+        session.pump_follow_at(rpc::now_millis(), &mut sink);
+        assert_eq!(
+            sink.frames.last().expect("a list request")["method"],
+            "sessions/list",
+            "the authoritative list is asked for immediately, not at the next reconcile",
+        );
+        assert!(
+            sink.marks.iter().any(|line| line == "sessions changed: refresh (removed)"),
+            "{:?}",
+            sink.marks,
+        );
+    }
+
+    /// Category 1: the list is reconciled on a slow interval, not polled every three seconds.
+    #[test]
+    fn the_list_is_reconciled_on_a_slow_interval() {
+        let (mut session, mut sink) = followed();
+        sink.frames.clear();
+        let base = rpc::now_millis();
+        session.pump_follow_at(base + 5_000, &mut sink);
+        assert!(sink.frames.is_empty(), "no three-second poll any more: {:?}", sink.frames);
+        session.pump_follow_at(base + RECONCILE_INTERVAL_MS + 2_000, &mut sink);
+        assert_eq!(sink.frames.last().expect("a reconcile list")["method"], "sessions/list");
+    }
+
+    /// Category 1: an unanswered list is retried on the short budget, not the reconcile one.
+    #[test]
+    fn a_list_that_never_answered_is_retried_before_the_reconcile() {
+        let (mut session, mut sink) = followed();
+        sink.frames.clear();
+        let due = rpc::now_millis() + RECONCILE_INTERVAL_MS + 1;
+        session.pump_follow_at(due, &mut sink);
+        assert_eq!(sink.frames.last().expect("a list request")["method"], "sessions/list");
+
+        // No answer arrives. The pump gives up on it and waits the retry budget — a lost
+        // answer must not cost the panel half a minute without a list.
+        let timed_out = due + REQUEST_TIMEOUT_MS + 1;
+        session.pump_follow_at(timed_out, &mut sink);
+        session.pump_follow_at(timed_out + RETRY_INTERVAL_MS + 1, &mut sink);
+        assert_eq!(
+            sink.frames.last().expect("a retried list request")["method"],
+            "sessions/list",
+            "a lost answer is retried promptly",
+        );
+    }
+
+    /// Category 1: a summon asks for a fresh list before the reconcile interval elapses.
+    #[test]
+    fn a_summon_refreshes_the_conversation_list() {
+        let (mut session, mut sink) = followed();
+        sink.frames.clear();
+        session.begin_visit();
+        session.pump_follow_at(rpc::now_millis(), &mut sink);
+        assert_eq!(
+            sink.frames.first().expect("a list request")["method"],
+            "sessions/list",
+            "a panel that was just summoned shows conversations that exist now",
+        );
     }
 }

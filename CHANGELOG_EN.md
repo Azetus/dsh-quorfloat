@@ -13,11 +13,12 @@
 
 | Version | Date | Theme |
 |---|---|---|
-| 0.1.9 | 2026-10-19 | Diagnostics readability, tray window-position reset |
+| 0.1.10 | <date> | Event-driven session list, push merging, and 30-second reconcile |
+| 0.1.9 | 2026-10-22 | Diagnostics readability, tray window-position reset |
 | 0.1.8 | 2026-10-19 | Host version range, window drag-area guard, development script cleanup |
 | 0.1.7 | 2026-10-18 | Diagnostics log export, atomic state writes, Windows build/CI fixes |
 | 0.1.6 | 2026-10-14 | Automatic image display, built-in home-page navigation fix, README version placeholders |
-| 0.1.5 | 2026-10-14 | Three phases of Markdown external content (links, remote images, local images) |
+| 0.1.5 | 2026-10-13 | Three phases of Markdown external content (links, remote images, local images) |
 | 0.1.4 | 2026-10-13 | npm platform packages and GitHub Actions, Windows startup/heartbeat fixes, test grouping |
 | 0.1.3 | 2026-10-12 | npm package build entry, npm 12 compatibility, release metadata |
 | 0.1.2 | 2026-10-12 | Ungrouped browsing, i18n, system fonts, title projection, pagination alignment |
@@ -26,8 +27,28 @@
 | pre-0.1.0 | 2026-10-07 – 10-11 | Host/sidecar/protocol, approvals and questions, Tauri + React migration, tray, pin |
 
 > Versions before 0.1.3 were not published to npm and had no GitHub Release; they are local/offline build records.
+> 0.1.10 is not released yet; `<date>` is a placeholder to replace with the actual release date.
 
-## 0.1.9 (2026-10-19)
+## 0.1.10 (<date>)
+
+### Event-driven session list
+- The conversation list is now maintained by host pushes: the host subscribes to the Harness's
+  `api-session/added|removed|status|activity` and to `sessionProjections`'s `title`, and forwards them
+  as `sessions/changed`; the picker and relative times no longer wait for a 3-second poll.
+- The sidecar merges pushes into the same list: a name appears but never disappears, `cwd` fills in
+  but is not replaced, `updatedAt` only moves forward, and `blank` only lowers. Pushes that land while
+  a list answer is in flight are applied first and replayed over that answer.
+- `removed` means "left the live registry", not "gone from the persisted list"; it never deletes a row
+  and asks for the authoritative list instead. `sessions/list` becomes a 30-second reconcile, with one
+  refresh at handshake and on summon, and a 3-second retry for an unanswered request. A restarted
+  process still starts from a full list.
+- Live titles depend on `sessionProjections`; without it titles follow the reconcile (at most 30s late).
+
+### Comments and docs
+- Corrected two stale claims in `follow.rs` ("no session-appeared notification", "follow the newest conversation").
+- `ARCHITECTURE.md` documents `sessions/changed` and the list-refresh rules; `AGENT.md` lists the new markers.
+
+## 0.1.9 (2026-10-22)
 
 ### Diagnostics readability
 - Exported snapshot sections changed from JSON fragments to flat text.
@@ -120,7 +141,7 @@
 - The Chinese and English root READMEs now use `<version>` in tgz filenames, npm version examples, and build
   directory examples, with a note to replace it with the actual version.
 
-## 0.1.5 (2026-10-14)
+## 0.1.5 (2026-10-13)
 
 ### Markdown external content: links
 - Web links accept only complete HTTP(S) URLs; the frontend intercepts clicks and middle-clicks, and Rust hands

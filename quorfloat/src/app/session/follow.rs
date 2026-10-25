@@ -6,14 +6,14 @@
 //! nothing, so every approval is answered by the Harness window — and from the
 //! outside that is indistinguishable from a panel that is broken.
 //!
-//! **Which** conversation to follow is decided by three rules, in order: the pin, the
-//! choice made for this run, and the most recently updated conversation as a fallback
-//! (see `Follow::target`).
+//! **Which** conversation to follow is decided by the pin and by the choice made for this
+//! run (see `Follow::target`).
 //!
-//! Discovery is a poll, which this project otherwise avoids, because the protocol
-//! has no "a session appeared" notification. The cost is one small request every
-//! [`POLL_INTERVAL_MS`], and it stops being necessary the moment the host can tell
-//! the panel that a conversation started.
+//! The list the picker draws is kept by the host's pushes: the Harness's own session events
+//! become `sessions/changed`, so a conversation created, renamed, started or finished in the
+//! Harness window reaches the panel without asking again. A slow reconcile still reads the
+//! whole list — a dropped frame, a channel that was down, or a Harness without the projection
+//! feed must not leave the panel showing a list that only looks current.
 //!
 //! Everything here is state and decisions, with time passed in, so the whole
 //! sequence is testable without a host, a window, or a clock.
@@ -23,12 +23,21 @@ use serde_json::Value;
 use crate::app::session::FrameSink;
 use crate::ipc::protocol::error_code;
 
-/// How often to look for a conversation that is more recent than the current one.
+/// How often the pushed conversation list is reconciled against a full `sessions/list` answer.
 ///
-/// Short enough that a conversation started in the Harness window is picked up
-/// before its first approval (a model turn takes seconds), long enough that the
-/// request is noise. One small request per interval is the whole cost.
-pub const POLL_INTERVAL_MS: i64 = 3000;
+/// The pushes are the list; this is the fallback. A dropped notification, a channel that was
+/// down while a conversation appeared, or a Harness build without the session events is
+/// repaired here, and a panel left open never shows a list from another era. Thirty seconds is
+/// rare enough to be noise, and short enough that nothing the pushes missed stays wrong for
+/// long.
+pub const RECONCILE_INTERVAL_MS: i64 = 30_000;
+
+/// How long to wait before retrying a request whose answer never came.
+///
+/// A timeout says the host did not answer, not that the list is current. Retrying at the
+/// reconcile interval would leave the panel without a list for half a minute, so a lost answer
+/// — or a frame that could not be written — is retried on this short budget instead.
+pub const RETRY_INTERVAL_MS: i64 = 3_000;
 
 /// How long to wait for an answer before assuming the request was lost.
 ///
@@ -156,6 +165,39 @@ impl InFlight {
     }
 }
 
+/// One change the host pushed for the conversation list.
+///
+/// The shapes are what `sessions/changed` carries: a whole row for an upsert, one field for
+/// each increment, and a reconcile request for a removal. `Refresh` is deliberately not a row
+/// change — "left the live registry" is not "gone from the persisted list", so the
+/// authoritative list decides, not this process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SessionChange {
+    /// One complete row, as the host projects it.
+    Upsert(SessionSummary),
+    /// One conversation's running state changed.
+    Status {
+        /// Durable session identity.
+        session_id: String,
+        /// Whether a turn is in flight.
+        running: bool,
+    },
+    /// One user message moved a conversation's list position.
+    Activity {
+        /// Durable session identity.
+        session_id: String,
+        /// The durable message time, in epoch milliseconds.
+        updated_at: i64,
+    },
+    /// One conversation's projected name changed, or became unnamed.
+    Title {
+        /// Durable session identity.
+        session_id: String,
+        /// The new name, or `None` for "registered but never named".
+        title: Option<String>,
+    },
+}
+
 /// One workspace the user may choose, as the host describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Workspace {
@@ -252,6 +294,15 @@ pub struct Follow {
     gap_reported_at: Option<i64>,
     /// The conversations the host last listed, newest first.
     sessions: Vec<SessionSummary>,
+    /// Pushes that landed while a `sessions/list` answer was in flight, replayed over it.
+    ///
+    /// The answer is produced before a push that arrives while it is travelling, so replacing
+    /// the list with the answer alone would undo a change the host already reported.
+    pending_changes: Vec<SessionChange>,
+    /// Whether a push asked for the authoritative list before the next reconcile.
+    refresh_wanted: bool,
+    /// Whether a summon asked for a fresh list at the next free slot.
+    sessions_wanted: bool,
     /// The workspaces the host last listed.
     workspaces: Vec<Workspace>,
     /// The conversation the user picked for this run, if any.
@@ -296,13 +347,13 @@ pub struct Follow {
     default_requested: bool,
     /// Whether the workspace list has been asked for yet.
     workspaces_asked: bool,
-    /// Whether the next free poll slot should ask for the workspace list.
+    /// Whether the next free request slot should ask for the workspace list.
     ///
     /// Set by a summon: the workspace field's ladder (the pin, the most recent workspace, the
     /// host's default) is answered from that list, and a panel whose user just called it up has
-    /// to be able to say where a new conversation would start. Deferred to the poll loop rather
-    /// than sent from the summon itself because this layer runs one request at a time, and the
-    /// summon is already sending the attach that returns to a pinned conversation.
+    /// to be able to say where a new conversation would start. Deferred to the request pump
+    /// rather than sent from the summon itself because this layer runs one request at a time,
+    /// and the summon is already sending the attach that returns to a pinned conversation.
     workspaces_wanted: bool,
     /// The workspace a `session/create` was asked for, kept for the log line that says
     /// where the conversation the user is now in was created.
@@ -318,7 +369,7 @@ impl Follow {
     ///
     /// On demand rather than at startup: a panel whose user never opens the picker should
     /// not spend a request on it, and workspaces change when someone adds one in the Harness
-    /// rather than between two polls. The answer is then cached until asked for again.
+    /// rather than between two list answers. The answer is then cached until asked for again.
     ///
     /// @param now - caller-local time in milliseconds.
     /// @returns the request to send, or `None` when one is already outstanding.
@@ -408,13 +459,15 @@ impl Follow {
 
     /// Start a visit: a summon is a new visit, and an explanation of the last one is over.
     ///
-    /// It also marks the workspace list as wanted, so the first free poll slot asks for it: the
-    /// new-conversation ladder is answered from that list, and the panel has just been called up
-    /// to show it.
+    /// It also marks both lists as wanted, so the first free slots refresh them: the panel has
+    /// just been called up to show conversations and the workspace field as they are now, not as
+    /// they were at the last reconcile. The workspace list is what the new-conversation ladder
+    /// reads, and the conversation list is what the picker draws.
     pub fn begin_visit(&mut self) {
         self.pin_notice = None;
         self.refused_this_visit = false;
         self.workspaces_wanted = true;
+        self.sessions_wanted = true;
     }
 
     /// Pin (or unpin) the workspace a new conversation defaults to.
@@ -571,23 +624,33 @@ impl Follow {
 
     /// The next request to send, if one is due.
     ///
-    /// A wanted workspace list wins the slot over the discovery poll: the discovery poll is a
-    /// standing question, while the workspace list is what a panel that was just summoned has to
-    /// answer to say where a new conversation would start. The request is sent from here rather
-    /// than from the summon itself because this layer runs one request at a time, and the summon
-    /// is already busy writing the attach that returns to a pinned conversation.
+    /// The order is what the panel needs first: a push that asked for the authoritative list,
+    /// then the refresh a summon wants, then the workspace list the picker needs, and finally
+    /// the ordinary reconcile. The first three bypass the interval on purpose — they answer
+    /// something that just happened, while the interval is only the fallback that repairs what
+    /// the pushes missed.
     ///
     /// @param now - caller-local time in milliseconds.
     /// @returns the request, or `None` when nothing is due or one is outstanding.
     pub fn next(&mut self, now: i64) -> Option<Outgoing> {
-        if !self.started || self.in_flight.is_some() || now < self.next_poll_at {
+        if !self.started || self.in_flight.is_some() {
             return None;
+        }
+        if self.refresh_wanted || self.sessions_wanted {
+            self.refresh_wanted = false;
+            self.sessions_wanted = false;
+            self.next_poll_at = now + RECONCILE_INTERVAL_MS;
+            self.in_flight = Some(InFlight::List { sent_at: now });
+            return Some(Outgoing::ListSessions);
         }
         if self.workspaces_wanted && !self.workspaces_asked {
             self.workspaces_wanted = false;
             self.workspaces_asked = true;
             self.in_flight = Some(InFlight::Workspaces { sent_at: now });
             return Some(Outgoing::ListWorkspaces);
+        }
+        if now < self.next_poll_at {
+            return None;
         }
         self.in_flight = Some(InFlight::List { sent_at: now });
         Some(Outgoing::ListSessions)
@@ -619,15 +682,15 @@ impl Follow {
 
     /// The conversation the panel should be attached to, whatever the list says.
     ///
-    /// A pin outranks a choice, and a choice outranks "the newest".
+    /// The choice wins while the panel is open; the pin is where the next visit opens.
     #[must_use]
     pub fn target(&self) -> Option<&str> {
         // The choice first, then the pin. The pin is only ever *adopted into* the choice, at
         // startup — and it clears the choice when it is (re)set, because a pin is the latest
         // decision. The other order is a panel that fights its user: picking another conversation
-        // in the picker would last until the next poll, three seconds later, when the pin would
-        // take the panel back. The pin means "where to open next time"; the choice means "where I
-        // am now", and while the panel is open the second one wins.
+        // in the picker would last until the next pin-driven attach, when the pin would take the
+        // panel back. The pin means "where to open next time"; the choice means "where I am now",
+        // and while the panel is open the second one wins.
         self.choice.as_deref().or(self.pinned.as_deref())
     }
 
@@ -783,7 +846,7 @@ impl Follow {
     /// @param now - caller-local time in milliseconds.
     pub fn abandon(&mut self, now: i64) {
         self.in_flight = None;
-        self.next_poll_at = now + POLL_INTERVAL_MS;
+        self.next_poll_at = now + RETRY_INTERVAL_MS;
     }
 
     /// Whether an answer is still awaited, and how long it has been.
@@ -812,7 +875,7 @@ impl Follow {
         let Some(pending) = self.in_flight.take() else {
             return None;
         };
-        self.next_poll_at = now + POLL_INTERVAL_MS;
+        self.next_poll_at = now + RECONCILE_INTERVAL_MS;
         match (pending, outcome) {
             (InFlight::List { .. }, Ok(result)) => {
                 // The whole list is kept, not just its newest entry: this is the same answer
@@ -826,6 +889,17 @@ impl Follow {
                     self.sessions.len(),
                     self.sessions.iter().filter(|entry| entry.title.is_some()).count(),
                 ));
+                // Pushes that landed while this answer was being produced are replayed over it:
+                // the answer predates them, so applying it alone would undo them.
+                self.replay_pending_changes(sink);
+                // A push asked for the authoritative list after this answer was produced. A
+                // removal is not representable as a merge, so the honest reaction is one more
+                // request rather than a guess built from a list that was already stale.
+                if self.refresh_wanted {
+                    self.refresh_wanted = false;
+                    self.in_flight = Some(InFlight::List { sent_at: now });
+                    return Some(Outgoing::ListSessions);
+                }
                 // A pinned conversation the host no longer lists is a pin that cannot be
                 // honoured. Keeping it would leave the panel attached to something that is not
                 // there — and looking, from the outside, exactly like a panel with nothing to
@@ -882,7 +956,7 @@ impl Follow {
             }
             (InFlight::Workspaces { .. }, Err(error)) => {
                 // Asked for once. A host that cannot answer leaves the picker without
-                // workspaces, which is a smaller problem than asking every three seconds.
+                // workspaces, which is a smaller problem than asking on every reconcile.
                 // The list stays *unloaded*: a request that failed is not a list that is empty.
                 sink.mark(&format!("workspaces failed: {}", error.message));
                 None
@@ -920,9 +994,8 @@ impl Follow {
                     sink.log("session/create answered without a session id");
                     return None;
                 };
-                // Creating a conversation means being in it: the newest-conversation rule
-                // would do the same, but only after the next poll, and the user is looking
-                // at the panel *now*.
+                // Creating a conversation means being in it: the list would show it after the
+                // next answer, but the user is looking at the panel *now*.
                 self.choice = Some(session_id.to_owned());
                 sink.log(&format!("created conversation {session_id}"));
                 sink.mark(&format!("create {session_id}"));
@@ -990,6 +1063,10 @@ impl Follow {
                 None
             }
             (InFlight::List { .. }, Err(error)) => {
+                // Nothing was applied: the pushes that arrived during the failed request are
+                // already in the local list, and the next successful answer will describe the
+                // world at least as recently as they did.
+                self.pending_changes.clear();
                 sink.log(&format!(
                     "could not list conversations: [{code}] {message}",
                     code = error.code,
@@ -997,6 +1074,225 @@ impl Follow {
                 ));
                 None
             }
+        }
+    }
+
+    /// Apply one pushed conversation-list change.
+    ///
+    /// The host follows the Harness's session events and forwards each as `sessions/changed`;
+    /// this is the receiver. A change is applied immediately — the picker must not wait for the
+    /// reconcile — and, while a `sessions/list` answer is in flight, also kept so it can be
+    /// replayed over that answer: the answer was produced before the push, so applying it alone
+    /// would undo the push.
+    ///
+    /// A `refresh` frame is not a row change. A conversation that left the live registry may
+    /// still be in the persisted list the panel draws, so the authoritative answer decides
+    /// instead of a guess, and the request is made at the next free slot.
+    ///
+    /// @param frame - one `sessions/changed` payload.
+    /// @param sink - where markers and the occasional log line go.
+    pub fn apply_session_frame(&mut self, frame: &Value, sink: &mut dyn FrameSink) {
+        match frame.get("type").and_then(Value::as_str) {
+            Some("upsert") => {
+                let Some(summary) = frame.get("session").and_then(read_session) else {
+                    sink.log("sessions/changed upsert carried no usable session");
+                    return;
+                };
+                self.apply_change(SessionChange::Upsert(summary), sink);
+            }
+            Some("status") => {
+                let Some(session_id) = read_session_id(frame.get("sessionId")) else {
+                    sink.log("sessions/changed status carried no session id");
+                    return;
+                };
+                let Some(running) = frame.get("running").and_then(Value::as_bool) else {
+                    sink.log(&format!("sessions/changed status for {session_id} carried no running state"));
+                    return;
+                };
+                self.apply_change(SessionChange::Status { session_id, running }, sink);
+            }
+            Some("activity") => {
+                let Some(session_id) = read_session_id(frame.get("sessionId")) else {
+                    sink.log("sessions/changed activity carried no session id");
+                    return;
+                };
+                let Some(updated_at) = frame.get("updatedAt").and_then(Value::as_i64) else {
+                    sink.log(&format!("sessions/changed activity for {session_id} carried no time"));
+                    return;
+                };
+                self.apply_change(SessionChange::Activity { session_id, updated_at }, sink);
+            }
+            Some("title") => {
+                let Some(session_id) = read_session_id(frame.get("sessionId")) else {
+                    sink.log("sessions/changed title carried no session id");
+                    return;
+                };
+                // `null` is a real answer: the projection is registered and the conversation is
+                // unnamed. A missing or non-string title is not an answer at all.
+                let title = match frame.get("title") {
+                    Some(Value::Null) => None,
+                    Some(Value::String(text)) if text.trim().is_empty() => None,
+                    Some(Value::String(text)) => Some(text.clone()),
+                    _ => {
+                        sink.log(&format!("sessions/changed title for {session_id} carried no title"));
+                        return;
+                    }
+                };
+                self.apply_change(SessionChange::Title { session_id, title }, sink);
+            }
+            Some("refresh") => {
+                let reason = frame.get("reason").and_then(Value::as_str).unwrap_or("unknown");
+                self.refresh_wanted = true;
+                sink.mark(&format!("sessions changed: refresh ({reason})"));
+            }
+            other => sink.log(&format!(
+                "ignoring a sessions/changed frame this build does not use: {other:?}",
+            )),
+        }
+    }
+
+    /// Apply one change now, and keep it for replay when a list answer is in flight.
+    ///
+    /// @param change - the parsed change.
+    /// @param sink - where the marker goes.
+    fn apply_change(&mut self, change: SessionChange, sink: &mut dyn FrameSink) {
+        self.merge_change(&change, true, sink);
+        if matches!(self.in_flight, Some(InFlight::List { .. })) {
+            self.pending_changes.push(change);
+        }
+    }
+
+    /// Replay the pushes that landed while the list answer was being produced.
+    ///
+    /// Applied silently: the live application already left its marker, and a replay is the same
+    /// change being re-established, not a second one.
+    ///
+    /// @param sink - where the (silent) merge reports what it cannot use.
+    fn replay_pending_changes(&mut self, sink: &mut dyn FrameSink) {
+        let pending = std::mem::take(&mut self.pending_changes);
+        for change in pending {
+            self.merge_change(&change, false, sink);
+        }
+    }
+
+    /// Merge one pushed change into the list the picker draws.
+    ///
+    /// Fields only move in a direction that cannot be wrong, because a push and a list answer
+    /// are two descriptions of the same row and they can arrive out of order: a name appears but
+    /// never disappears, a directory fills in but is not replaced, the timestamp moves forward,
+    /// and `blank` only lowers once a turn exists.
+    ///
+    /// @param change - the change to apply.
+    /// @param announce - whether to write the marker (false for a replay).
+    /// @param sink - where markers and log lines go.
+    fn merge_change(&mut self, change: &SessionChange, announce: bool, sink: &mut dyn FrameSink) {
+        match change {
+            SessionChange::Upsert(summary) => {
+                let session_id = summary.session_id.clone();
+                match self.sessions.iter().position(|known| known.session_id == session_id) {
+                    Some(index) => {
+                        let known = &mut self.sessions[index];
+                        if summary.title.is_some() {
+                            known.title = summary.title.clone();
+                        }
+                        if known.cwd.is_none() {
+                            known.cwd = summary.cwd.clone();
+                        }
+                        if known.label.is_none() {
+                            known.label = summary.label.clone();
+                        }
+                        known.updated_at = known.updated_at.max(summary.updated_at);
+                        known.running = summary.running;
+                        known.blank = known.blank && summary.blank;
+                    }
+                    None => self.sessions.push(summary.clone()),
+                }
+                self.sort_sessions();
+                if self.session_id.as_deref() == Some(session_id.as_str()) {
+                    if let Some(label) = self
+                        .sessions
+                        .iter()
+                        .find(|row| row.session_id == session_id)
+                        .and_then(|row| row.label.clone())
+                    {
+                        self.label = Some(label);
+                    }
+                }
+                self.note_pin_present(&session_id);
+                if announce {
+                    sink.mark(&format!("sessions changed: upsert {session_id}"));
+                }
+            }
+            SessionChange::Status { session_id, running } => {
+                let Some(row) = self.sessions.iter_mut().find(|row| row.session_id == *session_id) else {
+                    if announce {
+                        sink.log(&format!("sessions/changed status names an unknown conversation: {session_id}"));
+                    }
+                    return;
+                };
+                row.running = *running;
+                if *running {
+                    // The Harness's own client applies the same rule: a turn in flight is what
+                    // turns a just-created conversation from "empty" into one worth listing.
+                    row.blank = false;
+                }
+                self.note_pin_present(session_id);
+                if announce {
+                    sink.mark(&format!(
+                        "sessions changed: status {session_id} {}",
+                        if *running { "running" } else { "idle" },
+                    ));
+                }
+            }
+            SessionChange::Activity { session_id, updated_at } => {
+                let Some(row) = self.sessions.iter_mut().find(|row| row.session_id == *session_id) else {
+                    if announce {
+                        sink.log(&format!("sessions/changed activity names an unknown conversation: {session_id}"));
+                    }
+                    return;
+                };
+                let moved = *updated_at > row.updated_at;
+                if moved {
+                    row.updated_at = *updated_at;
+                }
+                if moved {
+                    self.sort_sessions();
+                }
+                self.note_pin_present(session_id);
+                if announce {
+                    sink.mark(&format!("sessions changed: activity {session_id}"));
+                }
+            }
+            SessionChange::Title { session_id, title } => {
+                let Some(row) = self.sessions.iter_mut().find(|row| row.session_id == *session_id) else {
+                    if announce {
+                        sink.log(&format!("sessions/changed title names an unknown conversation: {session_id}"));
+                    }
+                    return;
+                };
+                row.title = title.clone();
+                self.note_pin_present(session_id);
+                if announce {
+                    sink.mark(&format!("sessions changed: title {session_id}"));
+                }
+            }
+        }
+    }
+
+    /// Keep the list newest first, the order the picker and the workspace ladder both assume.
+    fn sort_sessions(&mut self) {
+        self.sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    }
+
+    /// A push that names the pinned conversation is evidence the pin still exists.
+    ///
+    /// The absence rule counts list revisions only; without this, a push would leave a stale
+    /// count standing even though the host had just said the conversation is right there.
+    ///
+    /// @param session_id - the conversation the change named.
+    fn note_pin_present(&mut self, session_id: &str) {
+        if self.pinned.as_deref() == Some(session_id) {
+            self.absent_revisions = 0;
         }
     }
 
@@ -1209,33 +1505,49 @@ fn summaries(result: &Value) -> Vec<SessionSummary> {
     let Some(items) = result.get("items").and_then(Value::as_array) else {
         return Vec::new();
     };
-    let mut found: Vec<SessionSummary> = items
-        .iter()
-        .filter_map(|item| {
-            let session_id = item.get("sessionId").and_then(Value::as_str)?;
-            if session_id.is_empty() {
-                return None;
-            }
-            Some(SessionSummary {
-                session_id: session_id.to_owned(),
-                updated_at: item.get("updatedAt").and_then(Value::as_i64).unwrap_or(0),
-                title: item
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .filter(|title| !title.trim().is_empty())
-                    .map(str::to_owned),
-                cwd: item.get("cwd").and_then(Value::as_str).map(str::to_owned),
-                label: item
-                    .get("cwd")
-                    .and_then(Value::as_str)
-                    .and_then(|cwd| std::path::Path::new(cwd).file_name().map(|name| name.to_string_lossy().into_owned())),
-                running: item.get("running").and_then(Value::as_bool).unwrap_or(false),
-                blank: item.get("blank").and_then(Value::as_bool).unwrap_or(false),
-            })
-        })
-        .collect();
+    let mut found: Vec<SessionSummary> = items.iter().filter_map(read_session).collect();
     found.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     found
+}
+
+/// Read one conversation out of a `sessions/list` row or a `sessions/changed` upsert.
+///
+/// Both carry the same fields — the host projects a pushed row through the same reader it uses
+/// for the list — and one reader is what keeps them from drifting apart. An entry without a
+/// usable id is skipped: attaching to one would be a request the host must refuse, and offering
+/// it in the picker would be offering something that cannot work.
+///
+/// @param item - one session object.
+/// @returns the conversation, or `None` when it has no usable identity.
+fn read_session(item: &Value) -> Option<SessionSummary> {
+    let session_id = item.get("sessionId").and_then(Value::as_str)?;
+    if session_id.is_empty() {
+        return None;
+    }
+    Some(SessionSummary {
+        session_id: session_id.to_owned(),
+        updated_at: item.get("updatedAt").and_then(Value::as_i64).unwrap_or(0),
+        title: item
+            .get("title")
+            .and_then(Value::as_str)
+            .filter(|title| !title.trim().is_empty())
+            .map(str::to_owned),
+        cwd: item.get("cwd").and_then(Value::as_str).map(str::to_owned),
+        label: item
+            .get("cwd")
+            .and_then(Value::as_str)
+            .and_then(|cwd| std::path::Path::new(cwd).file_name().map(|name| name.to_string_lossy().into_owned())),
+        running: item.get("running").and_then(Value::as_bool).unwrap_or(false),
+        blank: item.get("blank").and_then(Value::as_bool).unwrap_or(false),
+    })
+}
+
+/// Read a non-empty conversation identity out of a pushed frame.
+///
+/// @param value - the frame's `sessionId` field, if any.
+/// @returns the identity, or `None` when the frame did not carry one.
+fn read_session_id(value: Option<&Value>) -> Option<String> {
+    value.and_then(Value::as_str).filter(|id| !id.is_empty()).map(str::to_owned)
 }
 
 /// Read every workspace out of a `workspaces/list` (or `workspace/default`) result.

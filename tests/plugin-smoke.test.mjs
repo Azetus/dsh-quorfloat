@@ -96,14 +96,37 @@ function fakeWorkspaceController(frames) {
 }
 
 /**
+ * A `sessionProjections` service with just the change feed the session push subscribes to.
+ *
+ * The real service owns the title projection; here the feed is enough to prove the plugin
+ * subscribed at the handshake, forwarded a title change, and released the listener on unload —
+ * a subscription owned by the service's fiber would outlive the plugin that needs it.
+ */
+function fakeSessionProjections() {
+  const listeners = new Set()
+  return {
+    count: () => listeners.size,
+    onChanged(listener) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    change(session, key, value, seq = 1) {
+      for (const listener of [...listeners]) listener(session, key, value, seq)
+    },
+  }
+}
+
+/**
  * Plant the Harness services on a fresh root context and load the plugin.
  *
  * @param options.withController - plant `sessionController`; `false` simulates a
  *   profile that does not compose the Web/API services.
  * @param options.workspaceController - plant a `workspaceController` (the workspace
  *   push stream); omitted simulates a profile without the workspace API.
+ * @param options.sessionProjections - plant the session projection feed (the title
+ *   push); omitted simulates a profile without it.
  */
-async function activate({ withController = true, workspaceController, ...overrides } = {}) {
+async function activate({ withController = true, workspaceController, sessionProjections, ...overrides } = {}) {
   const dir = scratchDir()
   const reportPath = join(dir, 'report.json')
   const pidFile = join(dir, 'pid.json')
@@ -114,6 +137,7 @@ async function activate({ withController = true, workspaceController, ...overrid
   ctx.provide('workspaceRegistry', fakeWorkspaceRegistry())
   if (withController) ctx.provide('sessionController', fakeSessionController())
   if (workspaceController !== undefined) ctx.provide('workspaceController', workspaceController)
+  if (sessionProjections !== undefined) ctx.provide('sessionProjections', sessionProjections)
   ctx.provide('approval', { request: async () => 'unavailable' })
   ctx.provide('userQuestions', { ask: async () => ({ answers: [] }) })
 
@@ -275,6 +299,57 @@ test('the host forwards workspace changes to the sidecar as they happen', async 
     ],
     'each frame arrives once, in order, in the shape the sidecar parses',
   )
+})
+
+test('the host forwards session changes to the sidecar, and releases the feed on unload', async () => {
+  // The session push has no bootstrap frame of its own: it subscribes to the Harness's events
+  // and to the projection feed, both of which only make sense once a channel exists to carry
+  // what they produce. What is asserted here is the whole path — real Cordis event, the
+  // projection feed, the supervisor's channel, and the child process's own record.
+  const projections = fakeSessionProjections()
+  const app = await activate({ sessionProjections: projections })
+  const frames = () => {
+    try {
+      return JSON.parse(readFileSync(app.reportPath, 'utf8')).sessionChanges ?? []
+    } catch {
+      return []
+    }
+  }
+  try {
+    await app.waitForRunning()
+    await waitFor('the session change stream to subscribe', async () => projections.count() === 1)
+
+    app.ctx.emit('api-session/added', {
+      sessionId: 'session-a',
+      updatedAt: 10,
+      running: false,
+      blank: true,
+      cwd: '/tmp/ws',
+      projections: { kind: 'sequenced', asOfSeq: 1, values: { title: 'One' } },
+    })
+    projections.change({ id: 'session-a', header: { origin: 'primary' } }, 'title', 'Renamed')
+    app.ctx.emit('api-session/status', 'session-a', true)
+    app.ctx.emit('api-session/removed', 'session-a')
+
+    await waitFor('the pushed frames to reach the peer', async () => frames().length === 4, { timeoutMs: 8000 })
+  } finally {
+    await app.fiber.dispose()
+  }
+
+  assert.deepEqual(
+    frames(),
+    [
+      {
+        type: 'upsert',
+        session: { sessionId: 'session-a', title: 'One', cwd: '/tmp/ws', updatedAt: 10, running: false, blank: true },
+      },
+      { type: 'title', sessionId: 'session-a', title: 'Renamed' },
+      { type: 'status', sessionId: 'session-a', running: true },
+      { type: 'refresh', reason: 'removed' },
+    ],
+    'each frame arrives once, in order, in the shape the sidecar parses',
+  )
+  assert.equal(projections.count(), 0, 'the projection subscription is released, not leaked')
 })
 
 test('an invalid configuration is rejected before anything is spawned', async () => {

@@ -128,7 +128,12 @@ DSH_QUORFLOAT_RUST_MARKER=<path>
 
 ```text
 workspaces N                         工作区列表答复
-sessions N named M                   会话列表答复 + 其中带标题的条数
+sessions N named M                   会话列表答复（每 30 秒对账、握手与呼出）+ 其中带标题的条数
+sessions changed: upsert <id>        会话列表推送：整行新增/更新（带 title/cwd/updatedAt/running/blank）
+sessions changed: status <id> running|idle   会话列表推送：运行状态
+sessions changed: activity <id>      会话列表推送：用户消息推进了 updatedAt 与排序
+sessions changed: title <id>         会话列表推送：标题投影变化
+sessions changed: refresh (<reason>) 推送要求权威列表（removal 不删行，只重查）
 follow <id> generation=N             附着成功
 detached <id>                        离开会话（已通知宿主）
 interaction <id> approval arrived    审批到达面板（追问同理：question arrived）

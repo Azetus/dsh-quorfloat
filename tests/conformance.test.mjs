@@ -280,6 +280,19 @@ test('the frames the adapter consumes are frames the Harness declares', { skip }
   assert.equal(projectFrame(frames[2]).type, 'assistant-stream')
 })
 
+test('the Harness declares the session list events this plugin subscribes to', { skip }, () => {
+  // Category 2 tripwire: the conversation list push is built on these Host events, not on an
+  // internal detail. They are declared `emit` by the session controller and forwarded to the
+  // Harness's own browser client, which is what makes `ctx.on` the supported entry. A Harness
+  // that renames or drops one turns the push into a notification this build never sends.
+  const events = new Map((contract.model?.events ?? []).map(event => [event.name, event]))
+  for (const name of ['api-session/added', 'api-session/status', 'api-session/activity', 'api-session/removed']) {
+    const event = events.get(name)
+    assert.ok(event !== undefined, `the Harness no longer declares ${name}`)
+    assert.equal(event.mode, 'emit', `${name} must stay a push event, not a waterfall`)
+  }
+})
+
 test('an unknown frame type is dropped rather than forwarded', { skip }, async () => {
   const { projectFrame } = await loadModule('harness/adapter.js')
   assert.equal(projectFrame({ type: 'something-new-from-a-nightly-build' }), undefined)

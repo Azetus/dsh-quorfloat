@@ -70,7 +70,7 @@ Harness 的 sessionController / workspace / permission / interaction 等服务
 | `src/index.ts` | 插件装配、服务等待、激活/停用顺序、生命周期接线 |
 | `src/config.ts` | 插件配置 schema、默认值、校验与归一化 |
 | `src/host/` | 进程监管、二进制解析、presence/control 网关、语言种子 |
-| `src/harness/` | Harness 边界：adapter、session-layer、审批/追问、presence 判定、工作区推送、图片读取 |
+| `src/harness/` | Harness 边界：adapter、session-layer、审批/追问、presence 判定、工作区/会话列表推送、图片读取 |
 | `src/bridge/` | stdio 通道、分帧、JSON-RPC 路由、图片传输、错误码 |
 | `src/client/` | 运行在 Harness 网页中的浏览器半边：presence 上报、插件状态页与启动/停止入口 |
 | `quorfloat/src/app/` | 侧车状态机：会话跟随、转录、交互卡片、窗口设置、偏好、pin、几何、高度、语言 |
@@ -225,6 +225,7 @@ macOS 菜单栏 / Windows 通知区提供：显示/隐藏、重置窗口位置�
 | `session/history/begin` / `part` / `end` | 大历史页的运输分块 |
 | `session/stats` | 当前会话统计；附着时与每回合结束后推送 |
 | `workspaces/changed` | 工作区新增/改名/删除/排序的推送 |
+| `sessions/changed` | 会话列表推送：`upsert`（整行）/ `status` / `activity` / `title` / `refresh` |
 | `interaction/open` | 审批或追问到达 |
 | `interaction/hint` | 该请求没有交给面板，附带仍活跃的界面列表 |
 
@@ -379,10 +380,20 @@ macOS 菜单栏 / Windows 通知区提供：显示/隐藏、重置窗口位置�
 只有“投影缺失或为 null”且该行 `updatedAt` 相对上次读取已移动时，才用 cold-safe 的 `inspect`
 折叠 `session/title`（最后一条胜出）。每次列表最多读 1 条，读不到就不显示名字，不猜字段。
 
+标题的实时更新走 `sessions/changed` 的 `title` 帧：宿主订阅 `sessionProjections.onChanged`，
+只取 key 为 `title` 的变更；投影服务缺席时该帧不产生，标题随列表对账刷新。
+
 ### 5.6 列表刷新
 
-- 会话列表每 3 秒轮询一次；变化时重新跟随/刷新选择器。
-- 工作区列表不靠轮询：宿主跟随 Harness 的 `workspaceController.follow`，把新增/改名/删除/排序
+- 会话列表由宿主推送维护：宿主订阅 Harness 的 `api-session/added|removed|status|activity`
+  与标题投影，投影成 `sessions/changed` 的 `upsert` / `status` / `activity` / `title` / `refresh`。
+- 侧车把推送合并进同一份列表，字段只按不会错的方向移动：名字出现但不消失、`cwd` 只补不换、
+  `updatedAt` 只前进、`blank` 只降不升（`running=true` 即不再为空）。排序始终按 `updatedAt` 降序。
+- `sessions/list` 答复在途时到达的推送先立即应用、再缓存，答复落地后按序重放；`refresh`
+  （`removed`：离开活注册表，不等于从持久列表消失）不删行，而是立即请求权威列表。
+- 每 30 秒做一次全量对账作为兜底；握手完成与面板呼出（`begin_visit`）也各请求一次。
+  答复超时或帧写入失败按 3 秒重试；断线/重连由新进程的首帧全量覆盖。
+- 工作区列表同样不靠轮询：宿主跟随 Harness 的 `workspaceController.follow`，把新增/改名/删除/排序
   作为 `workspaces/changed` 推给侧车，并保留一次连接期基线与回退路径。每次变更写一行低频 marker。
 
 ## 6. 审批与追问归属
@@ -706,7 +717,7 @@ Rust target。普通安装用户不需要本地编译。
   不足或完全离屏时回退到主屏 `work_area` 的锚点。work area 已排除 macOS 菜单栏/程序坞和 Windows
   任务栏，不需要应用层计算这些区域。可见但拖动条仍可用的窗口保持原位；可见窗口拔屏后若系统不自动挪窗，
   下一次呼出/托盘切换会走同一守卫。
-- 会话列表靠 3 秒轮询；事件化优化已延后。
+- 会话标题的实时更新依赖 `sessionProjections`；该服务缺席时标题最多滞后一个对账周期（30 秒）。
 - 长会话只保留 4 MiB 转录窗口；更早内容通过分页加载，超出窗口的旧行会被回收并写 marker。
 - 审批/追问一次只出现在一个界面；领取后不会同时出现在 Harness。
 - 远程图片会触发第三方请求；这是用户已接受的取舍。
@@ -732,6 +743,7 @@ Rust target。普通安装用户不需要本地编译。
 | 追问答案的 `selected` 是选项 label，按选项展示顺序 | 一卡一次提交；`custom` 只在有非空自由文本时出现 |
 | `session/prompt` 的幂等键每次尝试唯一且跨进程唯一 | Harness 用 `requestId` 比对历史；重复键会 accepted 而不受理 |
 | 大负载按字节分片，分片与事件按序发送 | 1 MiB 帧上限；事件越过前面的分片会被判过期而不渲染 |
+| 会话列表由 Harness 的 `api-session/*` 推送维护，慢对账兜底；removal 只重查不删行 | 官方浏览器客户端同样一次全量 + 事件；removal 是活注册表变化，不是持久列表删除 |
 | 转录窗口按字节、按整轮回收 | 4 MiB 文本，单条 32 KiB；按条数会让构建输出与普通文本占用差三个数量级 |
 | 版本只有一个真值；发布产物只由发布脚本产出 | 产品版本在 `package.json` + `Cargo.toml`；跨平台组装会伪造未构建的产物 |
 | 测试只守协议/接口、上游绊线与少量不变量 | 产品决定会变；UI 外观交给实机验收，行为/契约仍可测 |

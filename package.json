@@ -1,6 +1,6 @@
 {
   "name": "dsh-quorfloat",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "private": true,
   "engines": {
     "dsh": ">=0.2.0-rc.2"
