@@ -134,6 +134,10 @@ sessions changed: status <id> running|idle   会话列表推送：运行状态
 sessions changed: activity <id>      会话列表推送：用户消息推进了 updatedAt 与排序
 sessions changed: title <id>         会话列表推送：标题投影变化
 sessions changed: refresh (<reason>) 推送要求权威列表（removal 不删行，只重查）
+workspaces changed: archived N       归档集合更新（baseline 或 archived 帧，整集替换）
+unpin <id> (archived)                固定会话被归档，静默清除 pin（不产生 pinNotice）
+left <id>: archived                  当前会话被归档，已离开并通知宿主
+snapshot dropped: <id> is archived  已归档会话的迟到快照被丢弃
 follow <id> generation=N             附着成功
 detached <id>                        离开会话（已通知宿主）
 interaction <id> approval arrived    审批到达面板（追问同理：question arrived）

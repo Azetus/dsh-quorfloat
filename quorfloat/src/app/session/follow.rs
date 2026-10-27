@@ -11,12 +11,16 @@
 //!
 //! The list the picker draws is kept by the host's pushes: the Harness's own session events
 //! become `sessions/changed`, so a conversation created, renamed, started or finished in the
-//! Harness window reaches the panel without asking again. A slow reconcile still reads the
-//! whole list — a dropped frame, a channel that was down, or a Harness without the projection
-//! feed must not leave the panel showing a list that only looks current.
+//! Harness window reaches the panel without asking again. The same workspace stream also carries
+//! the Harness's archive set, which decides which of those conversations the panel may show. A
+//! slow reconcile still reads the whole list — a dropped frame, a channel that was down, or a
+//! Harness without the projection feed must not leave the panel showing a list that only looks
+//! current.
 //!
 //! Everything here is state and decisions, with time passed in, so the whole
 //! sequence is testable without a host, a window, or a clock.
+
+use std::collections::BTreeSet;
 
 use serde_json::Value;
 
@@ -294,6 +298,12 @@ pub struct Follow {
     gap_reported_at: Option<i64>,
     /// The conversations the host last listed, newest first.
     sessions: Vec<SessionSummary>,
+    /// Conversations the Harness has archived, hidden from every grouping surface.
+    ///
+    /// The workspace feed publishes the complete set on every frame, so this is an authority
+    /// rather than an increment: an id entering hides the row, an id leaving shows it again,
+    /// and neither direction asks the host for a list.
+    archived: BTreeSet<String>,
     /// Pushes that landed while a `sessions/list` answer was in flight, replayed over it.
     ///
     /// The answer is produced before a push that arrives while it is travelling, so replacing
@@ -660,6 +670,38 @@ impl Follow {
     #[must_use]
     pub fn sessions(&self) -> &[SessionSummary] {
         &self.sessions
+    }
+
+    /// The conversations the panel may draw: the host's list minus the archive set.
+    ///
+    /// The raw list is kept on purpose: an unarchived conversation has to reappear without a
+    /// request, and the pin's absence rule is about the host's list, not about visibility.
+    pub fn visible_sessions(&self) -> impl Iterator<Item = &SessionSummary> + '_ {
+        self.sessions
+            .iter()
+            .filter(|entry| !self.archived.contains(&entry.session_id))
+    }
+
+    /// Whether the Harness currently lists this conversation as archived.
+    #[must_use]
+    pub fn is_archived(&self, session_id: &str) -> bool {
+        self.archived.contains(session_id)
+    }
+
+    /// Leave the followed conversation if the Harness has just archived it.
+    ///
+    /// Checked after the archive set changes and after every follow answer lands: an attach may
+    /// succeed *after* the frame that made its target ineligible, and the panel must not keep
+    /// showing a conversation the picker hides.
+    ///
+    /// @returns the conversation that must be left, for the session layer to tear down.
+    pub fn leave_archived(&mut self) -> Option<String> {
+        let session_id = self.session_id.clone()?;
+        if !self.archived.contains(&session_id) {
+            return None;
+        }
+        self.forget_attachment();
+        Some(session_id)
     }
 
     /// The workspaces the host last listed.
@@ -1296,6 +1338,34 @@ impl Follow {
         }
     }
 
+    /// Replace the archive set from a complete frame.
+    ///
+    /// Clears the local decisions that point into it: a pin would reopen an archived conversation
+    /// on the next summon, and a choice would keep the panel attached to one the Harness no longer
+    /// shows. The pin is cleared **silently** (marker only): the user performed the archive, the
+    /// row disappears from the picker, and the panel deliberately adds no copy for a state the
+    /// Harness window owns. That is the one documented exception to "pin cleanup must be
+    /// explainable"; `ARCHITECTURE.md` §5.1 and §5.7 record it.
+    ///
+    /// @param ids - the complete archive set the frame carried.
+    /// @param sink - where the marker goes.
+    fn adopt_archived(&mut self, ids: BTreeSet<String>, sink: &mut dyn FrameSink) {
+        self.archived = ids;
+        sink.mark(&format!("workspaces changed: archived {}", self.archived.len()));
+
+        if let Some(pinned) = self.pinned.clone() {
+            if self.archived.contains(&pinned) {
+                self.pinned = None;
+                self.pins_changed = true;
+                self.absent_revisions = 0;
+                sink.mark(&format!("unpin {pinned} (archived)"));
+            }
+        }
+        if self.choice.as_deref().is_some_and(|id| self.archived.contains(id)) {
+            self.choice = None;
+        }
+    }
+
     /// Apply one pushed workspace change.
     ///
     /// The host follows the Harness's own workspace stream and forwards every frame, so the list
@@ -1303,10 +1373,11 @@ impl Follow {
     /// `workspaces` vector a `workspaces/list` answer fills, which is what makes the snapshot the
     /// frontend already re-renders from carry the change — no second list, and no request.
     ///
-    /// `archived` and `pinned` are deliberately not applied: they are the Harness's *session* sets,
-    /// and the panel's conversation list is not built from them yet. The `pinned` frame in
-    /// particular is the Harness's session pin, not this panel's own workspace pin, and treating
-    /// one as the other would silently move where a new conversation is created.
+    /// `baseline` and `archived` also carry the Harness's archive set, and that **is** applied:
+    /// it is the fact that hides archived conversations from the panel, the same way the Harness
+    /// window hides them. The `pinned` frame stays ignored: it is the Harness's session pin, not
+    /// this panel's own workspace pin, and treating one as the other would silently move where a
+    /// new conversation is created.
     ///
     /// @param frame - one `workspaces/changed` payload.
     /// @param sink - where the marker for an applied change goes.
@@ -1325,6 +1396,16 @@ impl Follow {
                 self.workspaces = workspaces(value);
                 self.workspaces_loaded = true;
                 sink.mark(&format!("workspaces changed: baseline {}", self.workspaces.len()));
+                // A baseline is complete, so a missing archive set is an empty one: a host that
+                // never sends it simply has no archive information to apply. A field that is
+                // present but unreadable is not evidence of anything, so the previous set stays.
+                match value.get("archivedSessionIds") {
+                    Some(field) => match read_archived_ids(Some(field)) {
+                        Some(archived) => self.adopt_archived(archived, sink),
+                        None => sink.log("workspaces/changed baseline carried an unreadable archive set"),
+                    },
+                    None => self.adopt_archived(BTreeSet::new(), sink),
+                }
                 // The list is the authority the workspace pin was validated against, and a
                 // baseline is the list.
                 self.reconcile_workspace_pin(sink);
@@ -1374,7 +1455,13 @@ impl Follow {
                 self.workspaces = reordered;
                 sink.mark(&format!("workspaces changed: order {}", self.workspaces.len()));
             }
-            Some("archived") | Some("pinned") => {}
+            Some("archived") => match read_archived_ids(frame.get("archivedSessionIds")) {
+                Some(archived) => self.adopt_archived(archived, sink),
+                // Silence, not "nothing is archived": keeping the previous set is the safe half,
+                // because clearing it would reveal conversations the Harness has hidden.
+                None => sink.log("workspaces/changed archived carried no archive set"),
+            },
+            Some("pinned") => {}
             other => sink.log(&format!(
                 "ignoring a workspaces/changed frame this build does not use: {other:?}",
             )),
@@ -1548,6 +1635,26 @@ fn read_session(item: &Value) -> Option<SessionSummary> {
 /// @returns the identity, or `None` when the frame did not carry one.
 fn read_session_id(value: Option<&Value>) -> Option<String> {
     value.and_then(Value::as_str).filter(|id| !id.is_empty()).map(str::to_owned)
+}
+
+/// Read a complete archive set out of a workspace frame.
+///
+/// The set is complete on every frame, so replacement is the whole operation. `None` means the
+/// frame did not carry one at all — the caller keeps whatever it had, because clearing the set
+/// would reveal conversations the Harness has hidden.
+///
+/// @param value - the frame's `archivedSessionIds` field, if any.
+/// @returns the set, or `None` when the field was missing or not an array.
+fn read_archived_ids(value: Option<&Value>) -> Option<BTreeSet<String>> {
+    Some(
+        value?
+            .as_array()?
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
 }
 
 /// Read every workspace out of a `workspaces/list` (or `workspace/default`) result.

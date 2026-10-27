@@ -678,7 +678,12 @@ impl Session {
             // did when the list was empty or had never arrived. See
             // `Follow::apply_workspace_frame` for what each frame means.
             "workspaces/changed" => match params.as_ref() {
-                Some(params) => self.follow.apply_workspace_frame(params, sink),
+                Some(params) => {
+                    self.follow.apply_workspace_frame(params, sink);
+                    // The archive set is part of this stream: a conversation archived in the
+                    // Harness window leaves the panel the same way it leaves that window.
+                    self.leave_archived_conversation(sink);
+                }
                 None => sink.log("workspaces/changed carried no params"),
             },
             // The host's push of the Harness's session events. A conversation created, renamed,
@@ -764,9 +769,18 @@ impl Session {
     /// as one frame or was rebuilt from parts: keeping one fold path is what guarantees
     /// the two forms cannot drift into two different conversations.
     ///
+    /// A snapshot for an archived conversation is dropped here: the panel left that
+    /// conversation *because* it was archived, and a frame still in flight must not seed it
+    /// back onto the screen.
+    ///
     /// @param params - a single-frame `session/snapshot` payload.
     /// @param sink - where the record lines go.
     fn fold_snapshot(&mut self, params: &Value, sink: &mut dyn FrameSink) {
+        let session_id = params.get("sessionId").and_then(Value::as_str).unwrap_or_default();
+        if self.follow.is_archived(session_id) {
+            sink.mark(&format!("snapshot dropped: {session_id} is archived"));
+            return;
+        }
         self.transcript.apply_snapshot(params);
         self.follow.record("session/snapshot", Some(params), sink);
         // What the panel now holds, on the record. "The conversation is empty"
@@ -1010,6 +1024,9 @@ impl Session {
                     self.request_options(sink);
                 }
                 self.forget_a_conversation_that_is_gone(sink);
+                // An attach can succeed *after* the archive frame that made its target
+                // ineligible: the answer is checked here, not only when the set changes.
+                self.leave_archived_conversation(sink);
                 // The conversation a waiting prompt needed may have just come into existence.
                 self.flush_pending_prompt(sink);
                 return;
@@ -1197,10 +1214,12 @@ impl Session {
         self.image_requests.remove(&id);
     }
 
-    /// The conversations the host last listed, newest first.
-    #[must_use]
-    pub fn conversations(&self) -> &[crate::app::session::follow::SessionSummary] {
-        self.follow.sessions()
+    /// The conversations the panel may draw, newest first: the host's list minus archived ones.
+    ///
+    /// Archived conversations stay in the raw list — unarchiving brings them back without a
+    /// request — but they are not offered in the picker or any workspace scope.
+    pub fn conversations(&self) -> impl Iterator<Item = &crate::app::session::follow::SessionSummary> + '_ {
+        self.follow.visible_sessions()
     }
 
     /// The workspaces the host last listed.
@@ -1323,19 +1342,47 @@ impl Session {
         // for, and that is exactly what is being given up here.
         let leaving = self.follow.session_id().map(str::to_owned);
         self.follow.start_new();
+        self.leave_conversation(leaving.as_deref(), "a new conversation was started", sink);
+    }
+
+    /// Drop everything that belonged to a conversation the panel is leaving.
+    ///
+    /// Shared by "start a new conversation" and "the Harness archived this one": both give up
+    /// the attachment, so both must drop what described it. The reason only feeds the marker;
+    /// without it a deliberate departure and an empty panel look identical.
+    ///
+    /// @param session_id - the conversation being left, or `None` when nothing was attached.
+    /// @param reason - why it is being left, for the marker.
+    /// @param sink - where the fact goes.
+    fn leave_conversation(&mut self, session_id: Option<&str>, reason: &str, sink: &mut dyn FrameSink) {
         if !self.snapshots.is_empty() {
             // The parts describe a conversation the panel has just walked away from.
             self.snapshots.clear();
-            sink.mark("snapshot dropped: a new conversation was started");
+            sink.mark(&format!("snapshot dropped: {reason}"));
         }
         self.snapshot_resends = 0;
         // The page in flight belongs to the conversation being left; the control must not stay
         // busy for it.
         self.history_request = None;
-        if let Some(session_id) = leaving {
-            self.notify_detached(&session_id, sink);
+        if let Some(session_id) = session_id {
+            self.notify_detached(session_id, sink);
             self.transcript.reset();
         }
+    }
+
+    /// Leave the conversation the Harness has just archived.
+    ///
+    /// The Harness clears an archived selection in its own window; the panel does the same so it
+    /// never shows a conversation its picker hides. The pin and the choice were already cleared
+    /// when the archive set was applied, so this only tears down what is on screen.
+    ///
+    /// @param sink - where the fact goes.
+    fn leave_archived_conversation(&mut self, sink: &mut dyn FrameSink) {
+        let Some(session_id) = self.follow.leave_archived() else {
+            return;
+        };
+        sink.mark(&format!("left {session_id}: archived"));
+        self.leave_conversation(Some(&session_id), "the conversation was archived", sink);
     }
 
     /// Create a conversation, and be in it.
@@ -3114,6 +3161,11 @@ mod tests {
         (session, sink)
     }
 
+    /// The conversation ids the panel would draw, in the order it would draw them.
+    fn conversation_ids(session: &Session) -> Vec<&str> {
+        session.conversations().map(|entry| entry.session_id.as_str()).collect()
+    }
+
     /// The `session/history` frame the sidecar writes, for the request-shape assertions.
     fn history_request(frames: &[Value]) -> Value {
         frames
@@ -3227,10 +3279,10 @@ mod tests {
             &mut sink,
         );
 
-        let ids: Vec<&str> = session.conversations().iter().map(|entry| entry.session_id.as_str()).collect();
+        let ids: Vec<&str> = session.conversations().map(|entry| entry.session_id.as_str()).collect();
         assert_eq!(ids, ["newer", "session-1", "older"], "newest first, by the row's own time");
-        assert_eq!(session.conversations()[0].title.as_deref(), Some("新会话"));
-        assert_eq!(session.conversations()[0].label.as_deref(), Some("newer"), "the label is the directory name");
+        assert_eq!(session.conversations().next().expect("the first row").title.as_deref(), Some("新会话"));
+        assert_eq!(session.conversations().next().expect("the first row").label.as_deref(), Some("newer"), "the label is the directory name");
         assert!(
             sink.marks.iter().any(|line| line == "sessions changed: upsert newer"),
             "one marker per applied change: {:?}",
@@ -3261,7 +3313,6 @@ mod tests {
 
         let row = session
             .conversations()
-            .iter()
             .find(|entry| entry.session_id == "blank-one")
             .expect("the row that was pushed");
         assert!(row.running);
@@ -3272,7 +3323,7 @@ mod tests {
             &mut sink,
         );
         assert!(
-            session.conversations().iter().all(|entry| entry.session_id != "missing"),
+            session.conversations().all(|entry| entry.session_id != "missing"),
             "an increment for an unknown identity changes nothing",
         );
         assert!(
@@ -3290,7 +3341,7 @@ mod tests {
             notification("sessions/changed", json!({"type": "activity", "sessionId": "older", "updatedAt": 99})),
             &mut sink,
         );
-        let ids: Vec<&str> = session.conversations().iter().map(|entry| entry.session_id.as_str()).collect();
+        let ids: Vec<&str> = session.conversations().map(|entry| entry.session_id.as_str()).collect();
         assert_eq!(ids, ["older", "session-1"]);
 
         session.on_frame(
@@ -3299,7 +3350,6 @@ mod tests {
         );
         let moved = session
             .conversations()
-            .iter()
             .find(|entry| entry.session_id == "older")
             .expect("the row");
         assert_eq!(moved.updated_at, 99, "an older timestamp is not news");
@@ -3316,7 +3366,6 @@ mod tests {
         let title = |session: &Session| -> Option<String> {
             session
                 .conversations()
-                .iter()
                 .find(|entry| entry.session_id == "session-1")
                 .and_then(|entry| entry.title.clone())
         };
@@ -3332,7 +3381,7 @@ mod tests {
             notification("sessions/changed", json!({"type": "title", "sessionId": "missing", "title": "x"})),
             &mut sink,
         );
-        assert!(session.conversations().iter().all(|entry| entry.session_id != "missing"));
+        assert!(session.conversations().all(|entry| entry.session_id != "missing"));
     }
 
     /// Category 1: a push that lands while a list is in flight is replayed over its answer.
@@ -3364,7 +3413,6 @@ mod tests {
 
         let row = session
             .conversations()
-            .iter()
             .find(|entry| entry.session_id == "session-1")
             .expect("the row from the answer");
         assert!(row.running, "the push that arrived after the request outranks the answer");
@@ -3384,7 +3432,7 @@ mod tests {
             &mut sink,
         );
         assert!(
-            session.conversations().iter().any(|entry| entry.session_id == "session-1"),
+            session.conversations().any(|entry| entry.session_id == "session-1"),
             "a removal push does not delete rows by itself",
         );
         session.pump_follow_at(rpc::now_millis(), &mut sink);
@@ -3444,6 +3492,217 @@ mod tests {
             sink.frames.first().expect("a list request")["method"],
             "sessions/list",
             "a panel that was just summoned shows conversations that exist now",
+        );
+    }
+
+    /// Category 1: the Harness's archive set hides conversations from the panel.
+    ///
+    /// The set arrives complete in the workspace stream, so it is an authority: an id entering
+    /// hides the row immediately, an id leaving shows it again, and no list request is involved.
+    #[test]
+    fn an_archived_conversation_is_hidden_and_returns_when_unarchived() {
+        let (mut session, mut sink) = followed();
+        assert_eq!(conversation_ids(&session), ["session-1", "older"]);
+
+        session.on_frame(
+            notification("workspaces/changed", json!({"type": "archived", "archivedSessionIds": ["older"]})),
+            &mut sink,
+        );
+        assert_eq!(conversation_ids(&session), ["session-1"], "archived rows are not offered");
+        assert!(
+            sink.marks.iter().any(|line| line == "workspaces changed: archived 1"),
+            "{:?}",
+            sink.marks,
+        );
+
+        session.on_frame(
+            notification("workspaces/changed", json!({"type": "archived", "archivedSessionIds": []})),
+            &mut sink,
+        );
+        assert_eq!(conversation_ids(&session), ["session-1", "older"], "unarchive restores the row");
+    }
+
+    /// Category 1: the opening workspace baseline carries the archive set, and hiding is local.
+    #[test]
+    fn a_baseline_archive_set_hides_rows_without_a_list_request() {
+        let (mut session, mut sink) = followed();
+        sink.frames.clear();
+        session.on_frame(
+            notification("workspaces/changed", json!({"type": "baseline", "value": {
+                "items": [{
+                    "workspaceId": "w1", "title": "ws", "path": "/work/project",
+                    "sessionIds": ["session-1", "older"], "createdAt": 1,
+                }],
+                "archivedSessionIds": ["older"],
+                "pinnedSessionIds": [],
+            }})),
+            &mut sink,
+        );
+        assert_eq!(conversation_ids(&session), ["session-1"]);
+        assert!(sink.frames.is_empty(), "hiding is a display rule, not a request: {:?}", sink.frames);
+    }
+
+    /// Category 1: a list answer that still contains an archived conversation does not reveal it.
+    #[test]
+    fn an_archived_conversation_stays_hidden_when_a_list_answer_lists_it() {
+        let (mut session, mut sink) = followed();
+        session.on_frame(
+            notification("workspaces/changed", json!({"type": "archived", "archivedSessionIds": ["older"]})),
+            &mut sink,
+        );
+        sink.frames.clear();
+        let due = rpc::now_millis() + RECONCILE_INTERVAL_MS + 1;
+        session.pump_follow_at(due, &mut sink);
+        let list = sink.frames.last().expect("a reconcile list request")["id"].clone();
+        session.on_frame(
+            Inbound::Response {
+                id: list,
+                outcome: Ok(json!({"items": [
+                    {"sessionId": "older", "updatedAt": 1, "cwd": "/work/project"},
+                    {"sessionId": "session-1", "updatedAt": 9, "cwd": "/work/project"},
+                ]})),
+            },
+            &mut sink,
+        );
+        assert_eq!(conversation_ids(&session), ["session-1"], "the list is not the visibility rule");
+    }
+
+    /// Category 1: archiving the followed conversation leaves it, clears the pin, and tells the host.
+    ///
+    /// The Harness clears an archived selection in its own window; the panel must not keep
+    /// showing one, and it must not reopen it on the next summon.
+    #[test]
+    fn archiving_the_followed_conversation_leaves_it() {
+        let (mut session, mut sink) = followed();
+        session.pin_conversation(Some("session-1".to_owned()), &mut sink);
+        assert!(session.take_pins_changed(), "the pin was just written down");
+        sink.frames.clear();
+        sink.marks.clear();
+
+        session.on_frame(
+            notification("workspaces/changed", json!({"type": "archived", "archivedSessionIds": ["session-1"]})),
+            &mut sink,
+        );
+
+        assert_eq!(session.target_conversation(), None);
+        assert_eq!(session.pinned_conversation(), None, "an archived pin cannot be opened");
+        assert!(session.take_pins_changed(), "the cleared pin is written down");
+        assert_eq!(session.transcript().session_id(), None, "the transcript is released");
+        assert!(
+            sink.frames.iter().any(|frame| frame["method"] == "session/detach"
+                && frame["params"]["sessionId"] == "session-1"),
+            "{:?}",
+            sink.frames,
+        );
+        for expected in ["unpin session-1 (archived)", "left session-1: archived"] {
+            assert!(
+                sink.marks.iter().any(|line| line == expected),
+                "missing {expected:?} in {:?}",
+                sink.marks,
+            );
+        }
+    }
+
+    /// Category 1: an attach that lands after the archive frame is left immediately.
+    #[test]
+    fn an_attach_that_lands_after_the_archive_is_left_immediately() {
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        session.on_frame(hello_ok(), &mut sink);
+        session.pump_follow_at(0, &mut sink);
+        let list = sink.frames.last().expect("a list request")["id"].clone();
+        session.on_frame(
+            Inbound::Response {
+                id: list,
+                outcome: Ok(json!({"items": [
+                    {"sessionId": "session-1", "updatedAt": 9, "cwd": "/work/project"},
+                ]})),
+            },
+            &mut sink,
+        );
+        // The panel asks for the conversation before the archive frame arrives.
+        assert!(session.choose_conversation("session-1", &mut sink));
+        let attach = sink.frames.last().expect("an attach request")["id"].clone();
+
+        session.on_frame(
+            notification("workspaces/changed", json!({"type": "archived", "archivedSessionIds": ["session-1"]})),
+            &mut sink,
+        );
+        session.on_frame(
+            Inbound::Response {
+                id: attach,
+                outcome: Ok(json!({"sessionId": "session-1", "generation": 7})),
+            },
+            &mut sink,
+        );
+
+        assert_eq!(session.target_conversation(), None);
+        assert_eq!(session.transcript().session_id(), None, "a late attach does not reopen it");
+        assert!(
+            sink.marks.iter().any(|line| line == "left session-1: archived"),
+            "{:?}",
+            sink.marks,
+        );
+    }
+
+    /// Category 1: a snapshot for an archived conversation must not seed the transcript again.
+    #[test]
+    fn a_snapshot_for_an_archived_conversation_is_not_folded() {
+        let (mut session, mut sink) = followed();
+        session.on_frame(
+            notification("workspaces/changed", json!({"type": "archived", "archivedSessionIds": ["session-1"]})),
+            &mut sink,
+        );
+        session.on_frame(
+            notification("session/snapshot", json!({
+                "sessionId": "session-1", "generation": 3, "cursor": 1,
+                "records": [{
+                    "type": "event",
+                    "event": {"type": "turn/start", "seq": 1, "time": 2, "data": {"turn": 1}},
+                }],
+                "assistantStream": {"revision": 0},
+            })),
+            &mut sink,
+        );
+        assert_eq!(session.transcript().session_id(), None, "the late snapshot was dropped");
+        assert!(
+            sink.marks.iter().any(|line| line == "snapshot dropped: session-1 is archived"),
+            "{:?}",
+            sink.marks,
+        );
+    }
+
+    /// Category 1: an archive frame without a set is silence, not "nothing is archived".
+    #[test]
+    fn an_unreadable_archive_frame_keeps_the_previous_set() {
+        let (mut session, mut sink) = followed();
+        session.on_frame(
+            notification("workspaces/changed", json!({"type": "archived", "archivedSessionIds": ["older"]})),
+            &mut sink,
+        );
+        session.on_frame(notification("workspaces/changed", json!({"type": "archived"})), &mut sink);
+        session.on_frame(
+            notification("workspaces/changed", json!({"type": "baseline", "value": {
+                "items": [],
+                "archivedSessionIds": "not-an-array",
+                "pinnedSessionIds": [],
+            }})),
+            &mut sink,
+        );
+        assert_eq!(
+            conversation_ids(&session),
+            ["session-1"],
+            "an unreadable frame must not reveal what was archived",
+        );
+        assert!(
+            sink.logs.iter().any(|line| line.contains("archived carried no archive set")),
+            "{:?}",
+            sink.logs,
+        );
+        assert!(
+            sink.logs.iter().any(|line| line.contains("baseline carried an unreadable archive set")),
+            "{:?}",
+            sink.logs,
         );
     }
 }

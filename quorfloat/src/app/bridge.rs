@@ -142,7 +142,6 @@ pub fn snapshot(session: &Session, shell: &ShellView) -> Value {
             "createFailure": follow.create_failure(),
             "conversations": session
                 .conversations()
-                .iter()
                 .map(|summary| json!({
                     "sessionId": summary.session_id,
                     "updatedAt": summary.updated_at,

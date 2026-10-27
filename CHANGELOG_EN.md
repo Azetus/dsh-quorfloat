@@ -13,7 +13,7 @@
 
 | Version | Date | Theme |
 |---|---|---|
-| 0.1.10 | <date> | Event-driven session list, push merging, and 30-second reconcile |
+| 0.1.10 | <date> | Event-driven session list, archived-conversation alignment, and 30-second reconcile |
 | 0.1.9 | 2026-10-22 | Diagnostics readability, tray window-position reset |
 | 0.1.8 | 2026-10-19 | Host version range, window drag-area guard, development script cleanup |
 | 0.1.7 | 2026-10-18 | Diagnostics log export, atomic state writes, Windows build/CI fixes |
@@ -43,6 +43,16 @@
   refresh at handshake and on summon, and a 3-second retry for an unanswered request. A restarted
   process still starts from a full list.
 - Live titles depend on `sessionProjections`; without it titles follow the reconcile (at most 30s late).
+
+### Archived conversations aligned
+- The panel hides conversations the Harness has archived, using the complete archive set the
+  workspace stream already carries; the picker, workspace menus, and "ungrouped" all follow it,
+  and unarchiving restores the row on the next frame without a list request.
+- Archiving the followed conversation leaves it and returns to the new-conversation state
+  (host `session/detach`, transcript and in-flight snapshots/pages dropped); archiving a pinned
+  conversation clears the pin silently (marker only, no `pinNotice`).
+- Late snapshots for an archived conversation are dropped; the panel offers no "show archived"
+  view — archiving and restoring belong to the Harness window.
 
 ### Comments and docs
 - Corrected two stale claims in `follow.rs` ("no session-appeared notification", "follow the newest conversation").

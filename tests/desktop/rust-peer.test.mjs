@@ -655,6 +655,23 @@ test('the panel reads the conversation list and attaches to nothing on its own',
     }, { timeoutMs: 5000 })
     assert.deepEqual(attaches, [], 'a pushed row is not a user decision')
 
+    // The archive set travels on the same workspace stream. The panel hides those conversations,
+    // so what is assertable from here is that the real sidecar read the complete set and wrote
+    // its own record — the picker itself is only visible in the running panel.
+    await supervisor.notify('workspaces/changed', {
+      type: 'archived',
+      archivedSessionIds: ['session-older'],
+    })
+    await waitFor('the archive set to be applied', async () => {
+      const text = await readFile(markerPath, 'utf8').catch(() => '')
+      return text.includes('workspaces changed: archived 1')
+    }, { timeoutMs: 5000 })
+    await supervisor.notify('workspaces/changed', { type: 'archived', archivedSessionIds: [] })
+    await waitFor('the archive set to be cleared', async () => {
+      const text = await readFile(markerPath, 'utf8').catch(() => '')
+      return text.includes('workspaces changed: archived 0')
+    }, { timeoutMs: 5000 })
+
     assert.equal(supervisor.snapshot().consecutiveMissedHeartbeats, 0, 'the push did not disturb liveness')
   } finally {
     delete process.env['DSH_QUORFLOAT_RUST_MARKER']
