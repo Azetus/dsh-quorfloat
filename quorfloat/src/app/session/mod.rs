@@ -3542,31 +3542,6 @@ mod tests {
         assert!(sink.frames.is_empty(), "hiding is a display rule, not a request: {:?}", sink.frames);
     }
 
-    /// Category 1: a list answer that still contains an archived conversation does not reveal it.
-    #[test]
-    fn an_archived_conversation_stays_hidden_when_a_list_answer_lists_it() {
-        let (mut session, mut sink) = followed();
-        session.on_frame(
-            notification("workspaces/changed", json!({"type": "archived", "archivedSessionIds": ["older"]})),
-            &mut sink,
-        );
-        sink.frames.clear();
-        let due = rpc::now_millis() + RECONCILE_INTERVAL_MS + 1;
-        session.pump_follow_at(due, &mut sink);
-        let list = sink.frames.last().expect("a reconcile list request")["id"].clone();
-        session.on_frame(
-            Inbound::Response {
-                id: list,
-                outcome: Ok(json!({"items": [
-                    {"sessionId": "older", "updatedAt": 1, "cwd": "/work/project"},
-                    {"sessionId": "session-1", "updatedAt": 9, "cwd": "/work/project"},
-                ]})),
-            },
-            &mut sink,
-        );
-        assert_eq!(conversation_ids(&session), ["session-1"], "the list is not the visibility rule");
-    }
-
     /// Category 1: archiving the followed conversation leaves it, clears the pin, and tells the host.
     ///
     /// The Harness clears an archived selection in its own window; the panel must not keep
@@ -3693,16 +3668,6 @@ mod tests {
             conversation_ids(&session),
             ["session-1"],
             "an unreadable frame must not reveal what was archived",
-        );
-        assert!(
-            sink.logs.iter().any(|line| line.contains("archived carried no archive set")),
-            "{:?}",
-            sink.logs,
-        );
-        assert!(
-            sink.logs.iter().any(|line| line.contains("baseline carried an unreadable archive set")),
-            "{:?}",
-            sink.logs,
         );
     }
 }

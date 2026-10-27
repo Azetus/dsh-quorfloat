@@ -245,6 +245,10 @@ test('the host forwards workspace changes to the sidecar as they happen', async 
   // the protocol itself. The frames are the Harness's own (an ISO `createdAt` on every workspace),
   // and what the mock records is what the real sidecar's `workspaces/changed` parser reads — the
   // projection to epoch milliseconds happens on the host side, once.
+  //
+  // The archive set travels on the same stream and is part of this contract: the panel's
+  // conversation list is filtered by it, and only this projection stands between the Harness's
+  // registry and the sidecar.
   const baselineAt = Date.parse('2026-01-02T03:04:05.000Z')
   const upsertAt = Date.parse('2026-01-03T04:05:06.000Z')
   const controller = fakeWorkspaceController([
@@ -254,7 +258,7 @@ test('the host forwards workspace changes to the sidecar as they happen', async 
         items: [
           { workspaceId: 'w1', path: '/tmp/ws', title: 'Workspace', sessionIds: ['session-a'], createdAt: '2026-01-02T03:04:05.000Z', updatedAt: '2026-01-02T03:04:05.000Z' },
         ],
-        archivedSessionIds: [],
+        archivedSessionIds: ['session-a'],
         pinnedSessionIds: ['session-a'],
       },
     },
@@ -264,6 +268,7 @@ test('the host forwards workspace changes to the sidecar as they happen', async 
     },
     { type: 'remove', workspaceId: 'w1' },
     { type: 'order', workspaceIds: ['w2'] },
+    { type: 'archived', archivedSessionIds: ['session-a', 'session-b'] },
   ])
 
   const app = await activate({ workspaceController: controller })
@@ -286,7 +291,7 @@ test('the host forwards workspace changes to the sidecar as they happen', async 
         type: 'baseline',
         value: {
           items: [{ workspaceId: 'w1', path: '/tmp/ws', title: 'Workspace', sessionIds: ['session-a'], createdAt: baselineAt }],
-          archivedSessionIds: [],
+          archivedSessionIds: ['session-a'],
           pinnedSessionIds: ['session-a'],
         },
       },
@@ -296,6 +301,7 @@ test('the host forwards workspace changes to the sidecar as they happen', async 
       },
       { type: 'remove', workspaceId: 'w1' },
       { type: 'order', workspaceIds: ['w2'] },
+      { type: 'archived', archivedSessionIds: ['session-a', 'session-b'] },
     ],
     'each frame arrives once, in order, in the shape the sidecar parses',
   )
