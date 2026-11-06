@@ -13,7 +13,7 @@
 
 | Version | Date | Theme |
 |---|---|---|
-| 0.1.10 | <date> | Event-driven session list, archived-conversation alignment, and 30-second reconcile |
+| 0.1.10 | 2026-11-06 | Event-driven session list, archived-conversation alignment, and 30-second reconcile |
 | 0.1.9 | 2026-10-22 | Diagnostics readability, tray window-position reset |
 | 0.1.8 | 2026-10-19 | Host version range, window drag-area guard, development script cleanup |
 | 0.1.7 | 2026-10-18 | Diagnostics log export, atomic state writes, Windows build/CI fixes |
@@ -27,9 +27,8 @@
 | pre-0.1.0 | 2026-10-07 – 10-11 | Host/sidecar/protocol, approvals and questions, Tauri + React migration, tray, pin |
 
 > Versions before 0.1.3 were not published to npm and had no GitHub Release; they are local/offline build records.
-> 0.1.10 is not released yet; `<date>` is a placeholder to replace with the actual release date.
 
-## 0.1.10 (<date>)
+## 0.1.10 (2026-11-06)
 
 ### Event-driven session list
 - The conversation list is now maintained by host pushes: the host subscribes to the Harness's
