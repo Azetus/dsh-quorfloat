@@ -1,12 +1,56 @@
 // The shortcut recorder: turning a keyboard press into the host's accelerator
-// spelling, with the same rules the shell enforces (`app/bridge.rs`:
-// `validate_hotkey`). The two halves must agree, or a chord the panel records
-// would be one the shell refuses on the next start.
+// spelling, deciding when a press means "stop recording" instead, and enforcing
+// the same bare-key rule the shell enforces (`app/bridge.rs`: `validate_hotkey`).
+// The two halves must agree, or a chord the panel records would be one the shell
+// refuses on the next start.
 
 import { msg, type Text } from './i18n'
 
+/** The fields of a keyboard event the recorder reads; `KeyboardEvent` fits it. */
+export interface KeyStroke {
+  readonly key: string
+  readonly code: string
+  readonly metaKey: boolean
+  readonly ctrlKey: boolean
+  readonly altKey: boolean
+  readonly shiftKey: boolean
+}
+
+/**
+ * What one keydown means while the recorder is armed.
+ *
+ * - `cancel`: Escape; stop recording without changing the accelerator;
+ * - `yield`: a bare Enter or Tab; stop recording and let the key do its normal job;
+ * - `ignore`: a modifier-only or unmapped key; stay armed;
+ * - `chord`: a candidate accelerator for {@link validateChord}.
+ */
+export type RecordingStep =
+  | { readonly kind: 'cancel' }
+  | { readonly kind: 'yield' }
+  | { readonly kind: 'ignore' }
+  | { readonly kind: 'chord'; readonly chord: string }
+
+/**
+ * Decide what a keydown means while recording.
+ *
+ * Escape is the recorder's cancel key, not a chord: the shell can parse `Escape`,
+ * but a global Escape would close menus in every application. A completely bare
+ * Enter or Tab is navigation, not a shortcut, so it ends recording instead of
+ * becoming a grab; modified forms (`Ctrl+Enter`, `Shift+Tab`) are still chords.
+ *
+ * @param event - the keydown's relevant fields.
+ * @returns what the caller should do next.
+ */
+export function recordingStep(event: KeyStroke): RecordingStep {
+  if (event.key === 'Escape') return { kind: 'cancel' }
+  const bare = !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey
+  if (bare && (event.key === 'Enter' || event.key === 'Tab')) return { kind: 'yield' }
+  const chord = chordFromEvent(event)
+  return chord === null ? { kind: 'ignore' } : { kind: 'chord', chord }
+}
+
 /** The accelerator a keydown stands for, or null for a key that is not one. */
-export function chordFromEvent(event: KeyboardEvent): string | null {
+export function chordFromEvent(event: KeyStroke): string | null {
   if (isModifier(event.code)) return null
   const key = keyName(event.code)
   if (key === null) return null
@@ -22,9 +66,11 @@ export function chordFromEvent(event: KeyboardEvent): string | null {
 /**
  * Whether a chord the recorder captured is one the shell will accept.
  *
- * Mirrors the Rust rule: a **bare** letter, digit, or punctuation key would be
- * grabbed from the whole desktop and take that key away from every application.
- * Function keys are exempt — nobody types an F13 by accident.
+ * The shell grabs an accelerator from the whole desktop. A chord with no modifier
+ * at all would therefore take that key away from every application — and the keys
+ * that hurt most are not letters: Space, Enter, Tab, Backspace, and the arrow keys
+ * are all typing or navigation. The one exception is the function-key row: nobody
+ * types an F13 by accident, so bare `F1`–`F24` stay available.
  *
  * @returns `{ ok: true }`, or the reason as a dictionary key the caller resolves.
  */
@@ -35,19 +81,16 @@ export function validateChord(chord: string): { ok: true } | { ok: false; reason
   const keys = parts.filter(part => !modifiers.has(part.toLowerCase()))
   if (keys.length !== 1) return { ok: false, reason: msg('hotkey.unreadable', { chord }) }
   const key = keys[0]!
-  if (parts.length === 1 && isBareTypingKey(key)) {
+  const hasModifier = parts.some(part => modifiers.has(part.toLowerCase()))
+  if (!hasModifier && !isFunctionKey(key)) {
     return { ok: false, reason: msg('hotkey.bareKey') }
   }
   return { ok: true }
 }
 
-/** The bare keys that would steal typing from every application. */
-export function isBareTypingKey(name: string): boolean {
-  return (
-    /^[A-Z]$/.test(name) ||
-    /^[0-9]$/.test(name) ||
-    ['`', '-', '=', '[', ']', '\\', ';', "'", ',', '.', '/'].includes(name)
-  )
+/** Whether a bare key is the one exemption: the function-key row. */
+function isFunctionKey(name: string): boolean {
+  return /^F([1-9]|1[0-9]|2[0-4])$/.test(name)
 }
 
 /** Map a `KeyboardEvent.code` to the accelerator key name, or null. */

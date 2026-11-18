@@ -13,8 +13,8 @@ export interface StatusLineProps {
  * Render the key hints and the status.
  *
  * The design's markup is `<kbd>↵</kbd> 发送　<kbd>⇧ ↵</kbd> 换行　<kbd>esc</kbd> 关闭`, with the
- * status appended after a small gap. The status is right-truncated by the CSS, so any
- * message here has to put its action first.
+ * status appended after a small gap. The CSS lets a long status wrap rather than truncate
+ * it; keep the action first so the visible part is still useful.
  *
  * @param props - the status message.
  * @returns the status element.
@@ -29,7 +29,7 @@ export function StatusLine({ status }: StatusLineProps) {
       {` ${t('status.newline')}\u3000`}
       <KeyChip kind="esc" />
       {` ${t('status.close')}`}
-      {status !== null && status !== '' && <span style={{ marginLeft: '10px' }}>{status}</span>}
+      {status !== null && status !== '' && <span className="q-status-message">{status}</span>}
     </span>
   )
 }

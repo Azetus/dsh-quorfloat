@@ -3,15 +3,15 @@
 
 import { useEffect, type RefObject } from 'react'
 import { api } from '../api'
-import { chordFromEvent, validateChord } from '../logic/hotkey'
+import { recordingStep, validateChord } from '../logic/hotkey'
 import { useT } from './useI18n'
 
 /** Everything the keyboard handler needs from the app. */
 export interface GlobalKeyOptions {
   /** Whether the shortcut field is waiting for a chord. */
   readonly recording: boolean
-  /** Stop recording (a chord was accepted or rejected). */
-  readonly setRecording: (recording: boolean) => void
+  /** Stop recording without changing the accelerator (cancel, yield, or accepted). */
+  readonly cancelRecording: () => void
   /** Show a locally produced message, e.g. why a chord was rejected. */
   readonly setTransientError: (message: string | null) => void
   /** Whether a popover is open. */
@@ -37,7 +37,7 @@ export interface GlobalKeyOptions {
  */
 export function useGlobalKeys(options: GlobalKeyOptions): void {
   const {
-    recording, setRecording, setTransientError, menuOpen, closeMenu, settingsOpen,
+    recording, cancelRecording, setTransientError, menuOpen, closeMenu, settingsOpen,
     backFromSettings, hide, inputRef, submit,
   } = options
   // The rejected chord's reason is a dictionary key; the status line takes the words.
@@ -50,17 +50,27 @@ export function useGlobalKeys(options: GlobalKeyOptions): void {
       if (event.isComposing || event.keyCode === 229) return
 
       if (recording) {
+        const step = recordingStep(event)
+        if (step.kind === 'ignore') {
+          event.preventDefault()
+          return
+        }
+        if (step.kind === 'cancel' || step.kind === 'yield') {
+          // Enter must not submit anything while recording; Tab must still move focus,
+          // which is the "yield" half of the rule. Cancel is always swallowed: Escape
+          // cannot act as a chord, and leaving it to the settings page would close it.
+          if (!(step.kind === 'yield' && event.key === 'Tab')) event.preventDefault()
+          cancelRecording()
+          return
+        }
         event.preventDefault()
-        const chord = chordFromEvent(event)
-        if (chord === null) return
-        const verdict = validateChord(chord)
+        const verdict = validateChord(step.chord)
         if (!verdict.ok) {
           setTransientError(t(verdict.reason))
           return
         }
-        setTransientError(null)
-        setRecording(false)
-        void api.setPreferences({ hotkey: chord })
+        cancelRecording()
+        void api.setPreferences({ hotkey: step.chord })
         return
       }
 
@@ -86,7 +96,7 @@ export function useGlobalKeys(options: GlobalKeyOptions): void {
     document.addEventListener('keydown', onKeyDown)
     return () => { document.removeEventListener('keydown', onKeyDown) }
   }, [
-    t, recording, setRecording, setTransientError, menuOpen, closeMenu, settingsOpen,
+    t, recording, cancelRecording, setTransientError, menuOpen, closeMenu, settingsOpen,
     backFromSettings, hide, inputRef, submit,
   ])
 }

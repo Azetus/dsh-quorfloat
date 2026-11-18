@@ -750,10 +750,15 @@ pub fn apply_preferences(mut preferences: Preferences, incoming: &Value) -> Resu
 ///
 /// - the accelerator must be one this build can read back
 ///   ([`crate::runtime::hotkey::parse_accelerator`]);
-/// - a **bare** letter, digit, or punctuation key is refused: a global hotkey is
-///   grabbed from the whole desktop, so binding `M` would take the letter M away
-///   from every application. Function keys are exempt — nobody "types" an F13 by
-///   accident.
+/// - a chord with **no modifier at all** is refused unless it is a function key. A
+///   global hotkey is grabbed from the whole desktop, so a bare key takes that key
+///   away from every application. The letters and digits are the obvious cases, but
+///   Space, Enter, Tab, Backspace, and the arrows are worse: they are how every
+///   application types and navigates. `F1`–`F24` are exempt — nobody presses an F13
+///   by accident. Shift still counts as a modifier (the recorder's existing grammar).
+///
+/// The frontend keeps the same rule in `logic/hotkey.ts`; both sides are tested with
+/// the same table so a one-sided edit fails the suite.
 ///
 /// @param spec - the accelerator text, in the host's spelling.
 /// @returns `Ok(())`, or a message the settings page can show.
@@ -761,24 +766,112 @@ pub fn validate_hotkey(spec: &str) -> Result<(), String> {
     let Some(parsed) = crate::runtime::hotkey::parse_accelerator(spec) else {
         return Err(format!("读不懂这个快捷键：{spec}"));
     };
-    if parsed.mods.is_empty() && is_bare_typing_key(parsed.key) {
+    if parsed.mods.is_empty() && !is_function_key(parsed.key) {
         return Err("裸按键会被整个桌面占用，请加上修饰键（Ctrl / Alt / Cmd / Shift）".to_owned());
     }
     Ok(())
 }
 
-/// The keys that would steal typing from every application if grabbed bare.
-fn is_bare_typing_key(key: global_hotkey::hotkey::Code) -> bool {
+/// Whether a bare key is the one allowed class: the function-key row.
+fn is_function_key(key: global_hotkey::hotkey::Code) -> bool {
     use global_hotkey::hotkey::Code as K;
     matches!(
         key,
-        K::KeyA | K::KeyB | K::KeyC | K::KeyD | K::KeyE | K::KeyF | K::KeyG | K::KeyH | K::KeyI
-            | K::KeyJ | K::KeyK | K::KeyL | K::KeyM | K::KeyN | K::KeyO | K::KeyP | K::KeyQ
-            | K::KeyR | K::KeyS | K::KeyT | K::KeyU | K::KeyV | K::KeyW | K::KeyX | K::KeyY
-            | K::KeyZ
-            | K::Digit0 | K::Digit1 | K::Digit2 | K::Digit3 | K::Digit4 | K::Digit5 | K::Digit6
-            | K::Digit7 | K::Digit8 | K::Digit9
-            | K::Backquote | K::Minus | K::Equal | K::BracketLeft | K::BracketRight
-            | K::Backslash | K::Semicolon | K::Quote | K::Comma | K::Period | K::Slash
+        K::F1 | K::F2 | K::F3 | K::F4 | K::F5 | K::F6 | K::F7 | K::F8
+            | K::F9 | K::F10 | K::F11 | K::F12 | K::F13 | K::F14 | K::F15 | K::F16
+            | K::F17 | K::F18 | K::F19 | K::F20 | K::F21 | K::F22 | K::F23 | K::F24
     )
+}
+
+/// Which hotkey may be written back to the preferences file after a settings change.
+///
+/// A refused registration keeps the previous on-disk value. The requested chord is still
+/// shown in the current session with its reason, but it must not survive a restart and
+/// leave the panel with no shortcut. A chord that is actually held replaces the previous
+/// value. When the request carried no hotkey at all, the previous value stands.
+///
+/// This deliberately does not resolve conflicts: it only decides what a failure writes.
+///
+/// @param previous - the hotkey loaded from disk before this change.
+/// @param requested - the chord this change asked for, when it asked for one.
+/// @param held - the chord actually held after the attempt.
+/// @returns the value to persist.
+pub fn persisted_hotkey(
+    previous: Option<&str>,
+    requested: Option<&str>,
+    held: Option<&str>,
+) -> Option<String> {
+    match requested {
+        Some(requested) if held == Some(requested) => Some(requested.to_owned()),
+        _ => previous.map(str::to_owned),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{persisted_hotkey, validate_hotkey};
+
+    /// Bare editing and navigation keys are the ones the letter/digit blacklist missed.
+    #[test]
+    fn bare_non_function_keys_are_refused() {
+        for spec in [
+            "Space", "Enter", "Tab", "Backspace", "Delete", "Insert", "Home", "End",
+            "PageUp", "PageDown", "Up", "Down", "Left", "Right", "Escape", "Esc",
+            "a", "Z", "0", "9", ";", "/",
+        ] {
+            assert!(validate_hotkey(spec).is_err(), "{spec} must not be bindable bare");
+        }
+    }
+
+    /// The function row stays available with no modifier, as before.
+    #[test]
+    fn bare_function_keys_are_accepted() {
+        for spec in ["F1", "F12", "F13", "F24"] {
+            assert_eq!(validate_hotkey(spec), Ok(()), "{spec} is the documented exemption");
+        }
+    }
+
+    /// A modifier is still the normal way to bind any other key. Shift counts, because
+    /// that has been the recorder's grammar; only a completely bare chord is refused.
+    #[test]
+    fn modified_chords_are_accepted() {
+        for spec in ["Alt+Space", "Ctrl+Enter", "Shift+Tab", "Shift+a", "Cmd+K"] {
+            assert_eq!(validate_hotkey(spec), Ok(()), "{spec} carries a modifier");
+        }
+    }
+
+    /// A failed registration must not replace the last working shortcut on disk.
+    #[test]
+    fn only_an_accepted_hotkey_replaces_the_persisted_one() {
+        assert_eq!(
+            persisted_hotkey(Some("Alt+Space"), Some("Ctrl+K"), Some("Ctrl+K")),
+            Some("Ctrl+K".to_owned()),
+            "an accepted chord is stored",
+        );
+        assert_eq!(
+            persisted_hotkey(Some("Alt+Space"), Some("Ctrl+K"), Some("Alt+Space")),
+            Some("Alt+Space".to_owned()),
+            "a refused chord leaves the previous value",
+        );
+        assert_eq!(
+            persisted_hotkey(Some("Alt+Space"), Some("Ctrl+K"), None),
+            Some("Alt+Space".to_owned()),
+            "a refused chord with no working grab still leaves the previous value",
+        );
+        assert_eq!(
+            persisted_hotkey(None, Some("Ctrl+K"), None),
+            None,
+            "a refused first-time choice does not invent a stored value",
+        );
+        assert_eq!(
+            persisted_hotkey(None, Some("Ctrl+K"), Some("Alt+Space")),
+            None,
+            "a restored host baseline is not promoted into a user preference",
+        );
+        assert_eq!(
+            persisted_hotkey(Some("Alt+Space"), None, Some("Alt+Space")),
+            Some("Alt+Space".to_owned()),
+            "a change that carries no hotkey leaves it alone",
+        );
+    }
 }

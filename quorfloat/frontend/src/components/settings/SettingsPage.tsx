@@ -18,6 +18,8 @@ export interface SettingsPageProps {
   readonly recording: boolean
   /** Begin recording a chord. */
   readonly onRecord: () => void
+  /** Stop recording without changing the chord. */
+  readonly onCancel: () => void
   /** Return to the conversation. */
   readonly onBack: () => void
   /** Which popover is open, if any. */
@@ -39,7 +41,7 @@ export interface SettingsPageProps {
  * @returns the page.
  */
 export function SettingsPage({
-  state, hidden, recording, onRecord, onBack, openMenu, onToggleMenu, onCloseMenu,
+  state, hidden, recording, onRecord, onCancel, onBack, openMenu, onToggleMenu, onCloseMenu,
 }: SettingsPageProps) {
   const t = useT()
   return (
@@ -68,6 +70,7 @@ export function SettingsPage({
           reason={state.hotkey.reason}
           recording={recording}
           onRecord={onRecord}
+          onCancel={onCancel}
         />
       </div>
       <div className="q-setting">

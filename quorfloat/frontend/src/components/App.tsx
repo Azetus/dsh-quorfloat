@@ -99,6 +99,13 @@ export function App({ state }: AppProps) {
   const arrived: Painted = { page, session: state.transcript.sessionId }
   const { remeasure } = usePanelDynamics(panelRef, state, arrived, available)
 
+  // Stop recording without changing the accelerator. The recording is a mode of the
+  // settings page, not of the panel: the key handler, the field, and page changes all end
+  // it through this one function so no route leaves the document listener armed.
+  const cancelRecording = useCallback((): void => {
+    setRecording(false)
+    setTransientError(null)
+  }, [])
   // What a summon puts on screen. The panel is a thing you call for, not a place you
   // resume: the settings page and any open list belonged to the *last* visit, and coming
   // back to them (or to a half-finished chord capture, which would eat the next keystroke)
@@ -107,10 +114,9 @@ export function App({ state }: AppProps) {
   const onPanelShown = useCallback((): void => {
     setPage('main')
     setOpenMenu(null)
-    setRecording(false)
-    setTransientError(null)
+    cancelRecording()
     inputRef.current?.focus()
-  }, [])
+  }, [cancelRecording])
   const flight = useFlight(panelRef, state, onPanelShown)
 
   // The refusal recovery rule: the composer clears on send, and when the shell later
@@ -197,7 +203,7 @@ export function App({ state }: AppProps) {
 
   useGlobalKeys({
     recording,
-    setRecording,
+    cancelRecording,
     setTransientError,
     menuOpen: openMenu !== null,
     closeMenu,
@@ -207,6 +213,13 @@ export function App({ state }: AppProps) {
     inputRef,
     submit,
   })
+
+  // A recording belongs to the settings page. Leaving it by any route (Back, the gear,
+  // a summon that resets the page) must not leave the document handler armed: otherwise
+  // the next Enter in the composer would be captured as a shortcut instead of sent.
+  useEffect(() => {
+    if (page !== 'settings') cancelRecording()
+  }, [page, cancelRecording])
 
   return (
     <Panel panelRef={panelRef} hiding={flight.hiding} maxHeight={maxHeight}>
@@ -229,6 +242,7 @@ export function App({ state }: AppProps) {
         hidden={page !== 'settings'}
         recording={recording}
         onRecord={() => { setRecording(true) }}
+        onCancel={cancelRecording}
         onBack={backFromSettings}
         openMenu={openMenu}
         onToggleMenu={toggleMenu}

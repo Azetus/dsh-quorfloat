@@ -415,7 +415,8 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
 }
 .q-footer kbd { font: inherit; background: var(--q-soft); border: 1px solid var(--q-line); border-radius: 4px; padding: 1px 4px; }
 .q-footer kbd svg { width: 11px; height: 11px; vertical-align: -1.5px; }
-#q-status { flex: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 46%; }
+#q-status { flex: 1 1 auto; min-width: 0; white-space: normal; }
+.q-status-message { margin-left: 10px; overflow-wrap: anywhere; }
 .q-session-stats {
   display: flex; align-items: center; justify-content: flex-end;
   gap: 5px 13px; flex-wrap: wrap; margin-left: auto; min-width: 0;
@@ -469,7 +470,8 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
 .q-settings-title button { color: var(--q-muted); font-size: 12px; padding: 5px 8px; border-radius: 6px; }
 .q-setting { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 0; border-top: 1px solid var(--q-line); font-size: 12px; }
 .q-setting small { display: block; font-size: 11px; color: var(--q-muted); }
-.q-shortcut { font: inherit; border: 1px solid var(--q-line); border-radius: 6px; background: var(--q-soft); color: var(--q-text); padding: 5px 8px; width: 102px; text-align: center; }
+.q-shortcut { font: inherit; border: 1px solid var(--q-line); border-radius: 6px; background: var(--q-soft); color: var(--q-text); padding: 5px 8px; width: 102px; text-align: center; cursor: pointer; caret-color: transparent; }
+.q-shortcut:hover { border-color: var(--q-muted); }
 .q-shortcut.q-recording { border-color: var(--q-accent); color: var(--q-accent); }
 
 /* The switch is a real button with a real knob: pseudo-elements do not render

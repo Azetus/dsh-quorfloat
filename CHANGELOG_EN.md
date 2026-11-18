@@ -13,6 +13,7 @@
 
 | Version | Date | Theme |
 |---|---|---|
+| 0.1.11 | YYYY-MM-DD | Shortcut recorder and bare-key policy |
 | 0.1.10 | 2026-11-06 | Event-driven session list, archived-conversation alignment, and 30-second reconcile |
 | 0.1.9 | 2026-10-22 | Diagnostics readability, tray window-position reset |
 | 0.1.8 | 2026-10-19 | Host version range, window drag-area guard, development script cleanup |
@@ -27,6 +28,16 @@
 | pre-0.1.0 | 2026-10-07 – 10-11 | Host/sidecar/protocol, approvals and questions, Tauri + React migration, tray, pin |
 
 > Versions before 0.1.3 were not published to npm and had no GitHub Release; they are local/offline build records.
+
+## 0.1.11 (YYYY-MM-DD)
+
+### Shortcut recorder
+- Tightened the bare-key rule: without a modifier, only function keys (F1–F24) are accepted. Space, Enter, Tab, Backspace, arrow keys, and the like were previously written to preferences and registered as global hotkeys; the frontend and the sidecar now both refuse them. Shift still counts as a modifier.
+- A hotkey that fails to register is no longer written to preferences: the session keeps the requested value and its reason, while the file keeps the previous value, so a restart still has a shortcut. Conflicts with other applications are not resolved.
+- Changing the theme, language, or keep-open switch no longer re-registers the hotkey; only a submitted shortcut setting does.
+- Escape cancels recording; a bare Enter/Tab ends it instead of being captured (Tab still moves focus). Leaving the settings page or blurring the shortcut field also ends recording, so later keystrokes cannot be captured as a shortcut.
+- The shortcut field now has a pointer cursor, a hover border, and a transparent caret, making its click target clearer.
+- A long footer status message now wraps instead of being truncated to one line.
 
 ## 0.1.10 (2026-11-06)
 
@@ -55,7 +66,7 @@
 
 ### Comments and docs
 - Corrected two stale claims in `follow.rs` ("no session-appeared notification", "follow the newest conversation").
-- `ARCHITECTURE.md` documents `sessions/changed` and the list-refresh rules; `AGENT.md` lists the new markers.
+- `ARCHITECTURE.md` documents `sessions/changed` and the list-refresh rules; `AGENTS.md` lists the new markers.
 
 ## 0.1.9 (2026-10-22)
 

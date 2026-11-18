@@ -1,4 +1,4 @@
-# AGENT.md — 开发守则与操作手册
+# AGENTS.md — 开发守则与操作手册
 
 > 本文只包含每次都要遵守的规则，包括工作纪律、怎么验证、怎么观测、代码守则。
 > 产品与架构见 `ARCHITECTURE.md`；版本与工程记录见 `CHANGELOG.md`；安装与使用见 `README.md`。
@@ -276,7 +276,7 @@ transcript skipped: … internal / N unrecognised (kind, …)  被藏起来的�
 - 产品版本只在根 `package.json` 与 `quorfloat/Cargo.toml` 声明，两处必须一致；
   `scripts/version.mjs` 在发布构建第一句校验。测试从真值来源推导，不硬编码版本号。
 - `PROTOCOL_VERSION` 是接口契约号，与产品版本独立，不随发版变动。
-- 随代码提交的文档：`AGENT.md`、`ARCHITECTURE.md`、`CHANGELOG.md`、`CHANGELOG_EN.md`、
+- 随代码提交的文档：`AGENTS.md`、`ARCHITECTURE.md`、`CHANGELOG.md`、`CHANGELOG_EN.md`、
   `README.md`、`README_EN.md`。本地未追踪笔记（如 `TODO.md`）不作为规范；代码注释可以引用 tracked
   文档的稳定章节，不得引用本地笔记。
 
@@ -322,9 +322,9 @@ transcript skipped: … internal / N unrecognised (kind, …)  被藏起来的�
 
 ## 8. 文档维护
 
-- **一事一处**：同一事实只在 `AGENT.md`、`ARCHITECTURE.md`、`CHANGELOG.md`、`CHANGELOG_EN.md`、
+- **一事一处**：同一事实只在 `AGENTS.md`、`ARCHITECTURE.md`、`CHANGELOG.md`、`CHANGELOG_EN.md`、
   `README.md` 或 `README_EN.md` 中写一次，其他文档引用它，不复制；本地未追踪笔记不是规范。
-- **规范不写历史**：`AGENT.md` 与 `ARCHITECTURE.md` 使用现在时；版本与根因写
+- **规范不写历史**：`AGENTS.md` 与 `ARCHITECTURE.md` 使用现在时；版本与根因写
   `CHANGELOG.md` / `CHANGELOG_EN.md`。CHANGELOG 保持当前“版本 → 主题”的结构，不引入
   Added/Fixed/Changed 分类。
 - **双语同步**：`CHANGELOG.md` 中文为准，`CHANGELOG_EN.md` 在同一次提交内更新，版本号、日期与段落

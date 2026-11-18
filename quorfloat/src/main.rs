@@ -1037,7 +1037,8 @@ fn log(state: tauri::State<'_, ShellRuntime>, line: String) -> Value {
 ///
 /// The hotkey is rebound here, on the main thread, which is where the platform
 /// wants registration. A refused accelerator keeps the previous grab, exactly as
-/// `Hotkey::rebind` documents.
+/// `Hotkey::rebind` documents, and the previous on-disk value is left in place: the
+/// requested chord is a session-local failure, not the new persisted setting.
 ///
 /// A language change also re-labels the menu bar, in place, and puts the new tag on the
 /// document element: the tray's strings and `lang` are the panel's own and follow the same
@@ -1051,6 +1052,7 @@ fn set_preferences(
     hotkey: Option<String>,
     language: Option<String>,
 ) -> Result<Value, String> {
+    let hotkey_requested = hotkey.is_some();
     let incoming =
         json!({ "theme": theme, "keepOpen": keep_open, "hotkey": hotkey, "language": language });
     let mut preferences = state
@@ -1058,14 +1060,23 @@ fn set_preferences(
         .as_deref()
         .map(Preferences::load)
         .unwrap_or_default();
+    // What the file says now, before this request is applied: the value a refused
+    // accelerator must leave behind. Nothing is written until the grab has been tried.
+    let previous_hotkey = preferences.hotkey.clone();
     preferences = bridge::apply_preferences(preferences, &incoming)?;
-    save_preferences(&preferences, state.preferences_path.as_deref(), &state.marker);
-    if let Some(spec) = preferences.hotkey.clone() {
+    let requested_hotkey = if hotkey_requested { preferences.hotkey.clone() } else { None };
+    let mut held_hotkey: Option<String> = None;
+    // Only a request that carries a hotkey may touch the grab. Theme, language, and
+    // the keep-open switch all come through this same command; releasing and
+    // re-registering an unchanged shortcut for them would open a pointless window
+    // in which another application could take it.
+    if let Some(spec) = requested_hotkey.clone() {
         let mut slot = lock(&state.hotkey);
         let rebound = slot
             .take()
             .unwrap_or_else(|| Hotkey::register(&spec))
             .rebind(&spec);
+        held_hotkey = rebound.held_spec().map(str::to_owned);
         {
             let mut view = lock(&state.view);
             view.hotkey_requested = rebound.spec().map(str::to_owned);
@@ -1075,6 +1086,16 @@ fn set_preferences(
         }
         *slot = Some(rebound);
     }
+    // Persist only what is actually held. A request that could not be registered is kept
+    // in the view (with its reason) for this session, but the file keeps the previous
+    // value so the next launch still has a working shortcut. Conflicts are not resolved.
+    let mut persisted = preferences.clone();
+    persisted.hotkey = bridge::persisted_hotkey(
+        previous_hotkey.as_deref(),
+        requested_hotkey.as_deref(),
+        held_hotkey.as_deref(),
+    );
+    save_preferences(&persisted, state.preferences_path.as_deref(), &state.marker);
     {
         // The host's configuration is the baseline; the user's choices sit on top —
         // the same single overlay as at startup, so a preference can never be lost
