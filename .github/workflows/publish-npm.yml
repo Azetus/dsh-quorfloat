@@ -1,4 +1,4 @@
-name: Build and publish npm packages
+name: Build and stage npm packages
 
 on:
   workflow_dispatch:
@@ -118,18 +118,18 @@ jobs:
         timeout-minutes: 20
         run: npm run ci:test
 
-  publish:
-    name: Publish native packages, then main package
+  stage:
+    name: Stage npm packages for approval
     needs: [version, build]
     if: github.event_name == 'release' && !github.event.release.prerelease
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: read
       actions: read
       id-token: write
     concurrency:
-      group: dsh-quorfloat-npm-publish
+      group: dsh-quorfloat-npm-stage
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v7
@@ -142,7 +142,7 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - name: Prepare npm with Trusted Publishing support
-        run: npm install --global npm@12
+        run: npm install --global npm@12.0.2
       - uses: actions/download-artifact@v8
         with:
           name: npm-native-darwin-${{ needs.version.outputs.version }}
@@ -155,5 +155,5 @@ jobs:
         with:
           name: npm-main-${{ needs.version.outputs.version }}
           path: .release-artifacts/main
-      - name: Publish with npm Trusted Publishing
-        run: npm run release:publish -- .release-artifacts
+      - name: Stage with npm Trusted Publishing
+        run: npm run release:stage -- .release-artifacts

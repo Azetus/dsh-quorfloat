@@ -121,7 +121,15 @@ export function runNpm(args, { cwd = ROOT, stdio = 'inherit' } = {}) {
     cwd, stdio, encoding: 'utf8', shell: false,
   })
   if (result.error !== undefined) throw new Error(`cannot run npm: ${result.error.message}`)
-  if (result.status !== 0) throw new Error(`npm ${args[0]} failed (exit ${result.status ?? result.signal})`)
+  if (result.status !== 0) {
+    const detail = [result.stdout, result.stderr]
+      .filter(value => typeof value === 'string' && value.trim() !== '')
+      .join('\n')
+      .trim()
+    throw new Error(
+      `npm ${args[0]} failed (exit ${result.status ?? result.signal})${detail === '' ? '' : `:\n${detail}`}`,
+    )
+  }
   return result
 }
 

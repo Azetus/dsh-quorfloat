@@ -1,4 +1,4 @@
-/** Publish the workflow's tarballs in dependency order, using npm OIDC. */
+/** Stage the workflow's tarballs in dependency order, using npm OIDC. */
 import { spawnSync } from 'node:child_process'
 import { appendFileSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -54,21 +54,25 @@ function inventory(directory, name, version) {
 }
 
 function report(item, status) {
-  process.stdout.write(`publish: ${item.name}@${item.version}: ${status}\n`)
+  process.stdout.write(`stage: ${item.name}@${item.version}: ${status}\n`)
   if (process.env.GITHUB_STEP_SUMMARY) {
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, `- ${item.name}@${item.version}: ${status}\n`)
   }
 }
 
+function summary(text) {
+  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, text)
+}
+
 async function main() {
   if (process.env.GITHUB_ACTIONS !== 'true' || process.env.GITHUB_EVENT_NAME !== 'release') {
-    throw new Error('publishing is allowed only in the GitHub Release workflow')
+    throw new Error('staging is allowed only in the GitHub Release workflow')
   }
   const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'))
   const version = assertVersionsAgree(ROOT)
   if (event.action !== 'published' || event.release.draft || event.release.prerelease
       || event.release.tag_name !== `v${version}`) {
-    throw new Error(`publishing requires a published stable Release tagged v${version}`)
+    throw new Error(`staging requires a published stable Release tagged v${version}`)
   }
   const artifacts = resolve(process.argv[2] ?? '.release-artifacts')
   const platforms = MANIFEST.quorfloat.platformPackages
@@ -83,30 +87,39 @@ async function main() {
       || expectedDependencies.some(name => mainPackage.optionalDependencies[name] !== version)) {
     throw new Error('main package must depend on both native packages at this exact version')
   }
-  // A release may be rebuilt after a partial submission. Existing versions are
-  // immutable and skipped by identity; archive byte equality is not a retry gate.
+  // A release may be rebuilt after a partial submission. Existing published versions
+  // are immutable and skipped by identity; archive byte equality is not a retry gate.
   // Resolve all three states before making the first registry write.
   const existing = await Promise.all(items.map(item => existingVersion(item.name, version)))
-  if (process.env.GITHUB_STEP_SUMMARY) {
-    appendFileSync(process.env.GITHUB_STEP_SUMMARY,
-      '## npm publication submissions\n\n'
-      + 'New submissions are accepted when npm publish succeeds. npm scans them before installation becomes available; this job does not wait for that scan.\n\n')
-  }
+  summary('## npm staged packages\n\n'
+    + 'These versions are staged, not published. Approve them with 2FA; approve the two native '
+    + 'packages before the main package.\n\n')
   for (const [index, item] of items.entries()) {
     if (existing[index] !== null) {
       report(item, existing[index])
       continue
     }
-    runNpm(['publish', item.archive, '--access', 'public', '--tag', 'latest', `--registry=${REGISTRY}`])
-    // npm may scan accepted packages for minutes before registry reads succeed.
-    // A successful publish is the submission boundary: do not block the next
-    // package, repeat the upload, or fail the job while that scan is pending.
-    report(item, 'accepted by npm; installation availability may still be pending')
+    // Trust tokens can run stage publish but not stage list, so a pending stage from an
+    // earlier attempt cannot be detected here. A rerun after partial success will fail on
+    // the already-staged version; the summary tells the operator to inspect or reject it.
+    const result = runNpm(
+      ['stage', 'publish', item.archive, '--access', 'public', '--tag', 'latest', '--provenance',
+        `--registry=${REGISTRY}`],
+      { stdio: ['ignore', 'pipe', 'pipe'] },
+    )
+    const output = `${result.stdout ?? ''}${result.stderr ?? ''}`.trim()
+    if (output !== '') {
+      process.stdout.write(`${output}\n`)
+      summary(`\n${output}\n`)
+    }
+    report(item, 'staged; approval pending')
   }
-  process.stdout.write('publish: all three package versions are accepted or already exist; npm scanning may still be in progress\n')
+  summary('\nTo approve, run:\n\n```text\nnpm stage list\nnpm stage approve <stage-id>\n```\n\n'
+    + 'Approve the native packages first, then the main package.\n')
+  process.stdout.write('stage: all three package versions are staged or already exist; approval is required\n')
 }
 
 main().catch(error => {
-  process.stderr.write(`publish: ${error.message}\n`)
+  process.stderr.write(`stage: ${error.message}\n`)
   process.exitCode = 1
 })

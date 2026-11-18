@@ -94,8 +94,13 @@ function test() {
   const original = new Map(Object.keys(overrides).map(key => [key, process.env[key]]))
   Object.assign(process.env, overrides)
   try {
-    // The publish gate excludes desktop integration: it never launches the real
+    // Build what the tests consume before running them: the sidecar embeds
+    // `frontend/dist` at compile time, and the JS suites import `lib/`. Without these
+    // steps a clean checkout would fail (or, worse, an old build could be tested).
+    // The publish gate still excludes desktop integration: it never launches the real
     // Tauri sidecar. Release executables are built by the preceding package steps.
+    runNpm(['run', 'build:frontend'])
+    runNpm(['run', 'build:plugin'])
     run('cargo', ['test', '--locked', '--manifest-path', 'quorfloat/Cargo.toml'])
     runNpm(['--prefix', 'quorfloat/frontend', 'run', 'typecheck'])
     runNpm(['run', 'test:frontend'])

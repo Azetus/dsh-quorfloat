@@ -707,12 +707,19 @@ bundle 内的 `cordis.patch.yml` 把 `quorfloatPath` 指向自带的 `./bin/dsh-
 
 ### 9.5 CI 与发布
 
+- `.github/workflows/ci.yml` 在 push 到 `main` / `dev` 与 pull request 时运行；macOS 与 Windows
+  两个平台都执行完整 `ci:test`。
 - `.github/workflows/publish-npm.yml` 支持手动运行与正式 Release 触发。
 - 手动运行构建 macOS universal 与 Windows x64，执行测试并保存离线/平台/主包 tgz，不发布 npm。
-- Release 触发时，两平台构建与测试都成功后，依次发布两个平台包与主包，使用 npm OIDC，无 `NPM_TOKEN`。
+- Release 触发时，两平台构建与测试都成功后，把两个平台包与主包提交到 npm stage 队列，使用
+  npm OIDC，无 `NPM_TOKEN`；不会自动公开。
+- 维护者在 npmjs.com 或 CLI 用 2FA 逐包 approve；先批准两个平台包，再批准主包。npm 的
+  trusted publisher 必须允许 `npm stage publish`，并建议禁止 direct publish。
+- staged 但未批准的重跑无法在 CI 内检测：OIDC 短期 token 不能运行 `npm stage list`。重跑前用
+  `npm stage list`/npmjs 的 Staged 页面确认；需要重试时先 `npm stage reject`。
 - 云端测试先运行 `npm run ci:install` 安装 `.tooling/ci` 的上游契约依赖，再运行
-  `npm run ci:test`：Rust 测试、前端测试与 typecheck、JS 协议/上游/健壮性测试；
-  **不启动真实桌面侧车**。桌面集成与 UI 实机验收在本地完成。
+  `npm run ci:test`：先构建 `frontend/dist` 与 `lib/`，再跑 Rust 测试、前端测试与 typecheck、
+  JS 协议/上游/健壮性测试；**不启动真实桌面侧车**。桌面集成与 UI 实机验收在本地完成。
 
 ## 10. 平台支持与已知限制
 
