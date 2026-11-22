@@ -13,7 +13,7 @@
 
 | Version | Date | Theme |
 |---|---|---|
-| 0.1.11 | YYYY-MM-DD | Shortcut recorder and bare-key policy |
+| 0.1.11 | 2026-11-22 | Structured panel copy, long-content transport, and shortcut fixes |
 | 0.1.10 | 2026-11-06 | Event-driven session list, archived-conversation alignment, and 30-second reconcile |
 | 0.1.9 | 2026-10-22 | Diagnostics readability, tray window-position reset |
 | 0.1.8 | 2026-10-19 | Host version range, window drag-area guard, development script cleanup |
@@ -29,7 +29,24 @@
 
 > Versions before 0.1.3 were not published to npm and had no GitHub Release; they are local/offline build records.
 
-## 0.1.11 (YYYY-MM-DD)
+## 0.1.11 (2026-11-22)
+
+### Panel copy and language
+- Panel status, errors, approval/question detail, permission names, and shortcut reasons are structured
+  reasons rendered by the frontend dictionary; the English panel no longer shows Chinese sentences
+  assembled by the sidecar or host. Upstream conversation content, the Harness settings page, and the
+  native tray keep their own language.
+
+### Long content and transport
+- Removed the 32 KiB per-record/per-entry body truncation; message text is no longer rewritten or given
+  an inline "truncated" note.
+- History pages are requested by message count (500 messages, at least 50 and two turns), never trimmed
+  by a byte budget.
+- The frame ceiling is now 4 MiB. Larger logical messages travel through `quorfloat/fragment` in both
+  directions (2 MiB raw slices, Base64) with a 64 MiB logical limit; exceeding it is an explicit error,
+  not a truncation.
+- Tool-call arguments over 20k characters are folded in the display only, with a "Show all" control;
+  the snapshot keeps the full value.
 
 ### Shortcut recorder
 - Tightened the bare-key rule: without a modifier, only function keys (F1–F24) are accepted. Space, Enter, Tab, Backspace, arrow keys, and the like were previously written to preferences and registered as global hotkeys; the frontend and the sidecar now both refuse them. Shift still counts as a modifier.
