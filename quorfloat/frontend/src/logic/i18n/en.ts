@@ -93,6 +93,9 @@ export const en = {
   'permission.menuLabel': 'Permission selection',
   'permission.heading': 'Session permission',
   'permission.catalogPending': 'The permission catalog has not arrived yet.',
+  'permission.readOnly': 'Read Only',
+  'permission.workspaceWrite': 'Workspace Write',
+  'permission.fullAccess': 'Full access',
 
   // Composer.
   'composer.inputLabel': 'Ask a question',
@@ -105,7 +108,34 @@ export const en = {
   'status.send': 'Send',
   'status.newline': 'Newline',
   'status.close': 'Close',
+  // Structured panel status and errors.
+  'delivery.sending': 'Submitted; waiting for Harness confirmation…',
+  'delivery.empty': 'Nothing to send: the message is empty.',
+  'delivery.workspacesLoading': 'The workspace list is still loading; try again in a moment.',
+  'delivery.creating': 'A conversation is being created; try again in a moment.',
+  'delivery.noWorkspace': 'Choose a workspace before sending.',
+  'delivery.writeFailed': 'Could not send the message: {detail}',
+  'delivery.createFailed': 'Could not create the conversation: {detail}',
+  'delivery.promptKeyReused': 'This message was already sent in this conversation; submit it again to retry.',
+  'delivery.hostFailed': 'Harness refused the message: {detail}',
+  'cancel.sending': 'Cancelling…',
+  'cancel.noSession': 'No conversation is attached.',
+  'cancel.writeFailed': 'Could not send the stop request: {detail}',
+  'cancel.hostFailed': 'Harness refused the stop request: {detail}',
+  'setting.optionsFailed': 'Could not read the available options: {detail}',
+  'setting.noSession': 'No conversation is attached.',
+  'setting.modelFailed': 'Could not switch the model: {detail}',
+  'setting.permissionFailed': 'Could not switch the permission: {detail}',
+  'hotkey.unreadable': 'Could not read this shortcut: {chord}',
+  'hotkey.unavailable': 'This shortcut is already taken or unsupported: {detail}',
+  'hotkey.unsupported': 'This system does not support global shortcuts: {detail}',
+  'hotkey.restored': 'The new shortcut could not be used: {detail} (still using {previous})',
+  'interaction.refused': 'The request was refused: {detail}',
 
+
+  'working.truncated': '… ({total} characters total)',
+  'working.showFull': 'Show all',
+  'working.showLess': 'Show less',
   // Footer statistics. The rounds group is labels rather than "3 turns" so a count of one
   // does not read as a grammar mistake; the dictionary has no plural form.
   'stats.label': 'Session statistics',
@@ -176,7 +206,6 @@ export const en = {
 
   // Shortcut recorder.
   'hotkey.recording': 'Press the key combination…',
-  'hotkey.unreadable': 'Cannot read this shortcut: {chord}',
   'hotkey.bareKey': 'A bare key would be captured from the whole desktop; add a modifier (Ctrl / Alt / Cmd / Shift)',
 
   // Relative times.

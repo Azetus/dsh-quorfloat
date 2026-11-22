@@ -19,6 +19,9 @@ import { createInterface } from 'node:readline'
 import {
   ErrorCode,
   FrameDecoder,
+  FRAGMENT_METHOD,
+  MAX_FRAME_BYTES,
+  MAX_LOGICAL_MESSAGE_BYTES,
   encodeFrame,
   failure,
   request as buildRequest,
@@ -33,7 +36,8 @@ import {
   type RpcResponse,
   type RequestId,
 } from '../protocol.js'
-import { ChannelError, rpcCodeFor, type ChannelErrorCode } from './errors.js'
+import { ChannelError, asChannelError, rpcCodeFor, type ChannelErrorCode } from './errors.js'
+import { FragmentAssembler, fragmentMessage } from './fragments.js'
 
 /** Lifecycle of one channel: created → started → closing → closed. */
 export type ChannelState = 'created' | 'started' | 'closing' | 'closed'
@@ -62,16 +66,19 @@ interface PendingRequest {
   readonly timer: NodeJS.Timeout
 }
 
-const DEFAULT_MAX_WRITE_BUFFER_BYTES = 4 * 1024 * 1024
+const DEFAULT_MAX_WRITE_BUFFER_BYTES = 16 * 1024 * 1024
 
 export class QuorfloatChannel {
   readonly #child: ChildProcessWithoutNullStreams
   readonly #options: ChannelOptions
   readonly #decoder = new FrameDecoder()
+  readonly #fragments: FragmentAssembler
   readonly #pending = new Map<RequestId, PendingRequest>()
   readonly #handlers = new Map<string, RequestHandler>()
   readonly #writesClosed = new AbortController()
   #nextId = 1
+  #nextFragment = 1
+  #writeChain: Promise<void> = Promise.resolve()
   #state: ChannelState = 'created'
   #closeReason: ChannelError | undefined
   #lastFrameAt = 0
@@ -87,6 +94,10 @@ export class QuorfloatChannel {
   constructor(child: ChildProcessWithoutNullStreams, options: ChannelOptions) {
     this.#child = child
     this.#options = options
+    this.#fragments = new FragmentAssembler(rejection => {
+      this.#rejectedFrames += 1
+      this.#options.onRejectedFrame?.(rejection)
+    })
     for (const [method, handler] of Object.entries(DEFAULT_HANDLERS)) {
       this.#handlers.set(method, handler)
     }
@@ -328,11 +339,64 @@ export class QuorfloatChannel {
     timeoutMs = this.#options.requestTimeoutMs,
     signal?: AbortSignal,
   ): Promise<void> {
+    // Fragments of one logical message must stay contiguous. Serializing the whole
+    // write path is cheap here (local pipe, one peer) and keeps the assembler simple.
+    const previous = this.#writeChain
+    let release!: () => void
+    this.#writeChain = new Promise<void>(resolve => { release = resolve })
+    await previous
+    try {
+      await this.#writeUnlocked(message, timeoutMs, signal)
+    } finally {
+      release()
+    }
+  }
+
+  /**
+   * Write one logical message, fragmenting it when it exceeds one frame.
+   */
+  async #writeUnlocked(
+    message: RpcMessage,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (this.#state === 'closed' || this.#child.stdin.destroyed) {
+      throw new ChannelError('channel-closed', 'cannot write: channel is closed')
+    }
+    const bytes = Buffer.byteLength(encodeFrame(message))
+    if (bytes > MAX_LOGICAL_MESSAGE_BYTES) {
+      throw new ChannelError('unavailable', `message exceeds ${String(MAX_LOGICAL_MESSAGE_BYTES)} bytes`, {
+        messageBytes: bytes,
+      })
+    }
+    if (bytes <= MAX_FRAME_BYTES) {
+      await this.#writeFrame(message, timeoutMs, signal)
+      return
+    }
+    const id = `f-${String(this.#nextFragment++)}`
+    for (const fragment of fragmentMessage(message, id)) {
+      await this.#writeFrame(fragment, timeoutMs, signal)
+    }
+  }
+
+  /**
+   * Write one already-bounded JSON-RPC frame.
+   */
+  async #writeFrame(
+    message: RpcMessage,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<void> {
     if (this.#state === 'closed' || this.#child.stdin.destroyed) {
       throw new ChannelError('channel-closed', 'cannot write: channel is closed')
     }
     const frame = encodeFrame(message)
     const bytes = Buffer.byteLength(frame)
+    if (bytes > MAX_FRAME_BYTES) {
+      throw new ChannelError('unavailable', `frame exceeds ${String(MAX_FRAME_BYTES)} bytes`, {
+        frameBytes: bytes,
+      })
+    }
     if (this.#child.stdin.writableLength + bytes > (this.#options.maxWriteBufferBytes ?? DEFAULT_MAX_WRITE_BUFFER_BYTES)) {
       throw new ChannelError('unavailable', 'quorfloat is not consuming frames fast enough', {
         queuedBytes: this.#child.stdin.writableLength,
@@ -393,6 +457,18 @@ export class QuorfloatChannel {
    * @param frame - decoded frame from the child's stdout.
    */
   #dispatch(frame: DecodedFrame): void {
+    if (frame.ok && frame.kind === 'notification'
+      && (frame.message as RpcNotification).method === FRAGMENT_METHOD) {
+      const outcome = this.#fragments.accept((frame.message as RpcNotification).params)
+      if (outcome.kind === 'pending') return
+      if (outcome.kind === 'rejected') {
+        this.#rejectedFrames += 1
+        this.#options.onRejectedFrame?.(outcome.rejection)
+        return
+      }
+      this.#dispatch(outcome.frame)
+      return
+    }
     if (!frame.ok) {
       this.#rejectedFrames += 1
       this.#options.onRejectedFrame?.(frame.rejection)
@@ -461,9 +537,7 @@ export class QuorfloatChannel {
       const result = await handler(request.params ?? {}, request.method)
       await this.#safeWrite(success(request.id, result ?? {}))
     } catch (error) {
-      const channelError = error instanceof ChannelError
-        ? error
-        : new ChannelError('unavailable', error instanceof Error ? error.message : String(error))
+      const channelError = asChannelError(error)
       await this.#safeWrite(failure(request.id, rpcCodeFor(channelError.code), channelError.message, channelError.detail))
     }
   }
@@ -506,6 +580,7 @@ export class QuorfloatChannel {
     this.#state = 'closed'
     this.#closeReason = reason
     this.#decoder.reset()
+    this.#fragments.reset()
     for (const [id, pending] of this.#pending) {
       clearTimeout(pending.timer)
       this.#pending.delete(id)

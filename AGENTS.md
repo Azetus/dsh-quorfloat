@@ -146,6 +146,7 @@ unpin <id> (no longer listed)        固定项失效被清除
 layout panel=… window=WxH          高度核算；面板被裁切时看这行
 height capped at N: asked M, …       平台始终没给够高度：改用窗口现有高度并停止重绘
 transcript skipped: N dropped        转录窗口按字节回收时丢弃的条数
+fragment rejected: <reason>        传输分片组装失败（缺片/乱序/超时/超限）
 snapshot parts: N (M bytes max)      分块快照装配完成
 snapshot part missing; requesting resend  缺片，已请求重发
 snapshot dropped: <reason>           分块快照被丢弃（超时/被新 begin 取代/打开过多）
@@ -253,7 +254,8 @@ transcript skipped: … internal / N unrecognised (kind, …)  被藏起来的�
 ### 6.4 协议与传输
 
 - 协议表、限额与形状以 `ARCHITECTURE.md` §4 为准；改协议时两边镜像一起改，并更新方法表测试。
-- 大负载一律分片，并按**字节**度量：历史页 512 KiB、分片约 256 KiB、单条记录 32 KiB；不要用字符数估算。
+- 大负载一律分片，并按**字节**度量：单帧 4 MiB、传输片段原始 2 MiB、逻辑消息上限 64 MiB、
+  快照/历史片约 256 KiB；不要用字符数估算。单条消息正文不截断。
 - 分片与事件共用通道时发送端逐帧串行化，否则事件会越过分片被判过期。
 - 缺片有界重发；装配超时、被取代、打开过多都要写 marker，不能静默空白。
 - 幂等键必须每次尝试唯一且跨进程唯一；宿主拒绝已花掉的键，侧车把原因显示给用户。

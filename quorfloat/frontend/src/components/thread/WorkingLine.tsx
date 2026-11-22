@@ -2,6 +2,7 @@
 // a tool result.
 
 import { useT } from '../../hooks/useI18n'
+import { ToolArguments } from './ToolArguments'
 import type { Turn } from '../../logic/turns'
 
 /** Props for {@link WorkingLine}. */
@@ -31,7 +32,7 @@ export function WorkingLine({ line }: WorkingLineProps) {
       return (
         <div className="q-working-line q-call">
           <span className="q-tool-name">{t('working.call', { name: line.name ?? t('working.tool') })}</span>
-          {line.arguments !== null && <span className="q-call-args">{` ${line.arguments}`}</span>}
+          {line.arguments !== null && <ToolArguments text={line.arguments} />}
         </div>
       )
     case 'tool':

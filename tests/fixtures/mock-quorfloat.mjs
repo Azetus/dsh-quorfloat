@@ -323,7 +323,7 @@ function handleNotification(message) {
     case 'session/snapshot/part':
     case 'session/snapshot/end': {
       // The opening snapshot, in either form: the legacy single frame, or the sequence
-      // that replaced it because one frame cannot carry a conversation past the 1 MiB
+      // that replaced it because one frame cannot carry a conversation past the frame
       // cap. Reduced to the fields the real sidecar's assembly reads, so the summary
       // stays small however large the parts are.
       const params = message.params ?? {}

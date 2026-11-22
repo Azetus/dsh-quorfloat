@@ -160,7 +160,9 @@ macOS 菜单栏 / Windows 通知区提供：显示/隐藏、重置窗口位置�
 - JSON-RPC 2.0，UTF-8，**每行一个 JSON 值**（NDJSON）；字符串内的换行由 JSON 转义。
 - 子进程 **stdout 只承载协议帧**；日志一律走 stderr。宿主会吞掉 stderr，因此事后可查的是 marker。
 - 读取按字节流处理：一帧可分多次到达，多帧可合并在一个 chunk。
-- 单帧上限 **1 MiB**；超限帧被丢弃并计数，不拖垮连接。
+- 单帧上限 **4 MiB**；超限帧被丢弃并计数，不拖垮连接。
+- 超过 4 MiB 的逻辑 JSON-RPC 消息在传输层切成 `quorfloat/fragment` 片段（每片原始 2 MiB，
+  Base64 编码），接收端重组后再分派；单条逻辑消息上限 **64 MiB**。分片不改变 record 形状、seq 或 cursor。
 - 协议版本 `quorfloat/1`，与产品版本、Harness 的 host protocol 版本相互独立。
 
 ### 4.2 握手与能力
@@ -218,6 +220,7 @@ macOS 菜单栏 / Windows 通知区提供：显示/隐藏、重置窗口位置�
 | `host/heartbeat` | 宿主活性信号；侧车不回复 |
 | `window/visibility` | 显示/隐藏命令；接受 `{visible}` 或 `show`/`hide`/`toggle` |
 | `session/snapshot` | 单帧会话快照 |
+| `quorfloat/fragment` | 大消息的传输分片（双向）；重组后按原方法分派 |
 | `session/snapshot/begin` / `part` / `end` | 大快照的运输分块 |
 | `session/event` | 持久事件（按 seq 恢复/去重） |
 | `session/stream` | 临时 assistant 流 |
@@ -275,7 +278,7 @@ macOS 菜单栏 / Windows 通知区提供：显示/隐藏、重置窗口位置�
 - 消息是 Anthropic 风格内容块：`text` / `reasoning` / `tool-call`；
 - `user/message` 的 content **不套** `message`，其他记录类型套；按统一形状读会丢掉每条用户消息；
 - `tool-call` 的 `arguments` 是 JSON **字符串**，不是对象；
-- 每条记录文本有 32 KiB 上限，截断会写在文本里；
+- 转录层完整保留收到的记录文本；不再有 per-record 32 KiB 截断。超大消息由传输层分片承载；
 - 用户消息按 `source.kind` 判别：`user` 才是用户说的，`runtime-context` 是 Harness 注入；
   `system/message` 是系统提示词；没有 `source` 的消息按用户消息处理；
 - 被审批拦下的工具调用表现为普通失败，不能读作“用户拒绝”；
@@ -284,11 +287,11 @@ macOS 菜单栏 / Windows 通知区提供：显示/隐藏、重置窗口位置�
 
 ### 4.7 历史分页
 
-- 初始快照与后续页都按**整轮**对齐：`maxMessages:200`、`turnWindow:{minMessages:50,minTurns:2}`。
+- 初始快照与后续页都按**整轮**对齐：`maxMessages:500`、`turnWindow:{minMessages:50,minTurns:2}`。
 - Harness 达到消息上限时仍可能切在轮中；adapter 继续向前读，补齐到同一轮的 `turn/start`，
   不向前端暴露半轮。
-- 整页超过 **512 KiB** 时拆成约 256 KiB 的运输片，通过 `session/history/begin|part|end` 发送；
-  侧车收齐整页后一次前插。
+- 页面按消息条数请求，不按字节裁剪；超过运输片大小时用约 256 KiB 的
+  `session/history/begin|part|end` 分片，侧车收齐整页后一次前插。
 - 响应形状：`{records,hasMore,cursor}`；分块时先发通知，再答
   `{records:[],hasMore,cursor,chunked:true,generation}`。
 - 前端只在前插后按**行锚点**补偿滚动位置：取目标行的真实起点差，不用总高度差；用户主动滚动
@@ -320,16 +323,16 @@ macOS 菜单栏 / Windows 通知区提供：显示/隐藏、重置窗口位置�
 
 | 项 | 限额 |
 |---|---|
-| 单帧 | 1 MiB |
-| 历史页运输预算 | 512 KiB |
+| 单帧 | 4 MiB |
+| 单条逻辑消息（分片重组后） | 64 MiB |
+| 分片原始负载 | 2 MiB/片 |
 | 快照/历史分片 | 约 256 KiB |
-| 单条记录文本 | 32 KiB |
 | 转录窗口 | 4 MiB 文本（按整轮回收） |
 | 单图 | min(Harness 上限, 8 MiB) |
 | 图片分块 | 256 KiB 原始字节 |
 | 图片并发 | 前端 2 个读取、侧车 4 个在途 |
 | 快照装配 | 10 秒、最多 4 个、重发 2 次 |
-| 单页消息 | 200 条 / 最少 50 条、2 轮 |
+| 单页消息 | 500 条 / 最少 50 条、2 轮 |
 
 ## 5. 会话、工作区与标题
 
@@ -518,6 +521,10 @@ patch 整体替换 `config`，未知字段报错而不是静默取默认值。
 - 用户可见的“侧车”一律说“悬浮窗”；`侧车`/sidecar 只留在代码、标识符、注释、locale 命名空间与日志。
 - 面板与 Harness 客户端半是两套字典、两个构建管线，但“运行中 / 已停止 / 失败 / 悬浮窗”等状态词
   必须同口径，改一处要同时改另一处。
+- 审批/追问的 `displayReason` 按**面板语言**选择；三个内建权限预设的名称也由前端字典渲染，不跟随
+  Harness 界面的语言，配置的自定义预设仍显示宿主给的原名。
+- 侧车/宿主发给面板的状态与错误统一为 `{ code, params }`；前端用 `reasonText` 查字典。未知 code 直接
+  显示 code，不保留旧字符串兼容，也不在侧车/宿主拼用户句子。
 
 ### 7.5 开发隔离
 
@@ -775,10 +782,10 @@ Rust target。普通安装用户不需要本地编译。
 | presence 判据是“可见且有焦点” | 跨平台唯一一致判据；5 秒心跳、30 秒过期，避免死页面锁住归属 |
 | 追问答案的 `selected` 是选项 label，按选项展示顺序 | 一卡一次提交；`custom` 只在有非空自由文本时出现 |
 | `session/prompt` 的幂等键每次尝试唯一且跨进程唯一 | Harness 用 `requestId` 比对历史；重复键会 accepted 而不受理 |
-| 大负载按字节分片，分片与事件按序发送 | 1 MiB 帧上限；事件越过前面的分片会被判过期而不渲染 |
+| 大负载按字节分片，分片与事件按序发送 | 4 MiB 帧上限；单条逻辑消息最多 64 MiB；事件越过前面的分片会被判过期而不渲染 |
 | 会话列表由 Harness 的 `api-session/*` 推送维护，慢对账兜底；removal 只重查不删行 | 官方浏览器客户端同样一次全量 + 事件；removal 是活注册表变化，不是持久列表删除 |
 | 已归档会话在面板隐藏；归档的固定会话静默清 pin；不提供显示归档视图 | 与 Harness 默认行为对齐；归档/恢复由 Harness 本体负责，面板不为它补文案 |
-| 转录窗口按字节、按整轮回收 | 4 MiB 文本，单条 32 KiB；按条数会让构建输出与普通文本占用差三个数量级 |
+| 转录窗口按字节、按整轮回收 | 4 MiB 文本；不再裁单条消息，超出窗口时整轮回收 |
 | 版本只有一个真值；发布产物只由发布脚本产出 | 产品版本在 `package.json` + `Cargo.toml`；跨平台组装会伪造未构建的产物 |
 | 测试只守协议/接口、上游绊线与少量不变量 | 产品决定会变；UI 外观交给实机验收，行为/契约仍可测 |
 | UI 以实现与 `tokens.css` 为准 | 早期设计稿已经偏离实现，继续以旧稿为准会误导维护者 |

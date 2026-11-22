@@ -226,7 +226,7 @@ test('the page request the adapter sends passes Harness validation', { skip }, a
     // past the cursor, which is what an invented maximum bound would be.
     throughSeq: 1,
     beforeSeq: 42,
-    maxMessages: 200,
+    maxMessages: 500,
     turnWindow: { minMessages: 50, minTurns: 2 },
   })
   const checked = checkParameter('session/page', call.request)
@@ -243,7 +243,7 @@ test('the follow request the adapter sends passes Harness validation', { skip },
   assert.deepEqual(call.request, {
     address: { kind: 'session', sessionId: 'session-1' },
     assistantStream: true,
-    maxMessages: 200,
+    maxMessages: 500,
     turnWindow: { minMessages: 50, minTurns: 2 },
   })
   const checked = checkParameter('session/follow', call.request)

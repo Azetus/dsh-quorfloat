@@ -1,7 +1,7 @@
 //! Rebuilding one snapshot from the parts it arrives in.
 //!
 //! `session/snapshot` was one frame, and one frame has a ceiling: the host's NDJSON
-//! cap is 1 MiB on both sides, and a conversation whose records add up to more than
+//! cap is 4 MiB on both sides, and a conversation whose records add up to more than
 //! that was dropped by the reader before any of it could be folded. The transcript
 //! then never became seeded, every later `session/event` was counted stale, and the
 //! panel stayed blank for the rest of the run with nothing on the record to say why.
@@ -34,7 +34,7 @@ pub const ASSEMBLY_TIMEOUT_MS: i64 = 10_000;
 
 /// The most parts one snapshot may declare.
 ///
-/// With a 256 KiB budget this is two orders of magnitude more than a 50-message
+/// With a 256 KiB budget this is far more than a 50-message
 /// history needs; it exists so a peer that names an absurd count cannot make this
 /// process size a vector from it.
 pub const MAX_PARTS: usize = 4_096;

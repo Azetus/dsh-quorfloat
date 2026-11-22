@@ -60,8 +60,22 @@ export function rpcCodeFor(code: ChannelErrorCode): number {
   }
 }
 
-/** Extract a {@link ChannelError} from an unknown rejection value. */
+/** Extract a {@link ChannelError} from an unknown rejection value.
+ *
+ * A host error already carries a project-level code and diagnostics. Preserve both rather
+ * than flattening it to `channel-closed`: the sidecar needs the code to choose a structured
+ * reason, and the detail is what makes the refusal explainable.
+ */
 export function asChannelError(error: unknown): ChannelError {
   if (error instanceof ChannelError) return error
+  if (error instanceof Error && error.name === 'HarnessError') {
+    const candidate = error as Error & { code?: unknown; detail?: unknown }
+    if (typeof candidate.code === 'string') {
+      const detail = typeof candidate.detail === 'object' && candidate.detail !== null
+        ? candidate.detail as Record<string, unknown>
+        : {}
+      return new ChannelError(candidate.code as ChannelError['code'], error.message, detail)
+    }
+  }
   return new ChannelError('channel-closed', error instanceof Error ? error.message : String(error))
 }

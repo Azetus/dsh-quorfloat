@@ -830,6 +830,7 @@ dependencies = [
 name = "dsh-quorfloat"
 version = "0.1.10"
 dependencies = [
+ "base64 0.22.1",
  "global-hotkey",
  "serde",
  "serde_json",

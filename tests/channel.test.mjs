@@ -16,7 +16,18 @@ import { cleanupDir, loadModule, mockPath, scratchDir, sleep, waitFor } from './
 import { join } from 'node:path'
 
 const { QuorfloatChannel } = await loadModule('bridge/channel.js')
+const { asChannelError } = await loadModule('bridge/errors.js')
 const { ErrorCode } = await loadModule('protocol.js')
+
+test('a host error keeps its code and detail when it crosses the channel', () => {
+  const error = new Error('prompt-key-reused')
+  error.name = 'HarnessError'
+  error.code = 'stale'
+  error.detail = { reason: 'promptKeyReused', requestId: 'req-1' }
+  const converted = asChannelError(error)
+  assert.equal(converted.code, 'stale')
+  assert.deepEqual(converted.detail, { reason: 'promptKeyReused', requestId: 'req-1' })
+})
 
 /** Spawn the mock and wrap it in a channel. */
 async function openChannel({ mode = 'normal', env = {}, options = {} } = {}) {

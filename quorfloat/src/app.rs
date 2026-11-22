@@ -20,6 +20,7 @@ pub mod geometry;
 pub mod persist;
 pub mod pinned;
 pub mod preferences;
+pub mod reason;
 pub mod session;
 pub mod sink;
 pub mod window_settings;

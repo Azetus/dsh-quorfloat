@@ -2,6 +2,7 @@
 
 import { api } from '../../api'
 import { useT } from '../../hooks/useI18n'
+import { reasonText } from '../../logic/reasons'
 import type { Interaction } from '../../logic/state'
 import { Icon } from '../common/Icon'
 
@@ -36,7 +37,11 @@ export function ApprovalCard({ interaction }: ApprovalCardProps) {
       <div className={interaction.state === 'refused' ? 'q-card-state q-refused' : 'q-card-state'}>
         {interaction.state === 'submitting' && t('common.submitting')}
         {interaction.state === 'applied' && (interaction.verdict === 'allowed-once' ? t('approval.allowedOnce') : t('approval.rejected'))}
-        {interaction.state === 'refused' && (interaction.refusalReason ?? t('common.requestExpired'))}
+        {interaction.state === 'refused' && (
+          interaction.refusalReason === null
+            ? t('common.requestExpired')
+            : t(reasonText(interaction.refusalReason))
+        )}
       </div>
       <div className="q-card-actions">
         {interaction.state === 'pending' ? (

@@ -17,7 +17,19 @@
 export const PROTOCOL_VERSION = 'quorfloat/1'
 
 /** Frame size ceiling; a longer line is a protocol violation, not a big message. */
-export const MAX_FRAME_BYTES = 1024 * 1024
+export const MAX_FRAME_BYTES = 4 * 1024 * 1024
+
+/** Largest logical JSON-RPC message accepted after fragment reassembly. */
+export const MAX_LOGICAL_MESSAGE_BYTES = 64 * 1024 * 1024
+
+/** Transport notification that carries one slice of a larger JSON-RPC message. */
+export const FRAGMENT_METHOD = 'quorfloat/fragment'
+
+/** Raw bytes per fragment before Base64; chosen so the encoded frame stays below the ceiling. */
+export const FRAGMENT_RAW_BYTES = 2 * 1024 * 1024
+
+/** How long an incomplete fragment sequence may occupy the channel. */
+export const FRAGMENT_TIMEOUT_MS = 30_000
 
 /** JSON-RPC 2.0 reserved codes, plus this project's own range. */
 export const ErrorCode = {

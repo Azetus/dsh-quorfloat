@@ -19,6 +19,8 @@
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::app::reason::Reason;
+
 use crate::app::session::follow::{Follow, Outgoing, PanelLifecycle, REQUEST_TIMEOUT_MS};
 use crate::app::session::interaction::{
     ApprovalVerdict, Handoff, Interaction, InteractionKind, InteractionState, MAX_INTERACTIONS,
@@ -57,6 +59,24 @@ enum Sending {
     Cancel,
 }
 
+/// Turn a host refusal into the panel's reason.
+///
+/// The host may name a specific failure in `error.data`; otherwise its message is the
+/// technical detail the generic dictionary entry interpolates.
+///
+/// @param failure_code - the generic reason for this kind of request.
+/// @param error - the host's RPC error.
+/// @returns the structured reason.
+fn host_failure_reason(failure_code: &'static str, error: &RpcError) -> Reason {
+    let host_reason = error.data.as_ref()
+        .and_then(|data| data.get("reason"))
+        .and_then(Value::as_str);
+    match host_reason {
+        Some("promptKeyReused") => Reason::new("delivery.promptKeyReused"),
+        _ => Reason::new(failure_code).with("detail", error.message.clone()),
+    }
+}
+
 /// What became of an outbound request.
 ///
 /// `Accepted` is the host's own word: it means the request was taken, not that the turn
@@ -70,10 +90,11 @@ pub enum Delivery {
     Sending,
     /// The host took it.
     Accepted,
-    /// The host refused it, or it could not be written. The reason is shown as it came.
+    /// The host refused it, or it could not be written. The reason is structured; the
+    /// frontend renders the sentence from its dictionary.
     Failed {
-        /// Why, in the host's words when it came from the host.
-        reason: String,
+        /// Why, as a code and the values its sentence needs.
+        reason: Reason,
     },
 }
 
@@ -84,17 +105,9 @@ impl Delivery {
         matches!(self, Self::Sending)
     }
 
-    /// One line for the composer, or `None` when there is nothing to say.
-    #[must_use]
-    pub fn describe(&self) -> Option<String> {
-        match self {
-            Self::Idle | Self::Accepted => None,
-            Self::Sending => Some("已提交，等待 Harness 确认…".to_owned()),
-            Self::Failed { reason } => Some(format!("未发送：{reason}")),
-        }
-    }
 }
-use crate::ipc::protocol::{CAPABILITIES, MAX_FRAME_BYTES, PROTOCOL_VERSION, error_code};
+use crate::ipc::fragments::{FragmentAssembler, FragmentOutcome};
+use crate::ipc::protocol::{CAPABILITIES, FRAGMENT_METHOD, MAX_FRAME_BYTES, PROTOCOL_VERSION, error_code};
 use crate::ipc::rpc::{self, Inbound, Outcome, RpcError, Router};
 
 pub mod follow;
@@ -247,12 +260,6 @@ impl HotkeyReport {
     }
 }
 
-/// Why a conversation cannot be started: the panel does not know where to put one.
-///
-/// The host's router requires a non-empty `workspaceId`, so this is not a limitation the panel
-/// can work around by asking more cleverly — it is a question only the user can answer.
-pub const CREATE_WITHOUT_WORKSPACE: &str = "先选择一个工作区";
-
 /// What the host sent in `ready` after a successful handshake.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HostConfig {
@@ -272,6 +279,7 @@ pub struct HostConfig {
 pub struct Session {
     identity: Identity,
     router: Router,
+    fragments: FragmentAssembler,
     host: HostConfig,
     /// Window commands the host has sent but the window layer has not applied.
     ///
@@ -331,7 +339,7 @@ pub struct Session {
     /// What the host last said may be chosen, and what is chosen now.
     options: Option<SessionOptions>,
     /// The last failure of a setting change, for the panel to show.
-    setting_failure: Option<String>,
+    setting_failure: Option<Reason>,
     /// The conversation's statistics, as the host last reported them.
     stats: Option<Stats>,
     /// Which conversation those statistics describe. `stats` outlives a detach (nothing else
@@ -485,6 +493,7 @@ impl Session {
         Self {
             identity,
             router: Router,
+            fragments: FragmentAssembler::new(),
             host: HostConfig::default(),
             commands: Vec::new(),
             interactions: Vec::new(),
@@ -589,6 +598,29 @@ impl Session {
     /// @param sink - where answers go.
     /// @returns `Some(exit)` when the session is over.
     pub fn on_frame(&mut self, frame: Inbound, sink: &mut dyn FrameSink) -> Option<SessionExit> {
+        if let Inbound::Notification { method, params } = &frame {
+            if method == FRAGMENT_METHOD {
+                let Some(params) = params else {
+                    sink.log("fragment envelope carried no parameters");
+                    return None;
+                };
+                match self.fragments.accept(params, rpc::now_millis()) {
+                    FragmentOutcome::Pending => return None,
+                    FragmentOutcome::Rejected(reason) => {
+                        sink.log(&format!("fragment rejected: {}", reason.as_str()));
+                        return None;
+                    }
+                    FragmentOutcome::Complete(value) => {
+                        let inbound = rpc::classify(value);
+                        if matches!(&inbound, Inbound::Notification { method, .. } if method == FRAGMENT_METHOD) {
+                            sink.log("fragment envelope nested inside a fragment sequence");
+                            return None;
+                        }
+                        return self.on_frame(inbound, sink);
+                    }
+                }
+            }
+        }
         match frame {
             Inbound::Request { id, method, params } => {
                 let outcome = self.router.handle(&method, params.as_ref());
@@ -1469,8 +1501,8 @@ impl Session {
                 self.follow.abandon(now);
                 if let Some(text) = self.pending_prompt.take() {
                     // The text the user typed is not sent, and they are told why.
-                    self.prompt = Delivery::Failed { reason: CREATE_WITHOUT_WORKSPACE.to_owned() };
-                    sink.log(&format!("{CREATE_WITHOUT_WORKSPACE}: {text:?} was not sent"));
+                    self.prompt = Delivery::Failed { reason: Reason::new("delivery.noWorkspace") };
+                    sink.log(&format!("no workspace selected: {text:?} was not sent"));
                 }
                 return;
             }
@@ -1632,7 +1664,9 @@ impl Session {
         self.setting_requests.insert(id, SettingRequest::Options { session_id: self.follow.session_id().map(str::to_owned) });
         if let Err(error) = sink.send(&rpc::request(id, "session/options", params)) {
             self.setting_requests.remove(&id);
-            self.setting_failure = Some(format!("无法读取可选项：{error}"));
+            self.setting_failure = Some(
+                Reason::new("setting.optionsFailed").with("detail", error.to_string()),
+            );
         }
     }
 
@@ -1654,7 +1688,7 @@ impl Session {
         sink: &mut dyn FrameSink,
     ) {
         let Some(session_id) = self.follow.session_id().map(str::to_owned) else {
-            self.setting_failure = Some("尚未跟随任何会话".to_owned());
+            self.setting_failure = Some(Reason::new("setting.noSession"));
             return;
         };
         let id = self.take_request_id();
@@ -1665,7 +1699,9 @@ impl Session {
         self.setting_requests.insert(id, SettingRequest::SelectModel);
         if let Err(error) = sink.send(&rpc::request(id, "session/select", params)) {
             self.setting_requests.remove(&id);
-            self.setting_failure = Some(format!("无法切换模型：{error}"));
+            self.setting_failure = Some(
+                Reason::new("setting.modelFailed").with("detail", error.to_string()),
+            );
         }
     }
 
@@ -1675,7 +1711,7 @@ impl Session {
     /// @param sink - where the request goes.
     pub fn set_permission(&mut self, value: &str, sink: &mut dyn FrameSink) {
         let Some(session_id) = self.follow.session_id().map(str::to_owned) else {
-            self.setting_failure = Some("尚未跟随任何会话".to_owned());
+            self.setting_failure = Some(Reason::new("setting.noSession"));
             return;
         };
         let id = self.take_request_id();
@@ -1688,7 +1724,9 @@ impl Session {
         );
         if let Err(error) = sink.send(&frame) {
             self.setting_requests.remove(&id);
-            self.setting_failure = Some(format!("无法切换权限：{error}"));
+            self.setting_failure = Some(
+                Reason::new("setting.permissionFailed").with("detail", error.to_string()),
+            );
         }
     }
 
@@ -1703,6 +1741,11 @@ impl Session {
         outcome: Result<Value, RpcError>,
         sink: &mut dyn FrameSink,
     ) {
+        let failure_code = match &request {
+            SettingRequest::Options { .. } => "setting.optionsFailed",
+            SettingRequest::SelectModel => "setting.modelFailed",
+            SettingRequest::SetPermission(_) => "setting.permissionFailed",
+        };
         match outcome {
             Ok(result) => {
                 self.setting_failure = None;
@@ -1742,9 +1785,9 @@ impl Session {
                 // Kept, not logged and dropped: a permission or model that did not change is
                 // invisible otherwise — the panel would go on showing the old value as if the click
                 // had never happened.
-                let why = format!("[{}] {}", error.code, error.message);
-                self.setting_failure = Some(why.clone());
-                sink.mark(&format!("setting refused: {why}"));
+                let reason = Reason::new(failure_code).with("detail", error.message.clone());
+                sink.mark(&format!("setting refused: [{}] {}", error.code, error.message));
+                self.setting_failure = Some(reason);
             }
         }
     }
@@ -1774,8 +1817,8 @@ impl Session {
 
     /// The last failure of a setting change, for the panel to show.
     #[must_use]
-    pub fn setting_failure(&self) -> Option<&str> {
-        self.setting_failure.as_deref()
+    pub fn setting_failure(&self) -> Option<&Reason> {
+        self.setting_failure.as_ref()
     }
 
     /// The statistics of the conversation on screen, if there is one and the host reported any.
@@ -2030,7 +2073,7 @@ impl Session {
     pub fn send_prompt(&mut self, text: &str, workspace_id: Option<&str>, sink: &mut dyn FrameSink) -> Delivery {
         let text = text.trim();
         if text.is_empty() {
-            self.prompt = Delivery::Failed { reason: "内容为空".to_owned() };
+            self.prompt = Delivery::Failed { reason: Reason::new("delivery.empty") };
             return self.prompt.clone();
         }
         if self.prompt.is_sending() {
@@ -2050,16 +2093,16 @@ impl Session {
                 // yet needs patience, and a list with nothing in it needs the user.
                 self.prompt = Delivery::Failed {
                     reason: if self.follow.workspaces_asked() {
-                        CREATE_WITHOUT_WORKSPACE.to_owned()
+                        Reason::new("delivery.noWorkspace")
                     } else {
-                        "正在获取工作区，请稍候再发送".to_owned()
+                        Reason::new("delivery.workspacesLoading")
                     },
                 };
                 return self.prompt.clone();
             };
             let now = rpc::now_millis();
             let Some(outgoing) = self.follow.create(Some(workspace_id), now) else {
-                self.prompt = Delivery::Failed { reason: "正在创建会话，请稍候再发送".to_owned() };
+                self.prompt = Delivery::Failed { reason: Reason::new("delivery.creating") };
                 return self.prompt.clone();
             };
             self.pending_prompt = Some(text.to_owned());
@@ -2090,7 +2133,9 @@ impl Session {
         sink.mark(&format!("prompt {key} sending {} bytes", text.len()));
         if let Err(error) = sink.send(&frame) {
             self.sends_in_flight.remove(&request_id);
-            self.prompt = Delivery::Failed { reason: format!("写入失败：{error}") };
+            self.prompt = Delivery::Failed {
+                reason: Reason::new("delivery.writeFailed").with("detail", error.to_string()),
+            };
             sink.log(&format!("could not send a prompt: {error}"));
         }
         self.prompt.clone()
@@ -2153,8 +2198,8 @@ impl Session {
             // whole job of `Delivery`: an attempt that failed silently is indistinguishable
             // from a panel that ignored the key.
             self.pending_prompt = None;
-            self.prompt = Delivery::Failed { reason: format!("无法创建会话：{reason}") };
-            sink.log(&format!("a prompt could not be sent: {reason}"));
+            sink.log(&format!("a prompt could not be sent: {}", reason.code()));
+            self.prompt = Delivery::Failed { reason };
             return;
         }
         let Some(session_id) = self.follow.session_id().map(str::to_owned) else {
@@ -2214,7 +2259,7 @@ impl Session {
             return false;
         }
         let Some(session_id) = self.follow.session_id().map(str::to_owned) else {
-            self.cancel = Delivery::Failed { reason: "尚未跟随任何会话".to_owned() };
+            self.cancel = Delivery::Failed { reason: Reason::new("cancel.noSession") };
             return false;
         };
         let request_id = self.take_request_id();
@@ -2224,7 +2269,9 @@ impl Session {
         sink.mark("cancel requested");
         if let Err(error) = sink.send(&frame) {
             self.sends_in_flight.remove(&request_id);
-            self.cancel = Delivery::Failed { reason: format!("写入失败：{error}") };
+            self.cancel = Delivery::Failed {
+                reason: Reason::new("cancel.writeFailed").with("detail", error.to_string()),
+            };
             sink.log(&format!("could not ask the host to stop: {error}"));
             return false;
         }
@@ -2246,9 +2293,13 @@ impl Session {
     /// Read the host's verdict on an outbound request.
     fn resolve_send(&mut self, id: i64, outcome: Result<Value, RpcError>, sink: &mut dyn FrameSink) {
         let Some(kind) = self.sends_in_flight.remove(&id) else { return };
+        let failure_code = match kind {
+            Sending::Prompt => "delivery.hostFailed",
+            Sending::Cancel => "cancel.hostFailed",
+        };
         let delivery = match outcome {
             Ok(_) => Delivery::Accepted,
-            Err(error) => Delivery::Failed { reason: error.message.clone() },
+            Err(error) => Delivery::Failed { reason: host_failure_reason(failure_code, &error) },
         };
         match kind {
             Sending::Prompt => {
@@ -2258,7 +2309,7 @@ impl Session {
                 // is something the user can act on and "failed" is not.
                 let line = match &delivery {
                     Delivery::Accepted => "prompt accepted".to_owned(),
-                    Delivery::Failed { reason } => format!("prompt refused: {reason}"),
+                    Delivery::Failed { reason } => format!("prompt refused: {}", reason.code()),
                     Delivery::Idle | Delivery::Sending => "prompt state unclear".to_owned(),
                 };
                 sink.mark(&line);
@@ -2267,7 +2318,7 @@ impl Session {
             Sending::Cancel => {
                 let line = match &delivery {
                     Delivery::Accepted => "cancel accepted".to_owned(),
-                    Delivery::Failed { reason } => format!("cancel refused: {reason}"),
+                    Delivery::Failed { reason } => format!("cancel refused: {}", reason.code()),
                     Delivery::Idle | Delivery::Sending => "cancel state unclear".to_owned(),
                 };
                 sink.mark(&line);
@@ -2407,13 +2458,17 @@ impl Session {
                     .and_then(Value::as_str)
                     .unwrap_or("the host did not say why")
                     .to_owned();
-                self.interactions[index].state = InteractionState::Refused { reason: reason.clone() };
                 sink.mark(&format!("interaction {interaction_id} refused: {reason}"));
+                self.interactions[index].state = InteractionState::Refused {
+                    reason: Reason::new("interaction.refused").with("detail", reason),
+                };
             }
             Err(error) => {
-                let reason = format!("[{}] {}", error.code, error.message);
-                self.interactions[index].state = InteractionState::Refused { reason: reason.clone() };
-                sink.mark(&format!("interaction {interaction_id} refused: {reason}"));
+                let detail = format!("[{}] {}", error.code, error.message);
+                sink.mark(&format!("interaction {interaction_id} refused: {detail}"));
+                self.interactions[index].state = InteractionState::Refused {
+                    reason: Reason::new("interaction.refused").with("detail", detail),
+                };
             }
         }
     }
@@ -2562,6 +2617,79 @@ mod tests {
     use super::*;
     use crate::app::session::follow::{RECONCILE_INTERVAL_MS, RETRY_INTERVAL_MS};
     use crate::app::session::test_support::*;
+
+    #[test]
+    fn a_host_prompt_key_refusal_maps_to_its_own_code() {
+        let error = RpcError {
+            code: -32003,
+            message: "prompt-key-reused".to_owned(),
+            data: Some(json!({ "reason": "promptKeyReused" })),
+        };
+        let reason = host_failure_reason("delivery.hostFailed", &error);
+        assert_eq!(reason.code(), "delivery.promptKeyReused");
+        assert_eq!(reason.param("detail"), None);
+    }
+
+    #[test]
+    fn a_fragmented_request_is_reassembled_before_dispatch() {
+        let message = json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "ping",
+            "params": { "pad": "x".repeat(2 * 1024 * 1024 + 32) },
+        });
+        let fragments = crate::ipc::fragments::fragment_messages(&message, "f-test")
+            .expect("the message fits the logical limit");
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        for fragment in fragments {
+            session.on_frame(
+                Inbound::Notification {
+                    method: FRAGMENT_METHOD.to_owned(),
+                    params: fragment.get("params").cloned(),
+                },
+                &mut sink,
+            );
+        }
+        assert!(
+            sink.frames.iter().any(|frame| frame["id"] == 5),
+            "the reassembled ping was answered: {:?}",
+            sink.frames,
+        );
+    }
+
+    #[test]
+    fn an_empty_prompt_reports_a_structured_reason() {
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        match session.send_prompt("   ", None, &mut sink) {
+            Delivery::Failed { reason } => {
+                assert_eq!(reason.code(), "delivery.empty");
+                assert_eq!(reason.param("detail"), None);
+            }
+            other => panic!("an empty prompt must fail as a reason, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setting_a_model_without_a_conversation_reports_a_structured_reason() {
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        session.select_model("provider", "model", None, &mut sink);
+        let reason = session.setting_failure().expect("the failure is kept");
+        assert_eq!(reason.code(), "setting.noSession");
+    }
+
+    #[test]
+    fn cancelling_without_a_conversation_reports_a_structured_reason() {
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        assert!(!session.cancel_turn(&mut sink));
+        match session.cancel_delivery() {
+            Delivery::Failed { reason } => assert_eq!(reason.code(), "cancel.noSession"),
+            other => panic!("cancelling without a conversation must fail as a reason, got {other:?}"),
+        }
+    }
 
     #[test]
     fn the_first_frame_is_hello_before_anything_else() {
@@ -2726,22 +2854,20 @@ mod tests {
 
     #[test]
     fn an_oversized_frame_names_its_size_and_the_limit() {
-        // The measured bug, in one line: a 1.3 MB snapshot was dropped with the same
-        // wording as garbage JSON and no size, so nothing on the record explained the
-        // blank panel. Size and limit are both named now, and the running count makes
-        // a single refusal in a long session findable.
+        // A frame past the ceiling is dropped, and the record names both the measured
+        // size and the limit. The count makes a repeated refusal findable.
         let mut session = Session::new(identity());
         let mut sink = RecordingSink::default();
         let mut source = ScriptedSource::new(vec![
-            Inbound::Oversized { bytes: 1_310_812 },
-            Inbound::Oversized { bytes: 1_048_577 },
+            Inbound::Oversized { bytes: 5_000_000 },
+            Inbound::Oversized { bytes: 4_194_305 },
             request(5, "ping"),
         ]);
         session.run(&mut source, &mut sink);
         let lines = sink.logs.join("\n");
         assert!(lines.contains("oversized"), "the reason is named: {lines}");
-        assert!(lines.contains("1310812 bytes"), "the measured size is named: {lines}");
-        assert!(lines.contains("1048576-byte limit"), "the limit is named: {lines}");
+        assert!(lines.contains("5000000 bytes"), "the measured size is named: {lines}");
+        assert!(lines.contains("4194304-byte limit"), "the limit is named: {lines}");
         assert!(lines.contains("2 so far"), "the count is observable: {lines}");
         assert!(
             !lines.contains("ignoring a frame that is not a JSON-RPC message"),

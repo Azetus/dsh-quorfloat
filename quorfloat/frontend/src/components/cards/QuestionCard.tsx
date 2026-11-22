@@ -17,6 +17,7 @@ import {
   answerPayload, emptyDrafts, isComplete, setCustom, toggleChoice,
   type QuestionDraft, type QuestionDrafts,
 } from '../../logic/questions'
+import { reasonText } from '../../logic/reasons'
 import type { Interaction, InteractionQuestion } from '../../logic/state'
 import { Icon } from '../common/Icon'
 import { QuestionBlock } from './QuestionBlock'
@@ -66,7 +67,10 @@ export function QuestionCard({ interaction, onGrow }: QuestionCardProps) {
     if (interaction.state === 'submitting') return { text: t('common.submitting'), refused: false }
     if (interaction.state === 'applied') return { text: t('question.submitted'), refused: false }
     if (interaction.state === 'refused') {
-      return { text: interaction.refusalReason ?? t('common.requestExpired'), refused: true }
+      const text = interaction.refusalReason === null
+        ? t('common.requestExpired')
+        : t(reasonText(interaction.refusalReason))
+      return { text, refused: true }
     }
     if (!interaction.actionable) return { text: t('question.notActionable'), refused: false }
     if (!complete) return { text: t('question.answerAll'), refused: false }

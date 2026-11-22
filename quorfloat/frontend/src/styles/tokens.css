@@ -355,6 +355,8 @@ svg, svg[data-phosphor] { width: 16px; height: 16px; flex: none; }
 .q-working-line.q-tool .q-tool-name { color: var(--q-accent); }
 .q-working-line.q-error { color: var(--q-bad); }
 .q-working-line.q-call-args { color: var(--q-muted); font-family: ui-monospace, monospace; }
+.q-preview-note { color: var(--q-muted); margin-left: 6px; }
+.q-preview-toggle { margin-left: 6px; border: 0; background: none; color: var(--q-accent); cursor: pointer; font: inherit; padding: 0; }
 
 /* The answer, rendered from markdown. */
 .q-answer {

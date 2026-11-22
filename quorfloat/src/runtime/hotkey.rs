@@ -14,6 +14,8 @@
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
+use crate::app::reason::Reason;
+
 
 /// The accelerator this process holds, and the grab that keeps it.
 ///
@@ -28,7 +30,7 @@ pub struct Hotkey {
     /// The accelerator actually grabbed, and the manager keeping it alive.
     held: Option<Held>,
     /// Why the last attempt did not become the held one, when it did not.
-    reason: Option<String>,
+    reason: Option<Reason>,
 }
 
 /// A live grab: the accelerator, and the manager that owns the registration.
@@ -206,7 +208,11 @@ impl Hotkey {
                 self.reason = match (restored, why) {
                     // The old shortcut works again, so the failure is about the new one. Saying
                     // "no hotkey" would be a lie: the panel is reachable exactly as before.
-                    (true, Some(why)) => Some(format!("{why}（仍使用 {previous}）")),
+                    (true, Some(why)) => {
+                        let reason = Reason::new("hotkey.restored").with("previous", previous.clone());
+                        let detail = why.param("detail").or_else(|| why.param("chord")).unwrap_or("");
+                        Some(reason.with("detail", detail))
+                    }
                     (true, None) => None,
                     (false, why) => why,
                 };
@@ -222,7 +228,7 @@ impl Hotkey {
     fn claim(&mut self, spec: &str) {
         debug_assert!(self.held.is_none(), "claim without releasing what is held");
         let Some(parsed) = parse_accelerator(spec) else {
-            self.reason = Some(format!("读不懂这个快捷键：{spec}"));
+            self.reason = Some(Reason::new("hotkey.unreadable").with("chord", spec));
             return;
         };
         match GlobalHotKeyManager::new() {
@@ -234,11 +240,15 @@ impl Hotkey {
                     });
                 }
                 Err(error) => {
-                    self.reason = Some(format!("这个快捷键已被占用或不受支持：{error}"));
+                    self.reason = Some(
+                        Reason::new("hotkey.unavailable").with("detail", error.to_string()),
+                    );
                 }
             },
             Err(error) => {
-                self.reason = Some(format!("本系统不支持全局快捷键：{error}"));
+                self.reason = Some(
+                    Reason::new("hotkey.unsupported").with("detail", error.to_string()),
+                );
             }
         }
     }
@@ -275,8 +285,8 @@ impl Hotkey {
 
     /// Why the last attempt did not become the held accelerator, if it did not.
     #[must_use]
-    pub fn reason(&self) -> Option<&str> {
-        self.reason.as_deref()
+    pub fn reason(&self) -> Option<&Reason> {
+        self.reason.as_ref()
     }
 
     /// The accelerator the user asked for: what the settings page shows.
@@ -328,7 +338,7 @@ impl Hotkey {
         Self {
             attempted: Some(spec.to_owned()),
             held: None,
-            reason: Some(reason.to_owned()),
+            reason: Some(Reason::new("hotkey.unavailable").with("detail", reason)),
         }
     }
 }
@@ -494,4 +504,18 @@ fn function_code(number: u8) -> Option<Code> {
         21 => Code::F21, 22 => Code::F22, 23 => Code::F23, 24 => Code::F24,
         _ => return None,
     })
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::Hotkey;
+
+    #[test]
+    fn a_refused_hotkey_reports_a_structured_reason() {
+        let hotkey = Hotkey::unavailable_for_test("Alt+Space", "already taken");
+        let reason = hotkey.reason().expect("the refusal is reported");
+        assert_eq!(reason.code(), "hotkey.unavailable");
+        assert_eq!(reason.param("detail"), Some("already taken"));
+    }
 }

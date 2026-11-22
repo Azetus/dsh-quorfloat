@@ -1,13 +1,15 @@
 // The summon-shortcut field: click it, press the chord, done.
 
 import { useT } from '../../hooks/useI18n'
+import { reasonText } from '../../logic/reasons'
+import type { Reason } from '../../logic/state'
 
 /** Props for {@link HotkeyField}. */
 export interface HotkeyFieldProps {
   /** The accelerator the shell last accepted, or null. */
   readonly requested: string | null
   /** Why the current accelerator is not in force, if it is not. */
-  readonly reason: string | null
+  readonly reason: Reason | null
   /** Whether the field is waiting for a chord. */
   readonly recording: boolean
   /** Begin recording. */
@@ -37,7 +39,7 @@ export function HotkeyField({ requested, reason, recording, onRecord, onCancel }
       // the same in both languages and stays out of the dictionary.
       value={recording ? t('hotkey.recording') : requested ?? '—'}
       aria-label={t('settings.hotkey')}
-      title={recording ? '' : reason ?? ''}
+      title={recording || reason === null ? '' : t(reasonText(reason))}
       readOnly
       // Starting a recording is pointer-only by design: the click is the explicit "I am
       // changing this" gesture, and the keyboard is only the chord source afterwards.

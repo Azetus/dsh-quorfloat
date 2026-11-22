@@ -37,341 +37,16 @@ type SnapshotFrame = Extract<FollowFrame, { type: 'snapshot' }>
 /**
  * Byte budget for one `session/snapshot/part` payload.
  *
- * A quarter of the protocol's 1 MiB frame ceiling. A snapshot used to travel as one
- * frame, and a conversation whose records passed that ceiling was dropped by the peer's
- * reader before any of it could be folded — leaving the panel blank with no reason on
- * the record. The budget leaves room for the frame envelope and the peer's write buffer
- * so the ceiling is never the thing that decides whether a conversation is deliverable.
+ * A transport part size well below the 4 MiB frame ceiling. A snapshot used to travel as
+ * one frame, and a conversation whose records passed the ceiling was dropped by the peer's
+ * reader before any of it could be folded — leaving the panel blank with no reason on the
+ * record. The budget leaves room for the frame envelope and the peer's write buffer.
  */
 export const SNAPSHOT_PART_BUDGET_BYTES = 256 * 1024
 
-/**
- * Byte budget for one `session/history` answer.
- *
- * A page travels as a single JSON-RPC response, so it is bounded by the same 1 MiB frame
- * ceiling a snapshot used to be — and an oversized frame is dropped by the peer's reader
- * before anything can fold it, which for a page means the reader's request simply never
- * arrives (the peer's own give-up marker is all that explains it). Half the ceiling: a page
- * is one reader gesture, and asking twice is a smaller problem than a page that never lands.
- */
-export const HISTORY_PAGE_BUDGET_BYTES = 512 * 1024
-
-/**
- * Byte budget for **one record** of a history page.
- *
- * The page budget above bounds the page; on its own it does not bound a *record*, and one
- * record larger than the page budget would still travel as an oversized frame — the exact
- * failure that made long snapshots blank, one level down. So each record is clamped before
- * the page is measured, which is what makes "a page fits a frame" true for any history and
- * not only for ordinary history.
- *
- * The value mirrors the transcript's own per-entry clip — `MAX_ENTRY_BYTES`, 32 KiB, in
- * `quorfloat/src/app/session/transcript/mod.rs` — because that is the budget the receiving
- * side keeps per line: a record clamped here to what the transcript would keep anyway costs
- * the conversation nothing, while the page budget only needs a handful of records to fill.
- * It is also small enough that a page trimmed to {@link HISTORY_PAGE_BUDGET_BYTES} always
- * carries at least one whole record.
- */
-export const HISTORY_RECORD_BUDGET_BYTES = 32 * 1024
-
-/**
- * The floor of the record clamp: a string at or below this is never clipped.
- *
- * The fields that say what a record *is* — `event.type`, a role, an id, `source.kind` — are all
- * far shorter than this, and clipping one would turn a record the transcript folds into a record
- * it counts as unrecognised. Only text long enough to be payload is touched, which is the same
- * line the transcript's clip draws by clipping text rather than structure. A clipped string also
- * keeps at least this much, so every clip removes more than the marker adds.
- */
-const MIN_CLIPPED_TEXT_BYTES = 1024
-
-/**
- * How many times the record clamp may clip before it gives up and stubs the record.
- *
- * Each pass strictly shrinks the record (only strings longer than the floor are clipped, and
- * only when clipping removes more than the marker adds), so one pass is enough for every
- * ordinary record; the cap is what keeps a pathological one from looping.
- */
-const MAX_CLAMP_PASSES = 8
-
-/** The marker appended to a clipped string, mirroring the transcript's own. */
-function clampNote(dropped: number): string {
-  return `\n…（已截断 ${dropped} 字节；完整内容请在 Harness 窗口查看）`
-}
-
-/**
- * An upper bound of {@link clampNote}'s JSON size, used to decide how much to keep.
- *
- * Eight digits is more than any record this clamp can be handed can drop, so the estimate is
- * never short; a short one would only cost a second pass, and the bound is verified by
- * measuring the record afterwards either way.
- */
-const CLAMP_MARKER_BYTES = Buffer.byteLength(clampNote(99_999_999))
-
-/**
- * Trim a page to what one frame can carry, keeping the records nearest the window.
- *
- * Two bounds, in this order, because they answer different failures:
- *
- * - **Each record is clamped** to {@link HISTORY_RECORD_BUDGET_BYTES}. Without this the page
- *   bound below is not a bound at all: a single record over the page budget travels as an
- *   oversized frame, and the peer's reader drops it before it can be folded.
- * - **The page is trimmed** to `budget`, keeping its newest end. The panel extends its window
- *   *upwards*, so the records adjacent to what it already shows have to arrive first or the
- *   window would have a hole in it. What is left out is not lost — `cursor` names the oldest
- *   record that did travel, and the next request asks below it.
- *
- * A page that needed neither is handed back as it came, so a caller can compare identity and a
- * test can assert that a page which already fits is not rewritten.
- *
- * @param page - the page the adapter read.
- * @param budget - ceiling in bytes for the serialized records of the page.
- * @param recordBudget - ceiling in bytes for any one record; never above `budget`.
- * @returns the page, clamped and/or trimmed when it did not fit.
- */
-export function boundedHistoryPage(
-  page: HistoryPageView,
-  budget: number = HISTORY_PAGE_BUDGET_BYTES,
-  recordBudget: number = HISTORY_RECORD_BUDGET_BYTES,
-): HistoryPageView {
-  const records = page.records
-  if (records.length === 0) return page
-  const perRecord = Math.min(recordBudget, budget)
-  const clamped = records.map(record => clampHistoryRecord(record, perRecord))
-  const kept = clamped.map(entry => entry.record)
-  const rewritten = clamped.some(entry => entry.clamped)
-  if (historyPageBytes(kept) <= budget) {
-    if (!rewritten) return page
-    const clampedPage: HistoryPageView = { records: kept, hasMore: page.hasMore, cursor: page.cursor }
-    return clampedPage
-  }
-  // The largest trailing slice that fits. Binary search rather than a walk: a page can hold
-  // hundreds of records, and measuring each candidate slice is a serialization of the whole.
-  // At least one record is kept whatever the arithmetic says: a record is the smallest thing
-  // there is to send, and an empty answer would tell the reader that nothing exists below the
-  // window when something does. With the budgets this module ships, a record always fits
-  // anyway — the clamp above is what makes that true rather than hopeful.
-  let low = 1
-  let high = kept.length
-  while (low < high) {
-    const middle = Math.ceil((low + high) / 2)
-    if (historyPageBytes(kept.slice(kept.length - middle)) <= budget) low = middle
-    else high = middle - 1
-  }
-  const trimmed = kept.slice(kept.length - low)
-  // `hasMore` is true either way: a page this function trimmed has records below the slice it
-  // kept, whether or not the untrimmed page had reached the end of the history.
-  return { records: trimmed, hasMore: true, cursor: oldestSeq(trimmed) }
-}
-
-/** The wire size of a page's records, in bytes. */
+/** Wire size of a history page's records, for deciding whether transport framing is needed. */
 function historyPageBytes(records: readonly unknown[]): number {
   return Buffer.byteLength(JSON.stringify(records))
-}
-
-/** One record, and whether the clamp had to rewrite it. */
-export interface ClampedRecord {
-  /** The record as it will travel: the original when it already fits. */
-  readonly record: unknown
-  /** Whether the record was rewritten. */
-  readonly clamped: boolean
-}
-
-/**
- * Clamp one record to a byte budget, keeping its envelope and marking what it lost.
- *
- * Mirrors the transcript's per-entry clip (`bounded`/`clip` in
- * `quorfloat/src/app/session/transcript/mod.rs`) at the record level: the largest strings are
- * cut, on a code-point boundary, and each one says how much was dropped. What is never touched
- * is the envelope — `event.seq` is what the page's backwards cursor is derived from, and
- * `event.type` is what the transcript folds by — because those are short by construction and
- * are the only part of a record every consumer needs.
- *
- * The budget is enforced by **measurement**, not by arithmetic: each pass clips and the record
- * is serialized again, so escaping and multi-byte characters cannot make the result larger than
- * it looks. A record whose *structure* alone is over budget (hundreds of small fields) cannot be
- * clipped into the budget at all, and is replaced by its envelope plus a marker rather than
- * travelling oversized.
- *
- * @param record - one record of a page.
- * @param budget - ceiling in bytes for this record's JSON form.
- * @returns the record to send, and whether it is not the one that was read.
- */
-export function clampHistoryRecord(record: unknown, budget: number = HISTORY_RECORD_BUDGET_BYTES): ClampedRecord {
-  if (recordBytes(record) <= budget) return { record, clamped: false }
-  const value = cloneRecord(record)
-  if (value === undefined) return { record: stubHistoryRecord(record), clamped: true }
-  for (let pass = 0; pass < MAX_CLAMP_PASSES; pass += 1) {
-    const over = recordBytes(value) - budget
-    if (over <= 0) return { record: value, clamped: true }
-    if (!clipLargestStrings(value, over)) break
-  }
-  if (recordBytes(value) <= budget) return { record: value, clamped: true }
-  return { record: stubHistoryRecord(record), clamped: true }
-}
-
-/** The wire size of one record, in bytes. */
-function recordBytes(record: unknown): number {
-  const wire = JSON.stringify(record)
-  return wire === undefined ? 0 : Buffer.byteLength(wire)
-}
-
-/**
- * A mutable copy of a record, through its wire form.
- *
- * A record is JSON by definition — it arrived as `SessionHistoryRecord` from the Harness — so
- * the round trip is lossless for everything this path handles, and it means the clamp never
- * reaches back into the caller's objects. `undefined` for a value that is not JSON at all.
- *
- * @param record - the record to copy.
- * @returns the copy, or `undefined` when it cannot be represented as JSON.
- */
-function cloneRecord(record: unknown): unknown {
-  const wire = JSON.stringify(record)
-  if (wire === undefined) return undefined
-  try {
-    return JSON.parse(wire)
-  } catch {
-    return undefined
-  }
-}
-
-/**
- * Clip the record's largest strings until it has lost at least `over` bytes.
- *
- * Longest first, and only strings above {@link MIN_CLIPPED_TEXT_BYTES}: the excess is taken out
- * of the text that caused it, and the short fields that carry identity are left alone. Each
- * string is kept at no less than `MIN_CLIPPED_TEXT_BYTES` bytes, so every clip removes more than
- * the marker adds and the caller's loop always makes progress.
- *
- * @param value - the record copy to rewrite, in place.
- * @param over - how many bytes must be removed.
- * @returns whether anything was clipped.
- */
-function clipLargestStrings(value: unknown, over: number): boolean {
-  const found: { path: (string | number)[]; text: string; bytes: number }[] = []
-  collectStrings(value, [], found)
-  found.sort((left, right) => right.bytes - left.bytes)
-  let clipped = false
-  let excess = over
-  for (const entry of found) {
-    if (excess <= 0) break
-    const size = entry.bytes
-    // Sorted longest first, so the first string at or below the floor ends the walk.
-    if (size <= MIN_CLIPPED_TEXT_BYTES + CLAMP_MARKER_BYTES) break
-    const keep = Math.max(MIN_CLIPPED_TEXT_BYTES, size - excess - CLAMP_MARKER_BYTES)
-    if (keep >= size) continue
-    const replacement = clipValue(entry.text, keep)
-    // Measured rather than assumed: the marker and the boundary trim both count.
-    excess -= size - Buffer.byteLength(replacement)
-    setAtPath(value, entry.path, replacement)
-    clipped = true
-  }
-  return clipped
-}
-
-/** Collect every string value of a JSON value, with the path that reaches it. */
-function collectStrings(
-  value: unknown,
-  path: (string | number)[],
-  out: { path: (string | number)[]; text: string; bytes: number }[],
-): void {
-  if (typeof value === 'string') {
-    out.push({ path: [...path], text: value, bytes: Buffer.byteLength(value) })
-    return
-  }
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => collectStrings(item, [...path, index], out))
-    return
-  }
-  if (typeof value === 'object' && value !== null) {
-    for (const [key, item] of Object.entries(value)) {
-      // `__proto__` is the one key this walk cannot navigate back into (assigning to it goes
-      // through the accessor rather than the own property `JSON.parse` created), so a string
-      // under it is left unclipped — and the record falls to the stub path if that is what made
-      // it too large.
-      if (key === '__proto__') continue
-      collectStrings(item, [...path, key], out)
-    }
-  }
-}
-
-/**
- * Replace one string in a record copy.
- *
- * Only paths this module collected are ever set, which is why a plain assignment is enough:
- * `collectStrings` skips the one key whose assignment would not be a data write.
- */
-function setAtPath(root: unknown, path: readonly (string | number)[], value: string): void {
-  let node = root as Record<string | number, unknown>
-  for (const key of path.slice(0, -1)) node = node[key] as Record<string | number, unknown>
-  node[path[path.length - 1] as string | number] = value
-}
-
-/**
- * Cut one string to at most `keep` bytes, on a code-point boundary, saying what was cut.
- *
- * Bytes rather than characters, exactly as {@link planSnapshotParts} measures: a budget
- * enforced on `String.length` would ship three times its size in CJK text. The cut is stated in
- * the text rather than applied quietly, because a clipped answer that looks complete is worse
- * than a long one — and it is the visible half of a clamp that has no other way to be noticed.
- *
- * @param text - the string to cut.
- * @param keep - how many bytes of it to keep.
- * @returns the kept prefix, on a code-point boundary, with the marker stating what was dropped.
- */
-function clipValue(text: string, keep: number): string {
-  let end = codePointBoundary(text, Math.min(text.length, keep))
-  let used = Buffer.byteLength(text.slice(0, end))
-  if (used > keep) {
-    // One scaling step (a code point can be three bytes in CJK, one in ASCII), then trim the
-    // remainder exactly, which is a handful of code points at most.
-    end = codePointBoundary(text, Math.max(1, Math.floor((end * keep) / used)))
-    used = Buffer.byteLength(text.slice(0, end))
-    while (end > 0 && used > keep) {
-      let start = end - 1
-      if (start > 0 && isLowSurrogate(text.charCodeAt(start))) start -= 1
-      used -= Buffer.byteLength(text.slice(start, end))
-      end = start
-    }
-  }
-  const dropped = Buffer.byteLength(text) - used
-  return `${text.slice(0, end)}${clampNote(dropped)}`
-}
-
-/** Move a code-unit index back off a halved surrogate pair. */
-function codePointBoundary(text: string, end: number): number {
-  return end > 0 && end < text.length && isLowSurrogate(text.charCodeAt(end)) ? end - 1 : end
-}
-
-/** Whether a UTF-16 code unit is the second half of a surrogate pair. */
-function isLowSurrogate(unit: number): boolean {
-  return unit >= 0xdc00 && unit <= 0xdfff
-}
-
-/**
- * The envelope of a record whose structure alone is over budget.
- *
- * Every consumer of a page places a record by its envelope: the backwards cursor is
- * `event.seq`, the transcript folds by `event.type`, and the forward watermark needs both. The
- * payload is what cannot fit, so it is replaced by a marker that says so rather than the record
- * being sent oversized (dropped at the frame ceiling, and then nothing arrives at all).
- *
- * @param record - the record that could not be clamped.
- * @returns the envelope, with a marker payload.
- */
-function stubHistoryRecord(record: unknown): unknown {
-  const envelope = (typeof record === 'object' && record !== null ? record : {}) as Record<string, unknown>
-  const event = (typeof envelope['event'] === 'object' && envelope['event'] !== null ? envelope['event'] : {}) as Record<string, unknown>
-  return {
-    type: typeof envelope['type'] === 'string' ? envelope['type'] : 'event',
-    event: {
-      type: typeof event['type'] === 'string' ? event['type'] : 'unknown',
-      ...(typeof event['seq'] === 'number' ? { seq: event['seq'] } : {}),
-      ...(typeof event['time'] === 'number' ? { time: event['time'] } : {}),
-      data: { truncated: true, note: clampNote(recordBytes(record)) },
-    },
-  }
 }
 
 /** One bounded slice of a snapshot's records. */
@@ -791,12 +466,10 @@ export class SessionLayer {
       return { records: [], hasMore: false, cursor: null }
     }
     const page = await this.#deps.harness.pageHistory(sessionId, throughSeq, beforeSeq)
-    // Per-record clipping still applies; page length is bounded by transport parts,
-    // not by cutting away the beginning of an otherwise indivisible turn.
-    const result = boundedHistoryPage(page, Number.POSITIVE_INFINITY)
-    const records = result.records
-    if (historyPageBytes(records) <= HISTORY_PAGE_BUDGET_BYTES) return result
-    // A turn is indivisible. Split transport frames instead of dropping its earlier records.
+    // History is paged by message count upstream. The full records travel; only the
+    // transport is chunked, so an indivisible turn is never cut to fit a frame.
+    const records = page.records
+    if (historyPageBytes(records) <= SNAPSHOT_PART_BUDGET_BYTES) return page
     const generation = ++this.#generation
     const context = { sessionId, generation }
     const parts = planSnapshotParts(records, context)
@@ -849,13 +522,12 @@ export class SessionLayer {
         requestId,
       })
       this.#deps.onStateChange?.(sessionId, 'prompt-key-reused', { requestId })
-      // The message is Chinese and leads with the action, because it is read in the panel's status line,
-      // which is Chinese and truncates on the right — the same surface the layer's other reasons reach
-      // ("正在获取工作区，请稍候再发送"). The log line above stays English, like every other host log.
+      // The panel's copy lives in its dictionary. This error carries a stable reason the sidecar
+      // can map to a code; the message stays a technical fallback for logs and older peers.
       throw new HarnessError(
         'stale',
-        '请再按一次发送：这条消息的幂等键本会话已经用过，Harness 会丢弃它',
-        { sessionId, requestId },
+        'prompt-key-reused',
+        { sessionId, requestId, reason: 'promptKeyReused' },
       )
     }
     const record: PromptRecord = { requestId, sessionId, text, state: 'pending' }
@@ -1010,9 +682,8 @@ export class SessionLayer {
   /**
    * Send one conversation's opening snapshot as `begin` + parts + `end`.
    *
-   * The chunks are what make a conversation larger than the frame ceiling deliverable:
-   * a single frame past 1 MiB is refused by the peer's reader, and the refusal used to
-   * leave the panel blank for the rest of the run.
+   * The chunks keep each transport frame comfortably below the frame ceiling; a single
+   * record over the part budget still travels whole, and the transport fragments it.
    *
    * `state.closed` is checked between parts because a replaced subscription's remaining
    * parts belong to a conversation nobody is following: writing them would only make the
@@ -1030,7 +701,7 @@ export class SessionLayer {
     state: FollowState,
   ): Promise<void> {
     const context = { sessionId, generation }
-    const records = frame.records.map(record => clampHistoryRecord(record).record)
+    const records = frame.records
     const parts = planSnapshotParts(records, context)
     for (const part of parts) {
       if (part.bytes > SNAPSHOT_PART_BUDGET_BYTES) {

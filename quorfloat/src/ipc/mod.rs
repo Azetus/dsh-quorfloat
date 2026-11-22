@@ -6,6 +6,7 @@
 //! to satisfy the host and which code exists to serve the panel.
 //!
 //! - [`protocol`] — the constants both sides agree on: version, capabilities, error codes.
+//! - [`fragments`] — transport fragmentation for messages larger than one frame.
 //! - [`frame`] — NDJSON framing, including the oversized-frame recovery.
 //! - [`rpc`] — JSON-RPC shapes and the router that classifies inbound frames.
 //! - [`transport`] — the real stdin/stdout implementation of the byte stream.
@@ -14,6 +15,7 @@
 //! Nothing here draws, owns state, or knows what a conversation is. The next layer in
 //! is [`crate::app::session`], which is the first thing that has an opinion about meaning.
 
+pub mod fragments;
 pub mod frame;
 pub mod platform;
 pub mod protocol;

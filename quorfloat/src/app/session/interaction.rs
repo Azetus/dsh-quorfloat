@@ -20,6 +20,8 @@
 
 use serde_json::Value;
 
+use crate::app::reason::Reason;
+
 /// Which waterfall an interaction came from.
 ///
 /// The two are not variations of one thing: an approval is answered with a word
@@ -185,8 +187,8 @@ pub enum InteractionState {
     /// request is gone upstream, so a second attempt would be a guess. The reason
     /// is shown so the user is not left wondering whether the click registered.
     Refused {
-        /// The host's explanation, or a stand-in when it gave none.
-        reason: String,
+        /// The host's explanation, or a stand-in when it gave none, as a structured reason.
+        reason: Reason,
     },
 }
 
@@ -648,8 +650,13 @@ const _: () = assert!(MAX_QUESTIONS_ANSWERED >= MAX_QUESTIONS_SHOWN);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::bridge::{self, ShellView};
+    use crate::app::height::Height;
+    use crate::app::language::Language;
+    use crate::app::preferences::Preferences;
     use crate::app::session::test_support::*;
     use crate::app::session::Session;
+    use crate::app::window_settings::WindowSettings;
     use crate::ipc::rpc::Inbound;
     use serde_json::json;
 
@@ -709,6 +716,50 @@ mod tests {
         assert_eq!(answer["params"]["interactionId"], "approval-1");
         assert_eq!(answer["params"]["answer"]["outcome"], "allowed-once");
         assert!(answer["id"].is_number(), "an answer is a request, so it carries an id");
+    }
+
+    /// A shell with just the language field under test; every other view fact is inert.
+    fn shell(language: Language) -> ShellView {
+        ShellView {
+            settings: WindowSettings { language, ..WindowSettings::default() },
+            preferences: Preferences::default(),
+            hotkey_requested: None,
+            hotkey_held: None,
+            hotkey_registered: false,
+            hotkey_reason: None,
+            visible: false,
+            height: Height::new(),
+            summon_token: "test".to_owned(),
+            summon_count: 0,
+        }
+    }
+
+    /// The panel's own locale selects the asker's localized `displayReason`; the snapshot
+    /// must not keep asking for Chinese after the user switches the panel to English.
+    #[test]
+    fn interaction_detail_follows_the_panel_language() {
+        let mut session = Session::new(identity());
+        let mut sink = RecordingSink::default();
+        deliver(
+            &mut session,
+            vec![notification(
+                "interaction/open",
+                json!({
+                    "interactionId": "approval-1",
+                    "sessionId": "session-1",
+                    "kind": "approval",
+                    "payload": {
+                        "toolName": "bash",
+                        "callId": "call-1",
+                        "reason": "audit fallback",
+                        "displayReason": {"zh": "中文原因", "en": "English reason"},
+                    },
+                }),
+            )],
+            &mut sink,
+        );
+        assert_eq!(bridge::snapshot(&session, &shell(Language::En))["interactions"][0]["detail"], "English reason");
+        assert_eq!(bridge::snapshot(&session, &shell(Language::Zh))["interactions"][0]["detail"], "中文原因");
     }
 
     #[test]

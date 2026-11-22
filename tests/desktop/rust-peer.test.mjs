@@ -813,8 +813,32 @@ test('the real sidecar folds a conversation and a stream over the real wire', { 
       const state = supervisor.snapshot()
       return state.state === 'running' && state.consecutiveMissedHeartbeats === 0
     }, { timeoutMs: 8000 })
+
+    // A single logical frame far past the 4 MiB ceiling. The host channel must
+    // fragment it, the Rust reader must reassemble it, and the transcript must
+    // still fold it. This is the path a normal conversation cannot exercise.
+    await supervisor.notify('session/snapshot', {
+      sessionId: 'session-cross',
+      generation: 1,
+      cursor: 10,
+      hasMore: false,
+      records: [
+        { type: 'event', event: { type: 'user/message', seq: 10, time: 2,
+          data: { role: 'user', content: [{ type: 'text', text: 'x'.repeat(5 * 1024 * 1024) }] } } },
+      ],
+    })
+    await waitFor(
+      'the large fragmented snapshot to fold',
+      async () => (await breadcrumbs()).includes('transcript 1 entries cursor=10'),
+      { timeoutMs: 15000 },
+    )
     const written = await breadcrumbs()
-    assert.ok(written.includes('transcript 1 entries'), 'the folded entry survives the stream')
+    assert.ok(written.includes('transcript 1 entries cursor=0'), 'the first folded entry arrived before the large one')
+    assert.ok(written.includes('transcript 1 entries cursor=10'), 'the fragmented record was reassembled and folded')
+    // The 5 MiB entry exceeds the 4 MiB retention window, so the earlier small
+    // entry is reaped as a whole round. That is window eviction, not truncation.
+    assert.ok(written.includes('transcript skipped: 1 dropped'), 'the window reports the eviction')
+    assert.ok(!written.includes('fragment rejected'), 'no fragment sequence was refused')
   } finally {
     delete process.env['DSH_QUORFLOAT_RUST_MARKER']
     delete process.env['DSH_QUORFLOAT_HOTKEY']

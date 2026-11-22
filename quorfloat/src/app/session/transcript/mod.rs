@@ -47,10 +47,6 @@ use self::stream::Live;
 /// caches a page across that.
 const MAX_WINDOW_BYTES: usize = 4 * 1024 * 1024;
 
-/// How much text one entry keeps. A tool result can be megabytes, and a panel that
-/// allocates them all is a panel that dies on the one conversation that mattered.
-const MAX_ENTRY_BYTES: usize = 32 * 1024;
-
 /// One block inside an assistant message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Block {
@@ -701,7 +697,6 @@ impl Transcript {
     }
 
     fn push(&mut self, entry: Entry) {
-        let entry = bounded(entry);
         self.bytes += entry_bytes(&entry);
         Arc::make_mut(&mut self.entries).push(entry);
         self.cap();
@@ -828,47 +823,6 @@ fn last_seq(records: Option<&Value>) -> Option<i64> {
         .and_then(Value::as_i64)
 }
 
-/// Keep one entry's text within the per-entry budget.
-///
-/// A tool result can be megabytes of build output, and a floating panel that holds all
-/// of it is a panel that dies on the one command whose output mattered. The cut is
-/// stated in the text rather than applied quietly, because a truncated result that looks
-/// complete is worse than a long one.
-fn bounded(entry: Entry) -> Entry {
-    match entry {
-        Entry::User { text } => Entry::User { text: clip(text) },
-        Entry::System { text } => Entry::System { text: clip(text) },
-        Entry::Tool { name, text, is_error } => Entry::Tool { name, text: clip(text), is_error },
-        Entry::Assistant { blocks, streaming } => Entry::Assistant {
-            blocks: blocks
-                .into_iter()
-                .map(|block| match block {
-                    Block::Text(text) => Block::Text(clip(text)),
-                    Block::Reasoning(text) => Block::Reasoning(clip(text)),
-                    Block::Call { name, arguments } => Block::Call { name, arguments: clip(arguments) },
-                })
-                .collect(),
-            streaming,
-        },
-    }
-}
-
-/// Cut a string to [`MAX_ENTRY_BYTES`], on a character boundary, saying what was cut.
-fn clip(text: String) -> String {
-    if text.len() <= MAX_ENTRY_BYTES {
-        return text;
-    }
-    // UTF-8 boundaries, not byte offsets: slicing mid-character panics, and this runs on
-    // whatever the model or a tool produced.
-    let mut end = MAX_ENTRY_BYTES;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    let dropped = text.len() - end;
-    format!("{}\n…（已截断 {dropped} 字节；完整内容请在 Harness 窗口查看）", &text[..end])
-}
-
-/// Counts of what the transcript set aside.
 /// Whether a `user/message` is something the user typed.
 ///
 /// Read from `source.kind` rather than guessed from the text: a runtime-context snapshot is a
@@ -893,6 +847,7 @@ fn from_the_user(data: &Value, seen: &mut std::collections::BTreeSet<String>) ->
     }
 }
 
+/// Counts of what the transcript set aside.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Skipped {
     /// Records at or below the cursor.
@@ -1105,25 +1060,17 @@ mod tests {
     }
 
     #[test]
-    fn one_entry_larger_than_the_per_entry_budget_is_clipped_and_says_so() {
-        // The receiving half of the host's per-record page clamp: whatever arrives, one line
-        // keeps at most `MAX_ENTRY_BYTES` of text. The mirror lives on the host side
-        // (`HISTORY_RECORD_BUDGET_BYTES` in `src/harness/session-layer.ts`, the same 32 KiB), so a
-        // record clamped before it was sent costs this side nothing. The text is CJK on purpose:
-        // a cut at a byte offset would panic on a character boundary, which is why the clip walks
-        // back to one.
+    fn a_long_entry_is_kept_whole() {
+        // The transport carries records whole; the transcript is not a second truncation
+        // point. Only the whole-line window budget may evict an old round.
         let mut transcript = Transcript::new();
-        let text = "中".repeat(MAX_ENTRY_BYTES / 3 + 1);
+        let text = "中".repeat(64 * 1024);
         transcript.apply_snapshot(&snapshot(vec![user(0, &text)], 0, 1));
-
         let Entry::User { text: kept } = &transcript.entries()[0] else {
             panic!("expected the user entry: {:?}", transcript.entries()[0]);
         };
-        assert!(kept.starts_with('中'), "the kept text is the beginning of what was sent");
-        let cut = kept.find('\n').expect("the marker starts its own line");
-        assert!(cut <= MAX_ENTRY_BYTES, "the kept prefix is within the per-entry budget: {cut}");
-        assert!(kept[cut..].contains("已截断"), "and it states what was dropped rather than looking complete");
-        assert_eq!(transcript.held_bytes(), kept.len(), "the window budget measures what was kept");
+        assert_eq!(kept, &text, "the entry text arrives exactly as sent");
+        assert_eq!(transcript.held_bytes(), kept.len());
     }
 
     #[test]
@@ -1133,10 +1080,10 @@ mod tests {
         // they weighed. The budget is bytes, and what it drops is on the record.
         let mut transcript = Transcript::new();
         transcript.apply_snapshot(&snapshot(vec![user(0, "起点")], 0, 1));
-        let line = "中".repeat(MAX_ENTRY_BYTES / 3);
+        let line = "中".repeat(32 * 1024 / 3);
         // Multiple reclaimable rounds, well past the byte budget. A single oversized
         // round is indivisible; the budget reclaims earlier rounds, not half an answer.
-        let lines = 2 * MAX_WINDOW_BYTES / MAX_ENTRY_BYTES + 8;
+        let lines = 2 * MAX_WINDOW_BYTES / (32 * 1024) + 8;
         let mut seq = 0i64;
         for index in 0..lines {
             if index % 4 == 0 {
@@ -1152,7 +1099,7 @@ mod tests {
         }
         assert!(transcript.skipped().dropped > 0, "the budget reaped, and says so");
         assert!(
-            transcript.held_bytes() <= MAX_WINDOW_BYTES + MAX_ENTRY_BYTES,
+            transcript.held_bytes() <= MAX_WINDOW_BYTES + 32 * 1024,
             "within the budget plus the line that crossed it: {}",
             transcript.held_bytes(),
         );

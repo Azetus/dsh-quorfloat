@@ -15,7 +15,19 @@ pub const PROTOCOL_VERSION: &str = "quorfloat/1";
 ///
 /// An oversized frame is **not** fatal: it is dropped and counted, because one
 /// peer bug must not cost the floating window its connection.
-pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
+pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
+
+/// Largest logical JSON-RPC message accepted after fragment reassembly.
+pub const MAX_LOGICAL_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Transport notification that carries one slice of a larger JSON-RPC message.
+pub const FRAGMENT_METHOD: &str = "quorfloat/fragment";
+
+/// Raw bytes per fragment before Base64; chosen so the encoded frame stays below the ceiling.
+pub const FRAGMENT_RAW_BYTES: usize = 2 * 1024 * 1024;
+
+/// How long an incomplete fragment sequence may occupy the channel.
+pub const FRAGMENT_TIMEOUT_MS: i64 = 30_000;
 
 /// JSON-RPC error codes used by this protocol, matching the host's `ErrorCode`.
 ///
@@ -94,7 +106,7 @@ mod tests {
 
     #[test]
     fn frame_limit_matches_the_host_budget() {
-        assert_eq!(MAX_FRAME_BYTES, 1024 * 1024);
+        assert_eq!(MAX_FRAME_BYTES, 4 * 1024 * 1024);
     }
 
     #[test]

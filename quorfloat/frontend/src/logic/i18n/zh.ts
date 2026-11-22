@@ -86,6 +86,9 @@ export const zh: Record<MessageKey, string> = {
   'permission.menuLabel': '权限选择',
   'permission.heading': '会话权限',
   'permission.catalogPending': '权限目录尚未到达。',
+  'permission.readOnly': '仅可查看',
+  'permission.workspaceWrite': '工作区内修改',
+  'permission.fullAccess': '完全权限',
 
   // Composer.
   'composer.inputLabel': '输入问题',
@@ -98,7 +101,34 @@ export const zh: Record<MessageKey, string> = {
   'status.send': '发送',
   'status.newline': '换行',
   'status.close': '关闭',
+  // Structured panel status and errors.
+  'delivery.sending': '已提交，等待 Harness 确认…',
+  'delivery.empty': '内容为空，未发送。',
+  'delivery.workspacesLoading': '正在获取工作区，请稍候再发送。',
+  'delivery.creating': '正在创建会话，请稍候再发送。',
+  'delivery.noWorkspace': '先选择一个工作区。',
+  'delivery.writeFailed': '未发送：{detail}',
+  'delivery.createFailed': '无法创建会话：{detail}',
+  'delivery.promptKeyReused': '这条消息在本会话已经发送过，请重新提交以重试。',
+  'delivery.hostFailed': '未发送：{detail}',
+  'cancel.sending': '正在取消…',
+  'cancel.noSession': '尚未跟随任何会话。',
+  'cancel.writeFailed': '取消请求未发送：{detail}',
+  'cancel.hostFailed': '取消请求被拒绝：{detail}',
+  'setting.optionsFailed': '无法读取可选项：{detail}',
+  'setting.noSession': '尚未跟随任何会话。',
+  'setting.modelFailed': '无法切换模型：{detail}',
+  'setting.permissionFailed': '无法切换权限：{detail}',
+  'hotkey.unreadable': '读不懂这个快捷键：{chord}',
+  'hotkey.unavailable': '这个快捷键已被占用或不受支持：{detail}',
+  'hotkey.unsupported': '本系统不支持全局快捷键：{detail}',
+  'hotkey.restored': '新快捷键不可用：{detail}（仍使用 {previous}）',
+  'interaction.refused': '请求被拒绝：{detail}',
 
+
+  'working.truncated': '…（已省略，共 {total} 字符）',
+  'working.showFull': '显示全部',
+  'working.showLess': '收起',
   // Footer statistics.
   'stats.label': '会话统计',
   'stats.rounds': '{turns} 轮 {steps} 步 · {speed} tok/s',
@@ -168,7 +198,6 @@ export const zh: Record<MessageKey, string> = {
 
   // Shortcut recorder.
   'hotkey.recording': '按下组合键…',
-  'hotkey.unreadable': '读不懂这个快捷键：{chord}',
   'hotkey.bareKey': '裸按键会被整个桌面占用，请加上修饰键（Ctrl / Alt / Cmd / Shift）',
 
   // Relative times.

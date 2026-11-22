@@ -10,11 +10,14 @@
 //! `try_send`s, because a reader that blocks on a full queue stops reading stdin — and
 //! a process that stops reading stdin is a process the host declares dead.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use crate::app::session::{FrameSink, Session, SessionExit};
+use crate::ipc::fragments::fragment_messages;
 use crate::ipc::frame::FrameStats;
+use crate::ipc::protocol::{MAX_FRAME_BYTES, MAX_LOGICAL_MESSAGE_BYTES};
 use crate::ipc::transport::StdinSource;
 
 /// Something that needs the shell's attention.
@@ -78,7 +81,29 @@ impl SharedSink {
     /// @param frame - the message to encode and send.
     /// @returns an error when the peer is gone.
     pub fn send(&self, frame: &serde_json::Value) -> std::io::Result<()> {
-        self.with(|sink| sink.send(frame))
+        let bytes = serde_json::to_vec(frame)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        if bytes.len() < MAX_FRAME_BYTES {
+            return self.with(|sink| sink.send(frame));
+        }
+        if bytes.len() > MAX_LOGICAL_MESSAGE_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("message exceeds {MAX_LOGICAL_MESSAGE_BYTES} bytes"),
+            ));
+        }
+        static SEQUENCE: AtomicU64 = AtomicU64::new(1);
+        let id = format!("f-{}", SEQUENCE.fetch_add(1, Ordering::Relaxed));
+        let fragments = fragment_messages(frame, &id)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        // Hold the writer for the whole sequence: another writer must not interleave a
+        // frame between two fragments of the same logical message.
+        self.with(|sink| {
+            for fragment in fragments {
+                sink.send(&fragment)?;
+            }
+            Ok(())
+        })
     }
 
     /// Record one log line, on stderr.
@@ -239,5 +264,46 @@ impl FrameSink for BorrowedSink<'_> {
 
     fn mark(&mut self, line: &str) {
         self.0.mark(line);
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct Collector(std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>);
+
+    impl FrameSink for Collector {
+        fn send(&mut self, frame: &serde_json::Value) -> std::io::Result<()> {
+            self.0.lock().expect("collector").push(frame.clone());
+            Ok(())
+        }
+
+        fn log(&mut self, _line: &str) {}
+    }
+
+    #[test]
+    fn a_large_sidecar_frame_is_fragmented_and_reassembles() {
+        let collector = Collector::default();
+        let sink = SharedSink::new(Box::new(collector.clone()));
+        let message = crate::ipc::rpc::request(5, "session/prompt", serde_json::json!({
+            "text": "x".repeat(2 * MAX_FRAME_BYTES),
+        }));
+        sink.send(&message).expect("fragments are written");
+        let frames = collector.0.lock().expect("collector").clone();
+        assert!(frames.len() > 1, "the message needs more than one frame");
+        let mut assembler = crate::ipc::fragments::FragmentAssembler::new();
+        let mut complete = None;
+        for frame in &frames {
+            let params = frame.get("params").expect("fragment params");
+            match assembler.accept(params, 0) {
+                crate::ipc::fragments::FragmentOutcome::Pending => {}
+                crate::ipc::fragments::FragmentOutcome::Complete(value) => complete = Some(value),
+                other => panic!("unexpected fragment outcome: {other:?}"),
+            }
+        }
+        assert_eq!(complete, Some(message));
     }
 }

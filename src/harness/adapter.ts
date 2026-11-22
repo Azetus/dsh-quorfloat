@@ -196,8 +196,8 @@ export function projectSessionSummary(row: unknown): SessionSummaryView | undefi
   }
 }
 
-/** Messages per upstream read; a capped partial turn is completed by reading further back. */
-const PAGE_MAX_MESSAGES = 200
+/** Messages per upstream read, matching the Harness chat's page size. */
+const PAGE_MAX_MESSAGES = 500
 
 /** The Harness's turn window: at least 50 messages and two `turn/start` boundaries. */
 const PAGE_TURN_WINDOW = { minMessages: 50, minTurns: 2 } as const
@@ -285,9 +285,9 @@ export interface QuorfloatHarness {
   /**
    * Read one message-aligned history page.
    *
-   * The request carries the Harness's own turn window minimums and a cap this side of the wire
-   * can transport — see `PAGE_MAX_MESSAGES` / `PAGE_TURN_WINDOW` — so a page is a coherent unit
-   * (it does not end inside a turn) as well as a frame that fits.
+   * The request carries the Harness's own turn window minimums and a message count, not a
+   * byte budget — see `PAGE_MAX_MESSAGES` / `PAGE_TURN_WINDOW`. Transport fragmentation handles
+   * a page that no longer fits one frame.
    *
    * @param sessionId - durable session identity.
    * @param throughSeq - inclusive upper bound; must be a real sequence at or
@@ -984,7 +984,7 @@ class CordisHarness implements QuorfloatHarness {
         const name = typeof option['name'] === 'string' ? option['name'] : undefined
         if (value === undefined || name === undefined) return []
         const description = typeof option['description'] === 'string' ? option['description'] : undefined
-        return [{ value, name: permissionLabel(value, name), ...(description === undefined ? {} : { description }) }]
+        return [{ value, name, ...(description === undefined ? {} : { description }) }]
       })
     }
     const current = readCurrentSelection(values)
@@ -1351,24 +1351,6 @@ export function readCurrentSelection(value: unknown): ModelChoiceView | undefine
   if (!provider || !model) return undefined
   const effort = typeof selection['reasoningEffort'] === 'string' ? selection['reasoningEffort'] : undefined
   return { provider, model, ...(effort === undefined ? {} : { reasoningEffort: effort }) }
-}
-
-/**
- * Match Harness's Chinese UI labels without defining its selectable options.
- * Source: ui-permission-presets/src/client/{presentation,locales}.ts.
- * Only the conventional built-in label is translated; configured labels pass through.
- * @param value - stable key from the catalog.
- * @param name - host-supplied display label.
- * @returns localized built-in label or the original custom name.
- */
-function permissionLabel(value: string, name: string): string {
-  const labels: Record<string, readonly [string, string]> = {
-    'read-only': ['Read Only', '仅可查看'],
-    'workspace-write': ['Workspace Write', '工作区内修改'],
-    'danger-full-access': ['Full access', '完全权限'],
-  }
-  const label = Object.hasOwn(labels, value) ? labels[value] : undefined
-  return label !== undefined && (name === value || name === label[0]) ? label[1] : name
 }
 
 /**

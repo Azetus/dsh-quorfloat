@@ -24,6 +24,7 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
+use crate::app::reason::Reason;
 use crate::app::session::FrameSink;
 use crate::ipc::protocol::error_code;
 
@@ -369,7 +370,7 @@ pub struct Follow {
     /// where the conversation the user is now in was created.
     choosing_workspace: Option<String>,
     /// Why the last creation failed, until somebody reads it.
-    create_failure: Option<String>,
+    create_failure: Option<Reason>,
     /// Whether the empty list has already been mentioned.
     said_empty: bool,
 }
@@ -411,8 +412,8 @@ impl Follow {
     ///
     /// Reading it clears it, so that one failure is reported once.
     ///
-    /// @returns the host's message, if a creation failed since this was last read.
-    pub fn take_create_failure(&mut self) -> Option<String> {
+    /// @returns the structured reason, if a creation failed since this was last read.
+    pub fn take_create_failure(&mut self) -> Option<Reason> {
         self.create_failure.take()
     }
 
@@ -422,10 +423,10 @@ impl Follow {
     /// before anything could show it. The settings page, which clears it, uses
     /// [`Follow::take_create_failure`].
     ///
-    /// @returns the host's message, if a creation failed.
+    /// @returns the structured reason, if a creation failed.
     #[must_use]
-    pub fn create_failure(&self) -> Option<&str> {
-        self.create_failure.as_deref()
+    pub fn create_failure(&self) -> Option<&Reason> {
+        self.create_failure.as_ref()
     }
 
     /// Whether the workspace list has ever been asked for.
@@ -1052,7 +1053,9 @@ impl Follow {
                 sink.log(&format!("could not create a conversation: {}", error.message));
                 // Recorded rather than only logged: a prompt is waiting behind this creation,
                 // and its sender is the only one who can tell the user why nothing was sent.
-                self.create_failure = Some(error.message.clone());
+                self.create_failure = Some(
+                    Reason::new("delivery.createFailed").with("detail", error.message.clone()),
+                );
                 None
             }
             (InFlight::Attach { session_id, label, .. }, Ok(result)) => {

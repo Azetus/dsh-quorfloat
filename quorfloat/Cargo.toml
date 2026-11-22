@@ -25,6 +25,7 @@ path = "src/lib.rs"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 
 # The shell. Pinned at >=2.12.1 because `macOSPrivateApi` is a no-op there (the
 # transparent-background API is always enabled), which this panel needs for its

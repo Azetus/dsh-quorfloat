@@ -3,6 +3,7 @@
 import { api } from '../../api'
 import { useT } from '../../hooks/useI18n'
 import { permissionIcon } from '../../logic/icons'
+import { permissionLabel } from '../../logic/permissions'
 import type { Snapshot } from '../../logic/state'
 import { MenuHeading } from './MenuHeading'
 import { MenuHint } from './MenuHint'
@@ -36,7 +37,7 @@ export function PermissionMenu({ state, onClose }: PermissionMenuProps) {
         : options.permissions.map(permission => (
           <MenuOption
             key={permission.value}
-            label={permission.name}
+            label={t(permissionLabel(permission.value, permission.name))}
             selected={options.permission === permission.value}
             description={permission.description ?? ''}
             symbol={permissionIcon(permission.value)}

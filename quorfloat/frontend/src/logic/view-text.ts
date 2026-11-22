@@ -7,6 +7,7 @@
 
 import { msg, raw, type Text } from './i18n'
 import { workspaceLabel } from './labels'
+import { reasonText } from './reasons'
 import { fieldScope, type Scope } from './scope'
 import type { Conversation, Snapshot } from './state'
 
@@ -105,15 +106,15 @@ export function sessionTitle(state: Snapshot): Text {
  * @returns the message token, or null when there is nothing to say.
  */
 export function statusText(state: Snapshot, transientError: string | null): Text | null {
-  const prompt = state.delivery.prompt.status
-  const cancel = state.delivery.cancel.status
-  if (prompt !== null && prompt !== undefined) return raw(prompt)
-  if (cancel !== null && cancel !== undefined) return raw(cancel)
-  if (state.session.settingFailure !== null) return raw(state.session.settingFailure)
-  if (state.session.createFailure !== null) return raw(state.session.createFailure)
+  const prompt = state.delivery.prompt.reason
+  const cancel = state.delivery.cancel.reason
+  if (prompt !== null) return reasonText(prompt)
+  if (cancel !== null) return reasonText(cancel)
+  if (state.session.settingFailure !== null) return reasonText(state.session.settingFailure)
+  if (state.session.createFailure !== null) return reasonText(state.session.createFailure)
   const notice = pinNoticeText(state)
   if (notice !== null) return notice
-  if (state.hotkey.reason !== null) return raw(state.hotkey.reason)
+  if (state.hotkey.reason !== null) return reasonText(state.hotkey.reason)
   return transientError === null ? null : raw(transientError)
 }
 

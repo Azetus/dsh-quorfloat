@@ -235,7 +235,7 @@ fn run() -> Result<SessionExit, String> {
         hotkey_requested: hotkey.spec().map(str::to_owned),
         hotkey_held: hotkey.held_spec().map(str::to_owned),
         hotkey_registered: hotkey.is_active(),
-        hotkey_reason: hotkey.reason().map(str::to_owned),
+        hotkey_reason: hotkey.reason().cloned(),
         preferences,
         visible: settings.start_visible,
         height: Height::new(),
@@ -269,7 +269,11 @@ fn run() -> Result<SessionExit, String> {
         session.start(&mut Borrowed(&sink));
     }
     if let Some(reason) = hotkey.reason() {
-        sink.log(&format!("global hotkey unavailable ({reason}); the panel is still reachable from the host"));
+        let detail = reason.param("detail").or_else(|| reason.param("chord")).unwrap_or("");
+        sink.log(&format!(
+            "global hotkey unavailable ({}: {detail}); the panel is still reachable from the host",
+            reason.code(),
+        ));
     }
 
     let (wake_tx, wake_rx) = channel();
@@ -1082,7 +1086,7 @@ fn set_preferences(
             view.hotkey_requested = rebound.spec().map(str::to_owned);
             view.hotkey_held = rebound.held_spec().map(str::to_owned);
             view.hotkey_registered = rebound.is_active();
-            view.hotkey_reason = rebound.reason().map(str::to_owned);
+            view.hotkey_reason = rebound.reason().cloned();
         }
         *slot = Some(rebound);
     }

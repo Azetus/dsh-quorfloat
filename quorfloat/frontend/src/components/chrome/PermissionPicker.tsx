@@ -3,6 +3,7 @@
 
 import { useT } from '../../hooks/useI18n'
 import { permissionIcon } from '../../logic/icons'
+import { permissionLabel } from '../../logic/permissions'
 import type { Snapshot } from '../../logic/state'
 import { Icon } from '../common/Icon'
 import { PickerPopover } from './PickerPopover'
@@ -33,7 +34,8 @@ export interface PermissionPickerProps {
 export function PermissionPicker({ state, open, onToggle, onClose }: PermissionPickerProps) {
   const t = useT()
   const options = state.session.options
-  const name = options?.permissions.find(p => p.value === options.permission)?.name ?? '—'
+  const selected = options?.permissions.find(p => p.value === options.permission)
+  const name = selected === undefined ? '—' : t(permissionLabel(selected.value, selected.name))
   return (
     <PickerPopover
       id="q-permission"

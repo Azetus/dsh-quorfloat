@@ -4,6 +4,11 @@
 // mirror, and the two must stay in step. Every field here exists because the
 // bridge writes it; nothing here is guessed.
 
+export interface Reason {
+  readonly code: string
+  readonly params: Readonly<Record<string, string | number>>
+}
+
 export interface Snapshot {
   settings: {
     width: number
@@ -23,7 +28,7 @@ export interface Snapshot {
     requested: string | null
     held: string | null
     registered: boolean
-    reason: string | null
+    reason: Reason | null
   }
   height: {
     target: number
@@ -70,7 +75,7 @@ export interface Snapshot {
     /** Where a conversation submitted now would be created (the ladder's answer, or null
      *  when only the user can decide). */
     createWorkspace: string | null
-    createFailure: string | null
+    createFailure: Reason | null
     conversations: Conversation[]
     workspaces: Workspace[]
     workspacesAsked: boolean
@@ -85,7 +90,7 @@ export interface Snapshot {
     defaultWorkspace: { state: 'idle' | 'done' | 'failed' }
     options: Options | null
     stats: Stats | null
-    settingFailure: string | null
+    settingFailure: Reason | null
   }
   transcript: {
     sessionId: string | null
@@ -236,7 +241,7 @@ export interface Interaction {
   kind: 'approval' | 'question'
   state: InteractionState
   verdict: 'allowed-once' | 'rejected' | null
-  refusalReason: string | null
+  refusalReason: Reason | null
   actionable: boolean
   toolName: string | null
   detail: string | null
@@ -247,5 +252,5 @@ export interface Interaction {
 
 export interface Delivery {
   state: 'idle' | 'sending' | 'accepted' | 'failed'
-  status: string | null
+  reason: Reason | null
 }

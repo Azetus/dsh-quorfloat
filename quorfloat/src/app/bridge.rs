@@ -21,13 +21,8 @@ use crate::app::session::interaction::{
 };
 use crate::app::session::transcript::{Block, Entry};
 use crate::app::session::{Delivery, FrameSink, Session, SessionOptions, Stats};
+use crate::app::reason::Reason;
 use crate::app::window_settings::WindowSettings;
-
-/// The locale the panel asks the asker's own text for.
-///
-/// Every string this file writes is Chinese; the interaction detail is requested
-/// in Chinese too and falls back to `en` (see `Interaction::detail`).
-const DISPLAY_LOCALE: &str = "zh";
 
 /// The shell-level facts the snapshot carries beside the session.
 ///
@@ -49,7 +44,7 @@ pub struct ShellView {
     /// Whether a grab is held right now.
     pub hotkey_registered: bool,
     /// Why the last attempt did not become the held one, when it did not.
-    pub hotkey_reason: Option<String>,
+    pub hotkey_reason: Option<Reason>,
     /// Whether the panel's native window is on screen right now.
     ///
     /// Owned by the dispatcher — it is the only thread that touches the window —
@@ -195,15 +190,17 @@ pub fn snapshot(session: &Session, shell: &ShellView) -> Value {
             "entries": transcript.entries().iter().map(entry_view).collect::<Vec<_>>(),
             "live": transcript.live_entry().as_ref().map(entry_view),
         },
-        "interactions": session.interactions().iter().map(interaction_view).collect::<Vec<_>>(),
+        "interactions": session.interactions().iter()
+            .map(|interaction| interaction_view(interaction, settings.language.as_str()))
+            .collect::<Vec<_>>(),
         "handoff": session.handoff().map(|handoff| json!({
             "kind": handoff.kind().as_str(),
             "reason": handoff.reason(),
             "surfaces": handoff.surfaces(),
         })),
         "delivery": {
-            "prompt": delivery_view(session.prompt_delivery()),
-            "cancel": delivery_view(session.cancel_delivery()),
+            "prompt": delivery_view(session.prompt_delivery(), "delivery.sending"),
+            "cancel": delivery_view(session.cancel_delivery(), "cancel.sending"),
         },
     })
 }
@@ -239,7 +236,11 @@ fn block_view(block: &Block) -> Value {
 /// empty while the card is pending, and it is carried for `submitting` and `applied` so
 /// the card can still show the user what they chose after the widgets are gone. The
 /// verdict fields stay approval-only, exactly as they were.
-fn interaction_view(interaction: &Interaction) -> Value {
+///
+/// @param interaction - the request to project.
+/// @param language - the panel language, used to select the asker's localized detail.
+/// @returns the card shape the frontend reads.
+fn interaction_view(interaction: &Interaction, language: &str) -> Value {
     let (state, verdict, refusal, answers) = match interaction.state() {
         InteractionState::Pending => ("pending", None, None, &[][..]),
         InteractionState::Submitting { answer } => {
@@ -250,7 +251,7 @@ fn interaction_view(interaction: &Interaction) -> Value {
             let (verdict, answers) = sent_view(answer);
             ("applied", verdict, None, answers)
         }
-        InteractionState::Refused { reason } => ("refused", None, Some(reason.as_str()), &[][..]),
+        InteractionState::Refused { reason } => ("refused", None, Some(reason), &[][..]),
     };
     json!({
         "id": interaction.id(),
@@ -261,7 +262,7 @@ fn interaction_view(interaction: &Interaction) -> Value {
         "refusalReason": refusal,
         "actionable": interaction.is_actionable(),
         "toolName": interaction.tool_name(),
-        "detail": interaction.detail(DISPLAY_LOCALE),
+        "detail": interaction.detail(language),
         "questions": interaction.questions().iter().map(question_view).collect::<Vec<_>>(),
         "answers": answers.iter().map(answer_view).collect::<Vec<_>>(),
         "questionCount": interaction.question_count(),
@@ -311,14 +312,12 @@ fn answer_view(answer: &QuestionAnswer) -> Value {
 }
 
 /// What became of an outbound request, in the frontend's vocabulary.
-fn delivery_view(delivery: &Delivery) -> Value {
+fn delivery_view(delivery: &Delivery, sending_code: &'static str) -> Value {
     match delivery {
-        Delivery::Idle => json!({ "state": "idle", "status": null }),
-        Delivery::Sending => json!({ "state": "sending", "status": "已提交，等待 Harness 确认…" }),
-        Delivery::Accepted => json!({ "state": "accepted", "status": null }),
-        Delivery::Failed { reason } => {
-            json!({ "state": "failed", "status": format!("未发送：{reason}") })
-        }
+        Delivery::Idle => json!({ "state": "idle", "reason": null }),
+        Delivery::Sending => json!({ "state": "sending", "reason": Reason::new(sending_code) }),
+        Delivery::Accepted => json!({ "state": "accepted", "reason": null }),
+        Delivery::Failed { reason } => json!({ "state": "failed", "reason": reason }),
     }
 }
 
@@ -399,7 +398,7 @@ fn theme_name(theme: crate::app::theme::Preference) -> &'static str {
 pub fn submit(session: &mut Session, sink: &mut dyn FrameSink, text: &str, workspace_id: Option<&str>) -> Value {
     let workspace_id = create_workspace(session, workspace_id);
     let delivery = session.send_prompt(text, workspace_id.as_deref(), sink);
-    json!({ "delivery": delivery_view(&delivery) })
+    json!({ "delivery": delivery_view(&delivery, "delivery.sending") })
 }
 
 /// Which workspace a new conversation is created in.
@@ -435,7 +434,7 @@ fn create_workspace(session: &Session, chosen: Option<&str>) -> Option<String> {
 #[must_use]
 pub fn cancel(session: &mut Session, sink: &mut dyn FrameSink) -> Value {
     let accepted = session.cancel_turn(sink);
-    json!({ "accepted": accepted, "delivery": delivery_view(session.cancel_delivery()) })
+    json!({ "accepted": accepted, "delivery": delivery_view(session.cancel_delivery(), "cancel.sending") })
 }
 
 /// `answer_approval` — settle one approval card.
@@ -721,7 +720,7 @@ pub fn apply_preferences(mut preferences: Preferences, incoming: &Value) -> Resu
         if ["system", "light", "dark"].iter().any(|known| known.eq_ignore_ascii_case(theme)) {
             preferences.theme = Some(crate::app::theme::Preference::from_name(Some(theme)));
         } else {
-            return Err(format!("读不懂这个主题：{theme}"));
+            return Err(format!("unknown theme: {theme}"));
         }
     }
     if let Some(keep_open) = incoming.get("keepOpen").and_then(Value::as_bool) {
@@ -738,7 +737,7 @@ pub fn apply_preferences(mut preferences: Preferences, incoming: &Value) -> Resu
         // `zh` would make the settings page look like it worked.
         match crate::app::language::Language::known(Some(language)) {
             Some(language) => preferences.language = Some(language),
-            None => return Err(format!("读不懂这个语言：{language}")),
+            None => return Err(format!("unknown language: {language}")),
         }
     }
     Ok(preferences)
@@ -761,13 +760,13 @@ pub fn apply_preferences(mut preferences: Preferences, incoming: &Value) -> Resu
 /// the same table so a one-sided edit fails the suite.
 ///
 /// @param spec - the accelerator text, in the host's spelling.
-/// @returns `Ok(())`, or a message the settings page can show.
+/// @returns `Ok(())`, or an internal diagnostic for the refused value.
 pub fn validate_hotkey(spec: &str) -> Result<(), String> {
     let Some(parsed) = crate::runtime::hotkey::parse_accelerator(spec) else {
-        return Err(format!("读不懂这个快捷键：{spec}"));
+        return Err(format!("unreadable hotkey: {spec}"));
     };
     if parsed.mods.is_empty() && !is_function_key(parsed.key) {
-        return Err("裸按键会被整个桌面占用，请加上修饰键（Ctrl / Alt / Cmd / Shift）".to_owned());
+        return Err("bare hotkey requires a modifier (Ctrl/Alt/Cmd/Shift)".to_owned());
     }
     Ok(())
 }
@@ -809,7 +808,41 @@ pub fn persisted_hotkey(
 
 #[cfg(test)]
 mod tests {
-    use super::{persisted_hotkey, validate_hotkey};
+    use super::{Delivery, Preferences, Reason, apply_preferences, delivery_view, persisted_hotkey, validate_hotkey};
+
+    #[test]
+    fn preference_refusals_are_internal_english_diagnostics() {
+        let base = Preferences::default();
+        let cases = [
+            (serde_json::json!({ "theme": "neon" }), "unknown theme"),
+            (serde_json::json!({ "language": "fr" }), "unknown language"),
+            (serde_json::json!({ "hotkey": "nonsense" }), "unreadable hotkey"),
+            (serde_json::json!({ "hotkey": "a" }), "bare hotkey requires a modifier"),
+        ];
+        for (incoming, expected) in cases {
+            let error = apply_preferences(base.clone(), &incoming).expect_err("the value is refused");
+            assert!(error.contains(expected), "expected {expected:?}, got {error:?}");
+        }
+    }
+
+    #[test]
+    fn a_failed_delivery_is_a_structured_reason_not_a_sentence() {
+        let view = delivery_view(
+            &Delivery::Failed {
+                reason: Reason::new("delivery.writeFailed").with("detail", "broken pipe"),
+            },
+            "delivery.sending",
+        );
+        assert_eq!(view["state"], "failed");
+        assert_eq!(view["reason"]["code"], "delivery.writeFailed");
+        assert_eq!(view["reason"]["params"]["detail"], "broken pipe");
+        assert!(view.get("status").is_none(), "the old sentence field is gone: {view}");
+    }
+
+    #[test]
+    fn a_sending_delivery_carries_the_code_for_its_own_kind() {
+        assert_eq!(delivery_view(&Delivery::Sending, "cancel.sending")["reason"]["code"], "cancel.sending");
+    }
 
     /// Bare editing and navigation keys are the ones the letter/digit blacklist missed.
     #[test]

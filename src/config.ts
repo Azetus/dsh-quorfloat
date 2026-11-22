@@ -190,7 +190,7 @@ const SPEC = {
   heartbeatMs: { kind: 'int', def: 5000, min: 0, max: 60000 },
   heartbeatMissLimit: { kind: 'int', def: 3, min: 1, max: 30 },
   claimDeadlineMs: { kind: 'int', def: 600000, min: 1000, max: 3600000 },
-  maxWriteBufferBytes: { kind: 'int', def: 4194304, min: 65536, max: 268435456 },
+  maxWriteBufferBytes: { kind: 'int', def: 16777216, min: 65536, max: 268435456 },
   maxStderrLines: { kind: 'int', def: 200, min: 0, max: 100000 },
   presenceMaxAgeMs: { kind: 'int', def: 30000, min: 1000, max: 600000 },
   shutdownGraceMs: { kind: 'int', def: 1500, min: 100, max: 10000 },
